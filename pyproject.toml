@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neuralclaw"
+version = "0.5.3"
+description = "The Self-Evolving Cognitive Agent Framework"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.12"
+authors = [
+    {name = "Mirac", email = "mirac@cardify.dev"},
+]
+keywords = [
+    "ai", "agent", "cognitive", "autonomous", "llm",
+    "self-evolving", "multi-channel", "framework",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "click>=8.1",
+    "rich>=13.0",
+    "toml>=0.10",
+    "aiohttp>=3.9",
+    "aiosqlite>=0.19",
+    "keyring>=25.0",
+    "python-telegram-bot>=21.0",
+    "discord.py>=2.3",
+    "slack-bolt>=1.18",
+    "qrcode>=7.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3",
+]
+
+[project.urls]
+Homepage = "https://github.com/placeparks/neuralclaw"
+Repository = "https://github.com/placeparks/neuralclaw"
+Issues = "https://github.com/placeparks/neuralclaw/issues"
+Documentation = "https://github.com/placeparks/neuralclaw/tree/main/docs"
+
+[project.scripts]
+neuralclaw = "neuralclaw.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["neuralclaw*"]
+
+[tool.setuptools.package-data]
+neuralclaw = ["py.typed"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

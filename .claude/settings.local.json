@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(1\\)\\\\clawnick-main\" -type f -name \"*.py\")",
+      "Bash(ls -la \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(1\\)\\\\clawnick-main\")",
+      "Bash(find \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(1\\)\\\\clawnick-main\" -type f)",
+      "Bash(ls -la \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(1\\)\\\\clawnick-main\\\\neuralclaw\")",
+      "Bash(find \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(1\\)\\\\clawnick-main\" -type d)",
+      "Bash(pip install -e \".[dev]\")",
+      "Bash(python -m pytest tests/test_toolcall_and_baileys.py -v)",
+      "Bash(python -m pytest -v)",
+      "Bash(python -m build)",
+      "Bash(ls -la \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(1\\)\\\\clawnick-main\\\\dist/\")",
+      "Bash(python -c \"import zipfile; z=zipfile.ZipFile\\(r''C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(1\\)\\\\clawnick-main\\\\dist\\\\neuralclaw-0.4.8-py3-none-any.whl''\\); [print\\(n\\) for n in sorted\\(z.namelist\\(\\)\\) if ''py.typed'' in n or ''baileys'' in n or ''whatsapp'' in n]\")",
+      "Bash(head -50 \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(1\\)\\\\clawnick-main\\\\neuralclaw\\\\providers\\\\__init__.py\")",
+      "Bash(find \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(1\\)\\\\clawnick-main\" -type f -name \"__init__.py\")",
+      "Bash(find \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(1\\)\\\\clawnick-main\" -maxdepth 2 -type f \\\\\\( -name \"README*\" -o -name \"SETUP*\" -o -name \"*.md\" \\\\\\))",
+      "Bash(find \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(1\\)\\\\clawnick-main\\\\neuralclaw\" -type f -name \"*.py\")",
+      "Bash(find \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(1\\)\\\\clawnick-main\" -name \"requirements*.txt\" -o -name \"pyproject.toml\" -o -name \"setup.py\")",
+      "Bash(ls -la \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(1\\)\\\\clawnick-main\\\\neuralclaw\\\\cortex\")",
+      "Bash(ls \"C:/Users/Lenovo/Downloads/clawnick-main \\(1\\)/clawnick-main\")",
+      "Bash(find \"C:/Users/Lenovo/Downloads/clawnick-main \\(1\\)/clawnick-main\" -type f -name \"*.py\")",
+      "Bash(find \"C:/Users/Lenovo/Downloads/clawnick-main \\(1\\)/clawnick-main\" -name \"*.toml\" -o -name \"*.cfg\" -o -name \"*.ini\" -o -name \"setup.py\" -o -name \"requirements*.txt\")",
+      "Bash(python -c \"import zipfile; whl = ''dist/neuralclaw-0.5.0-py3-none-any.whl''; z = zipfile.ZipFile\\(whl\\); names = z.namelist\\(\\); print\\(''=== g4f files \\(should be empty\\) ===''\\); [print\\(n\\) for n in names if ''g4f'' in n]; print\\(\\); print\\(''=== New files ===''\\); [print\\(n\\) for n in names if any\\(k in n for k in [''proxy'', ''health'', ''py.typed'']\\)]\")",
+      "Bash(pip install \"qrcode>=7.4\")",
+      "Bash(pip show qrcode)",
+      "Bash(python -c \"import zipfile; z = zipfile.ZipFile\\(''dist/neuralclaw-0.5.1-py3-none-any.whl''\\); names = z.namelist\\(\\); print\\(''=== Key files ===''\\); [print\\(n\\) for n in names if any\\(k in n for k in [''proxy'', ''health'', ''whatsapp_baileys'', ''py.typed'']\\)]\")",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(node -e \"console.log\\(require\\(''C:/Users/Lenovo/.neuralclaw/bridge/node_modules/@whiskeysockets/baileys/package.json''\\).version\\)\")",
+      "Bash(node --version)"
+    ]
+  }
+}
