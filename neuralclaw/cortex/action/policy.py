@@ -202,8 +202,8 @@ class PolicyEngine:
                     reason=f"request_timeout:{request_ctx.elapsed_seconds:.1f}s/{self._config.max_request_wall_seconds}s",
                 )
 
-        # Shell execution check
-        if tool_name in ("code_exec", "shell_exec") and self._config.deny_shell_execution:
+        # Shell execution check (includes repo execution tools)
+        if tool_name in ("code_exec", "shell_exec", "run_repo_script", "run_repo_command") and self._config.deny_shell_execution:
             return PolicyResult(
                 allowed=False,
                 tool_name=tool_name,
@@ -223,7 +223,7 @@ class PolicyEngine:
                 )
 
         # Network tools: validate URL (static check here; DNS check should be done by caller via check_url_async)
-        if tool_name in ("fetch_url",) and self._config.deny_private_networks:
+        if tool_name in ("fetch_url", "clone_repo", "api_request") and self._config.deny_private_networks:
             url = args.get("url", "")
             if url:
                 static = validate_url(url)

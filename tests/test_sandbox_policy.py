@@ -49,18 +49,57 @@ def test_policy_engine_tool_limit():
     config = PolicyConfig(max_tool_calls_per_request=2)
     engine = PolicyEngine(config)
     ctx = RequestContext()
-    
+
     # 1. Allowed
     res1 = engine.check_tool_call("any_tool", {}, ctx)
     assert res1.allowed
     assert ctx.tool_calls == 1
-    
+
     # 2. Allowed
     res2 = engine.check_tool_call("any_tool", {}, ctx)
     assert res2.allowed
     assert ctx.tool_calls == 2
-    
+
     # 3. Denied
     res3 = engine.check_tool_call("any_tool", {}, ctx)
     assert not res3.allowed
     assert "limit" in res3.reason
+
+
+# ---------------------------------------------------------------------------
+# Policy tests for new tools (0.6.0 — github_repos, repo_exec, api_client)
+# ---------------------------------------------------------------------------
+
+
+def test_policy_shell_exec_blocks_run_repo_script():
+    """run_repo_script is gated by deny_shell_execution."""
+    config = PolicyConfig(deny_shell_execution=True)
+    engine = PolicyEngine(config)
+    result = engine.check_tool_call("run_repo_script", {"repo_name": "foo", "script_path": "main.py"})
+    assert not result.allowed
+    assert "shell" in result.reason
+
+
+def test_policy_shell_exec_blocks_run_repo_command():
+    """run_repo_command is gated by deny_shell_execution."""
+    config = PolicyConfig(deny_shell_execution=True)
+    engine = PolicyEngine(config)
+    result = engine.check_tool_call("run_repo_command", {"repo_name": "foo", "command": "python test.py"})
+    assert not result.allowed
+    assert "shell" in result.reason
+
+
+def test_policy_clone_repo_ssrf_blocks_private():
+    """clone_repo with a private-network URL is blocked."""
+    config = PolicyConfig(deny_private_networks=True)
+    engine = PolicyEngine(config)
+    result = engine.check_tool_call("clone_repo", {"url": "http://192.168.1.1/repo"})
+    assert not result.allowed
+
+
+def test_policy_api_request_ssrf_blocks_localhost():
+    """api_request targeting localhost is blocked."""
+    config = PolicyConfig(deny_private_networks=True)
+    engine = PolicyEngine(config)
+    result = engine.check_tool_call("api_request", {"url": "http://localhost:8080/api"})
+    assert not result.allowed

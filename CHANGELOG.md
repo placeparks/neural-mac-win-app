@@ -2,6 +2,90 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
+## [0.6.0] - 2026-03-11
+
+### Added
+- **GitHub Repository Management** (`github_repos` skill): Clone repos from
+  GitHub/GitLab/Bitbucket, auto-detect and install dependencies (Python venvs,
+  Node.js node_modules, Rust Cargo, Go modules), list and remove managed repos.
+  All repos stored in `~/.neuralclaw/workspace/repos/`.
+- **Repository Execution** (`repo_exec` skill): Run scripts and commands from
+  cloned repos in sandboxed environments with proper dependency resolution.
+  Detects runtime from file extension (.py/.js/.sh/.ts), injects venv/NODE_PATH
+  automatically. Command allowlist blocks dangerous executables.
+- **API Client** (`api_client` skill): Make authenticated HTTP requests with
+  SSRF protection. Supports Bearer, API-key-header, API-key-query, and Basic
+  auth types. Save and reuse API configurations with keychain-stored keys.
+- **New Capabilities**: `GITHUB_CLONE` and `API_CLIENT` in the capability model
+  with scoped grants for the three new skills.
+- **Config sections**: `[workspace]` for repo management settings (clone/install
+  timeouts, allowed git hosts, max repo size), `[apis]` for saved API configs.
+- **Sandbox enhancement**: `extra_env` parameter on `execute_command()` for
+  injecting environment variables (VIRTUAL_ENV, NODE_PATH) into subprocess.
+- **88 new tests**: 13 for github_repos (URL validation, name sanitization,
+  dep detection, path traversal), 27 for repo_exec (command validation, env
+  building, security blocking), 17 for api_client (SSRF, auth injection,
+  keychain storage), 4 for policy engine (new tool coverage).
+
+### Security
+- Git clone restricted to HTTPS + allowed hosts only (github.com, gitlab.com,
+  bitbucket.org by default). Embedded credentials blocked.
+- All API requests go through SSRF validation with DNS rebinding defense.
+  Redirect URLs validated before following.
+- Script execution gated by `deny_shell_execution` policy (default: deny).
+  Users must explicitly opt in via config.
+- API keys stored in OS keychain, never in config.toml plaintext. Redacted
+  from audit logs.
+- Command allowlist for repo execution blocks `rm`, `sudo`, `curl`, `wget`,
+  `nc`, `ssh`, pipe-to-shell, and other dangerous patterns.
+
+### Changed
+- Policy engine now validates `clone_repo`, `api_request`, `run_repo_script`,
+  and `run_repo_command` tool calls with appropriate SSRF and shell-execution
+  checks.
+- Default `allowed_tools` list expanded with 9 new tools.
+- Default `allowed_filesystem_roots` includes `~/.neuralclaw/workspace/repos`.
+- Deliberative reasoner DNS-rebinding check extended to `clone_repo` and
+  `api_request` (was only `fetch_url`).
+
+## [0.5.3] - 2026-03-10
+
+### Fixed
+- **WhatsApp 405 reconnect loop**: Bridge script now retries up to 5 times
+  with exponential backoff instead of looping infinitely. Emits `fatal` event
+  when retries exhausted and exits cleanly.
+
+## [0.5.2] - 2026-03-10
+
+### Added
+- **Auto-install npm dependencies**: `ensure_baileys_installed()` automatically
+  installs `@whiskeysockets/baileys` and `@hapi/boom` into managed
+  `~/.neuralclaw/bridge/` directory on first WhatsApp use. Users no longer
+  need to manually run `npm install`.
+
+## [0.5.1] - 2026-03-09
+
+### Added
+- **Proxy setup wizard** (`neuralclaw proxy setup`): Interactive guided
+  configuration for reverse proxy providers with connectivity test.
+- **WhatsApp QR connection** (`neuralclaw channels connect whatsapp`): QR code
+  rendered in terminal for phone pairing.
+- **`update_config()` helper**: Programmatic deep-merge updates to config.toml.
+
+## [0.5.0] - 2026-03-08
+
+### Added
+- **WhatsApp Baileys adapter**: QR-based WhatsApp connection using Node.js bridge.
+- **Signal adapter** placeholder.
+- **`qrcode` dependency** for terminal QR rendering.
+
+## [0.4.8] - 2026-03-07
+
+### Added
+- **Proxy provider** (`ProxyProvider`): Route through OpenAI-compatible reverse
+  proxies (ChatGPT-to-API, one-api, LiteLLM, LobeChat).
+- **Circuit breaker** improvements.
+
 ## [0.4.7] - 2026-02-26
 
 ### Added

@@ -282,7 +282,7 @@ class DeliberativeReasoner:
                 return {"error": f"Denied by policy: {pol.reason}", "details": pol.details}
 
             # DNS-rebinding resistant validation for fetch-like tools
-            if tool_name == "fetch_url" and self._policy.config.deny_private_networks:
+            if tool_name in ("fetch_url", "clone_repo", "api_request") and self._policy.config.deny_private_networks:
                 url = str(tool_args.get("url", ""))
                 if url:
                     url_pol = await self._policy.check_url_async(url)

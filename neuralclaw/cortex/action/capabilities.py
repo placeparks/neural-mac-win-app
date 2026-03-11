@@ -33,6 +33,8 @@ class Capability(Enum):
     CALENDAR_WRITE = auto()
     MEMORY_READ = auto()
     MEMORY_WRITE = auto()
+    GITHUB_CLONE = auto()     # Permission to clone git repositories
+    API_CLIENT = auto()       # Permission to make authenticated API requests
 
 
 @dataclass
@@ -99,6 +101,20 @@ class CapabilityVerifier:
                 CapabilityGrant(Capability.CALENDAR_WRITE, scope="*"),
                 CapabilityGrant(Capability.MEMORY_READ, scope="*"),
                 CapabilityGrant(Capability.MEMORY_WRITE, scope="*"),
+            ],
+            "github_repos": [
+                CapabilityGrant(Capability.GITHUB_CLONE, scope="*"),
+                CapabilityGrant(Capability.NETWORK_HTTP, scope="github.com,gitlab.com,bitbucket.org"),
+                CapabilityGrant(Capability.FILESYSTEM_WRITE, scope="~/.neuralclaw/workspace/repos"),
+                CapabilityGrant(Capability.SHELL_EXECUTE, scope="git,pip,npm,cargo,go"),
+            ],
+            "repo_exec": [
+                CapabilityGrant(Capability.SHELL_EXECUTE, scope="~/.neuralclaw/workspace/repos"),
+                CapabilityGrant(Capability.FILESYSTEM_READ, scope="~/.neuralclaw/workspace/repos"),
+            ],
+            "api_client": [
+                CapabilityGrant(Capability.API_CLIENT, scope="*"),
+                CapabilityGrant(Capability.NETWORK_HTTP, scope="*"),
             ],
         }
 

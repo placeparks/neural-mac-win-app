@@ -96,13 +96,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "create_event",
             "list_events",
             "delete_event",
+            # GitHub repo management
+            "clone_repo",
+            "install_repo_deps",
+            "list_repos",
+            "remove_repo",
+            # Repo execution
+            "run_repo_script",
+            "run_repo_command",
+            # API client
+            "api_request",
+            "save_api_config",
+            "list_api_configs",
         ],
         "mutating_tools": [
             "write_file",
             "create_event",
             "delete_event",
+            "clone_repo",
+            "install_repo_deps",
+            "remove_repo",
+            "save_api_config",
         ],
-        "allowed_filesystem_roots": ["~/workspace"],
+        "allowed_filesystem_roots": ["~/workspace", "~/.neuralclaw/workspace/repos"],
         "deny_private_networks": True,
         "deny_shell_execution": True,
     },
@@ -114,6 +130,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "heartbeat_interval": 60,
         "node_name": "",
     },
+    "workspace": {
+        "repos_dir": "~/.neuralclaw/workspace/repos",
+        "max_repo_size_mb": 500,
+        "allowed_git_hosts": ["github.com", "gitlab.com", "bitbucket.org"],
+        "max_clone_timeout_seconds": 120,
+        "max_install_timeout_seconds": 300,
+        "max_exec_timeout_seconds": 300,
+    },
+    "apis": {},  # User-saved API configs: [apis.myapi] = {base_url = "...", auth_type = "bearer"}
     "channels": {
         "telegram": {"enabled": False},
         "discord": {"enabled": False},
@@ -300,6 +325,17 @@ class FeaturesConfig:
 
 
 @dataclass
+class WorkspaceConfig:
+    """Workspace settings for GitHub repo management and script execution."""
+    repos_dir: str = "~/.neuralclaw/workspace/repos"
+    max_repo_size_mb: int = 500
+    allowed_git_hosts: list[str] = field(default_factory=lambda: ["github.com", "gitlab.com", "bitbucket.org"])
+    max_clone_timeout_seconds: int = 120
+    max_install_timeout_seconds: int = 300
+    max_exec_timeout_seconds: int = 300
+
+
+@dataclass
 class ChannelConfig:
     name: str
     enabled: bool = False
@@ -322,6 +358,8 @@ class NeuralClawConfig:
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     federation: FederationConfig = field(default_factory=FederationConfig)
+    workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
+    apis: dict[str, dict[str, Any]] = field(default_factory=dict)
     channels: list[ChannelConfig] = field(default_factory=list)
     dashboard_port: int = 8080
 
@@ -360,6 +398,8 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
     pol_section = merged.get("policy", {})
     feat_section = merged.get("features", {})
     fed_section = merged.get("federation", {})
+    ws_section = merged.get("workspace", {})
+    apis_section = merged.get("apis", {})
     chan_section = merged.get("channels", {})
 
     # Build provider configs
@@ -432,6 +472,8 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
         policy=PolicyConfig(**_filter_fields(PolicyConfig, pol_section)),
         features=FeaturesConfig(**_filter_fields(FeaturesConfig, feat_section)) if feat_section else FeaturesConfig(),
         federation=FederationConfig(**_filter_fields(FederationConfig, fed_section)) if fed_section else FederationConfig(),
+        workspace=WorkspaceConfig(**_filter_fields(WorkspaceConfig, ws_section)) if ws_section else WorkspaceConfig(),
+        apis=apis_section if isinstance(apis_section, dict) else {},
         channels=channels,
         _raw=merged,
     )

@@ -27,7 +27,16 @@
       "Bash(python -c \"import zipfile; z = zipfile.ZipFile\\(''dist/neuralclaw-0.5.1-py3-none-any.whl''\\); names = z.namelist\\(\\); print\\(''=== Key files ===''\\); [print\\(n\\) for n in names if any\\(k in n for k in [''proxy'', ''health'', ''whatsapp_baileys'', ''py.typed'']\\)]\")",
       "Bash(python -m pytest tests/ -v)",
       "Bash(node -e \"console.log\\(require\\(''C:/Users/Lenovo/.neuralclaw/bridge/node_modules/@whiskeysockets/baileys/package.json''\\).version\\)\")",
-      "Bash(node --version)"
+      "Bash(node --version)",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(1\\)/clawnick-main/\")",
+      "Bash(find \"/c/Users/Lenovo/Downloads/clawnick-main \\(1\\)/clawnick-main\" -type d -name \"neuralclaw\")",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(1\\)/clawnick-main/neuralclaw/\")",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(1\\)/clawnick-main/neuralclaw/swarm/\")",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(1\\)/clawnick-main/neuralclaw/channels/\")",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(1\\)/clawnick-main/neuralclaw/skills/\")",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(1\\)/clawnick-main/neuralclaw/skills/builtins/\")",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(1\\)/clawnick-main/dist/\")"
     ]
   }
 }

@@ -221,6 +221,95 @@ This will:
 
 ---
 
+## Agent Skills — GitHub Repos, Script Execution & API Client
+
+NeuralClaw agents can clone GitHub repos, install their dependencies, run scripts,
+and make authenticated API calls — all through natural language on any channel.
+
+### GitHub Repository Management
+
+The agent can clone, install, list, and remove repos when asked by a user:
+
+| Tool | Description |
+|------|-------------|
+| `clone_repo` | Clone a GitHub/GitLab/Bitbucket repo (HTTPS, shallow clone) |
+| `install_repo_deps` | Auto-detect and install dependencies (Python venv, npm, Cargo, Go) |
+| `list_repos` | List all managed repos with dependency status |
+| `remove_repo` | Remove a cloned repo |
+
+**Example conversation:**
+> **User:** Clone https://github.com/pallets/flask and install its deps
+> **Agent:** Cloned flask into ~/.neuralclaw/workspace/repos/pallets_flask.
+> Detected requirements.txt — installing Python dependencies in a virtual environment...
+> Dependencies installed successfully.
+
+**Security:**
+- Only HTTPS URLs from allowed hosts (github.com, gitlab.com, bitbucket.org)
+- Shallow clones (`--depth 1`) by default
+- No embedded credentials in URLs
+- All repos stored in `~/.neuralclaw/workspace/repos/`
+
+### Script Execution
+
+| Tool | Description |
+|------|-------------|
+| `run_repo_script` | Run a script (.py/.js/.sh/.ts) with auto-detected runtime |
+| `run_repo_command` | Run a command in a repo's environment (allowlisted executables) |
+
+**Example:**
+> **User:** Run the tests in the flask repo
+> **Agent:** Running `python -m pytest` in pallets_flask... [output]
+
+**Security:**
+- Gated by `deny_shell_execution` policy (default: **denied**)
+- To enable: set `deny_shell_execution = false` in `~/.neuralclaw/config.toml`
+- Command allowlist: `python`, `node`, `npm`, `cargo`, `go`, `bash`, `pip`, `pytest`, `make`
+- Blocked: `rm -rf`, `sudo`, `curl`, `wget`, `nc`, `ssh`, pipe-to-shell
+- Timeout enforcement (default 60s, max 300s)
+
+### API Client
+
+| Tool | Description |
+|------|-------------|
+| `api_request` | Make an authenticated HTTP request (GET/POST/PUT/DELETE/PATCH) |
+| `save_api_config` | Save an API config with keychain-stored credentials |
+| `list_api_configs` | List saved API configs (keys never shown) |
+
+**Auth types:** `bearer`, `api_key_header`, `api_key_query`, `basic`
+
+**Example:**
+> **User:** Save my OpenWeather API with key abc123, then get the weather in London
+> **Agent:** Saved API config 'openweather'. Making request...
+> Current weather in London: 12C, partly cloudy.
+
+**Security:**
+- All requests validated against SSRF policy (private IPs, cloud metadata blocked)
+- API keys stored in OS keychain, never in config.toml
+- Response bodies capped at 50,000 characters
+
+### Config Reference
+
+```toml
+# ~/.neuralclaw/config.toml
+
+[workspace]
+repos_dir = "~/.neuralclaw/workspace/repos"
+max_repo_size_mb = 500
+allowed_git_hosts = ["github.com", "gitlab.com", "bitbucket.org"]
+max_clone_timeout_seconds = 120
+max_install_timeout_seconds = 300
+max_exec_timeout_seconds = 300
+
+[policy]
+# Must set to false to enable script execution
+deny_shell_execution = false
+
+# New tools are included in the default allowed_tools list
+# You can restrict by removing specific tools
+```
+
+---
+
 ## Doctor & Repair
 
 ```bash
@@ -632,7 +721,7 @@ set_api_key("telegram", "BOT_TOKEN")     # Store in keychain
 # Install dev dependencies
 pip install -e ".[dev]"
 
-# Run full test suite (181 tests)
+# Run full test suite (269 tests)
 python -m pytest tests/ -v
 
 # Run specific test modules
@@ -647,6 +736,9 @@ python -m pytest tests/test_proxy_setup.py -v
 python -m pytest tests/test_health.py -v
 python -m pytest tests/test_config_validation.py -v
 python -m pytest tests/test_toolcall_and_baileys.py -v
+python -m pytest tests/test_github_repos.py -v
+python -m pytest tests/test_repo_exec.py -v
+python -m pytest tests/test_api_client.py -v
 
 # Run with coverage
 python -m pytest tests/ --cov=neuralclaw --cov-report=term-missing

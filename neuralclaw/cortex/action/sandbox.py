@@ -214,8 +214,17 @@ class Sandbox:
         self,
         command: list[str],
         working_dir: str | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> SandboxResult:
-        """Execute a shell command in an isolated subprocess."""
+        """Execute a shell command in an isolated subprocess.
+
+        Args:
+            command:     Command tokens to execute.
+            working_dir: Working directory (validated against allowlist).
+            extra_env:   Additional environment variables to inject (e.g.
+                         VIRTUAL_ENV, NODE_PATH). Merged on top of the
+                         clean base environment.
+        """
         import time as _time
 
         # Validate working directory against allowlist
@@ -230,6 +239,8 @@ class Sandbox:
             )
 
         clean_env = self._build_clean_env()
+        if extra_env:
+            clean_env.update(extra_env)
 
         start = _time.time()
 

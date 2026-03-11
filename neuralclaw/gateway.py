@@ -204,6 +204,30 @@ class NeuralClawGateway:
         except Exception:
             pass
 
+        # Configure github_repos skill with workspace settings
+        try:
+            from neuralclaw.skills.builtins import github_repos as _github_repos
+
+            _github_repos.set_workspace_config(self._config.workspace)
+        except Exception:
+            pass
+
+        # Configure repo_exec skill with workspace timeout
+        try:
+            from neuralclaw.skills.builtins import repo_exec as _repo_exec
+
+            _repo_exec.set_max_exec_timeout(self._config.workspace.max_exec_timeout_seconds)
+        except Exception:
+            pass
+
+        # Configure api_client skill with saved API configs
+        try:
+            from neuralclaw.skills.builtins import api_client as _api_client
+
+            _api_client.set_api_configs(self._config.apis)
+        except Exception:
+            pass
+
         # Initialize LLM provider
         self._provider = self._build_provider()
         if self._provider:
