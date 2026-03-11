@@ -1,6 +1,6 @@
 # NeuralClaw Documentation
 
-Version: `0.7.5`
+Version: `0.7.7`
 
 Core docs for the current repository state:
 

@@ -8,6 +8,8 @@ and unified token management with secure keyring storage.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import secrets
 import socket
@@ -95,9 +97,9 @@ class TokenStore:
 # ---------------------------------------------------------------------------
 
 # OpenAI OAuth constants (public client — no client_secret needed)
-_OPENAI_AUTH_URL = "https://auth0.openai.com/authorize"
-_OPENAI_TOKEN_URL = "https://auth0.openai.com/oauth/token"
-_OPENAI_CLIENT_ID = "pdlLIX2Y72MIl2rhLhTE9VV9bN905kBh"  # Public web client
+_OPENAI_AUTH_URL = "https://auth.openai.com/oauth/authorize"
+_OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token"
+_OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"  # ChatGPT application client ID
 _OPENAI_AUDIENCE = "https://api.openai.com/v1"
 _OPENAI_SCOPE = "openid email profile offline_access"
 
@@ -125,115 +127,162 @@ def _find_free_port() -> int:
 class ChatGPTAuthFlow:
     """Handles ChatGPT token acquisition from managed browser profiles."""
 
-    def oauth_flow(self, timeout: int = 120) -> TokenCredential:
-        """Run OAuth 2.0 authorization code flow with local callback server."""
-        port = _find_free_port()
-        redirect_uri = f"http://localhost:{port}/callback"
+    async def oauth_flow(self, timeout: int = 120, stealth: bool = False) -> TokenCredential:
+        """Run OAuth 2.0 authorization code flow with local callback server or manual URI pasting."""
+        # For the new OpenAI client, redirect URI is strictly validated to port 1455
+        port = 1455
+        redirect_uri = f"http://localhost:{port}/auth/callback"
+        
+        # Generator PKCE verifier and challenge
+        verifier = secrets.token_urlsafe(32)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode('utf-8')).digest()).decode('utf-8').rstrip('=')
         state = secrets.token_urlsafe(32)
 
         result: dict[str, Any] = {}
         error: str = ""
 
-        class CallbackHandler(BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
-                nonlocal result, error
-                parsed = urlparse(self.path)
-                params = parse_qs(parsed.query)
-
-                if parsed.path != "/callback":
-                    self.send_response(404)
-                    self.end_headers()
-                    return
-
-                received_state = params.get("state", [""])[0]
-                if received_state != state:
-                    error = "OAuth state mismatch — possible CSRF attack"
-                    self._respond("Authentication failed: state mismatch.")
-                    return
-
-                if "error" in params:
-                    error = params["error"][0]
-                    self._respond(f"Authentication failed: {error}")
-                    return
-
-                code = params.get("code", [""])[0]
-                if not code:
-                    error = "No authorization code received"
-                    self._respond("Authentication failed: no code.")
-                    return
-
-                result["code"] = code
-                self._respond(
-                    "Authentication successful! You can close this tab and "
-                    "return to the terminal."
-                )
-
-            def _respond(self, message: str) -> None:
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.end_headers()
-                body = (
-                    f"<html><body style='font-family:sans-serif;text-align:center;"
-                    f"padding:60px'><h2>{message}</h2></body></html>"
-                )
-                self.wfile.write(body.encode())
-
-            def log_message(self, *_args: Any) -> None:
-                pass  # Suppress server logs
-
-        server = HTTPServer(("127.0.0.1", port), CallbackHandler)
-        server.timeout = timeout
-
+        # Construct authorization URL
         auth_params = urlencode({
             "response_type": "code",
             "client_id": _OPENAI_CLIENT_ID,
             "redirect_uri": redirect_uri,
             "scope": _OPENAI_SCOPE,
-            "audience": _OPENAI_AUDIENCE,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
             "state": state,
+            "id_token_add_organizations": "true",
+            "codex_cli_simplified_flow": "true",
+            "originator": "pi"
         })
         auth_url = f"{_OPENAI_AUTH_URL}?{auth_params}"
 
-        webbrowser.open(auth_url)
+        if stealth:
+            # Stealth mode: output the URL and ask the user to paste the callback URL
+            print(f"\n[Stealth OAuth] Please open this URL in your browser to authorize:\n\n{auth_url}\n")
+            print("After signing in, you will be redirected to a failing localhost URL.")
+            print("Copy that entire URL from your browser's address bar and paste it below.")
+            
+            # Use to_thread to get the redirected URL from the user non-blockingly
+            try:
+                pasted_url = await asyncio.to_thread(input, "\nPaste the redirect URL here: ")
+                pasted_url = pasted_url.strip()
+            except (EOFError, KeyboardInterrupt):
+                raise RuntimeError("OAuth flow cancelled by user.")
 
-        # Wait for callback in a thread
-        thread = Thread(target=server.handle_request, daemon=True)
-        thread.start()
-        thread.join(timeout=timeout)
-        server.server_close()
+            if not pasted_url:
+                raise RuntimeError("No URL provided.")
 
-        if error:
-            raise RuntimeError(f"OAuth flow failed: {error}")
-        if "code" not in result:
-            raise RuntimeError("OAuth flow timed out — no callback received")
+            parsed = urlparse(pasted_url)
+            params = parse_qs(parsed.query)
+
+            received_state = params.get("state", [""])[0]
+            if received_state != state:
+                raise RuntimeError("OAuth flow failed: OAuth state mismatch — possible CSRF attack")
+
+            if "error" in params:
+                error = params["error"][0]
+                raise RuntimeError(f"OAuth flow failed: {error}")
+
+            code = params.get("code", [""])[0]
+            if not code:
+                raise RuntimeError("OAuth flow failed: No authorization code found in the provided URL")
+
+            result["code"] = code
+
+        else:
+            # Traditional flow: run local HTTP server and open browser automatically
+            class CallbackHandler(BaseHTTPRequestHandler):
+                def do_GET(self) -> None:
+                    nonlocal result, error
+                    parsed = urlparse(self.path)
+                    params = parse_qs(parsed.query)
+
+                    if parsed.path != "/auth/callback":
+                        self.send_response(404)
+                        self.end_headers()
+                        return
+
+                    received_state = params.get("state", [""])[0]
+                    if received_state != state:
+                        error = "OAuth state mismatch — possible CSRF attack"
+                        self._respond("Authentication failed: state mismatch.")
+                        return
+
+                    if "error" in params:
+                        error = params["error"][0]
+                        self._respond(f"Authentication failed: {error}")
+                        return
+
+                    code = params.get("code", [""])[0]
+                    if not code:
+                        error = "No authorization code received"
+                        self._respond("Authentication failed: no code.")
+                        return
+
+                    result["code"] = code
+                    self._respond(
+                        "Authentication successful! You can close this tab and "
+                        "return to the terminal."
+                    )
+
+                def _respond(self, message: str) -> None:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    body = (
+                        f"<html><body style='font-family:sans-serif;text-align:center;"
+                        f"padding:60px'><h2>{message}</h2></body></html>"
+                    )
+                    self.wfile.write(body.encode())
+
+                def log_message(self, *_args: Any) -> None:
+                    pass  # Suppress server logs
+
+            server = HTTPServer(("127.0.0.1", port), CallbackHandler)
+            server.timeout = timeout
+
+            webbrowser.open(auth_url)
+
+            # Wait for callback in a thread non-blockingly
+            thread = Thread(target=server.handle_request, daemon=True)
+            thread.start()
+            
+            start_time = time.time()
+            while thread.is_alive() and time.time() - start_time < timeout:
+                await asyncio.sleep(0.5)
+                
+            server.server_close()
+
+            if error:
+                raise RuntimeError(f"OAuth flow failed: {error}")
+            if "code" not in result:
+                raise RuntimeError("OAuth flow timed out — no callback received")
 
         # Exchange code for tokens
-        return self._exchange_code(result["code"], redirect_uri)
+        return await self._exchange_code(result["code"], redirect_uri, verifier)
 
-    def _exchange_code(self, code: str, redirect_uri: str) -> TokenCredential:
+    async def _exchange_code(self, code: str, redirect_uri: str, verifier: str) -> TokenCredential:
         """Exchange authorization code for access + refresh tokens."""
         token_data = {
             "grant_type": "authorization_code",
             "client_id": _OPENAI_CLIENT_ID,
             "code": code,
+            "code_verifier": verifier,
             "redirect_uri": redirect_uri,
         }
 
-        async def _fetch() -> dict[str, Any]:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    _OPENAI_TOKEN_URL,
-                    json=token_data,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    if resp.status != 200:
-                        body = await resp.text()
-                        raise RuntimeError(
-                            f"Token exchange failed ({resp.status}): {body}"
-                        )
-                    return await resp.json()
-
-        data = _run_coro_sync(_fetch())
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                _OPENAI_TOKEN_URL,
+                data=token_data,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"Token exchange failed ({resp.status}): {body}"
+                    )
+                data = await resp.json()
 
         expires_in = data.get("expires_in", 3600)
         return TokenCredential(
@@ -258,7 +307,7 @@ class ChatGPTAuthFlow:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 _OPENAI_TOKEN_URL,
-                json=token_data,
+                data=token_data,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status != 200:

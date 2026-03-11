@@ -2,6 +2,16 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
+## [0.7.7] - 2026-03-12
+
+### Added
+- **Stealth OAuth**: `neuralclaw session auth chatgpt --stealth` allows users in headless environments to manually copy-paste the URL and redirect link instead of failing on local browser execution.
+- **Claude Stealth Auth**: `neuralclaw session auth claude --stealth` allows users to quickly paste their extracted Anthropico cookie without requiring a full Playwright profile.
+- **Async Event Loop Fix**: Fully refactored the OAuth token callback process into native `async/await` coroutines, removing buggy `sync-to-async` event loop deadlocks.
+
+### Fixed
+- **OpenAI Auth Error**: Fixed 404 page for ChatGPT session extraction by upgrading our internal Auth client to the newest upstream client ID (`app_EMoamEEZ73f0CkXaXp7hrann`) and correctly implementing PKCE and `auth.openai.com/oauth/authorize` endpoints.
+
 ## [0.7.5] - 2026-03-11
 
 ### Changed
