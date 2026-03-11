@@ -2,6 +2,120 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
+## [0.7.0] - 2026-03-11
+
+### Added
+- **Token-based auth for ChatGPT**: OAuth 2.0 flow with automatic token refresh,
+  plus session cookie extraction as fallback. Run `neuralclaw session auth chatgpt`.
+- **Token-based auth for Claude**: Session key extraction from browser cookies.
+  Run `neuralclaw session auth claude`.
+- **New providers**: `chatgpt_token` (supports tool use) and `claude_token` for
+  token-based API access without persistent browser automation.
+- **CLI auth wizard**: `neuralclaw session auth <provider>` guides users through
+  OAuth or session key setup with Rich panels and step-by-step flow.
+- **Token refresh**: `neuralclaw session refresh chatgpt` force-refreshes OAuth tokens.
+- **Token health monitoring**: `neuralclaw session status` shows token validity and
+  expiry alongside browser session status. `neuralclaw doctor` reports token health.
+- **Secure token storage**: All tokens stored in OS keychain via `keyring`, never
+  in config files or logs. CSRF protection on OAuth callback.
+- **Auto-fallback chain**: Token providers automatically fall back to browser session
+  providers, then to API key providers.
+- **42 new tests**: Comprehensive coverage for auth module, token store, credential
+  lifecycle, and both token providers (324 total).
+
+### Changed
+- `ProviderConfig` gains `auth_method` field for token-based providers.
+- `validate_config()` recognizes `chatgpt_token` and `claude_token` as keyless providers.
+- Health checker now includes token validity and expiry warnings.
+
+## [0.6.7] - 2026-03-11
+
+### Added
+- **Telegram pairing support**: `/pair` now reaches the trust controller on
+  Telegram instead of being dropped as a command before evaluation.
+
+### Fixed
+- **Slack thread reply routing**: Gateway replies now propagate `thread_ts`
+  so trust-bound Slack thread routes reply in the originating thread.
+- **Pairing reliability**: DM and route pairing behavior is now consistent
+  across Telegram, Discord, and Slack.
+
+### Changed
+- **WhatsApp troubleshooting docs**: Documented the current upstream Baileys
+  `405` fresh-session failure mode more clearly so users can distinguish local
+  setup errors from upstream bridge issues.
+
+## [0.6.6] - 2026-03-11
+
+### Added
+- **Session diagnosis commands**: Added `neuralclaw session diagnose` and
+  `neuralclaw session open` to inspect managed browser sessions and guide manual
+  login/bootstrap flows.
+- **Local Ollama setup**: Added `neuralclaw local setup` and `neuralclaw local status`
+  to detect installed Ollama models and save the selected local model in config.
+
+### Changed
+- **ChatGPT session guidance**: Documented `chatgpt_app` as experimental and
+  clarified recommended fallbacks when upstream auth rejects browser-controlled
+  login.
+- **Session UX**: Session setup, status, and repair output now surface clearer
+  recommendations when ChatGPT or Claude sessions are blocked by upstream auth
+  or challenge pages.
+- **Local provider defaults**: The local provider now defaults to `qwen3.5:2b`
+  instead of the stale `llama3` placeholder, matching common local Ollama setups.
+
+### Fixed
+- **Session state reporting**: App-session health now distinguishes
+  `auth_rejected`, `challenge`, `login_required`, and `session_error` states
+  instead of collapsing them into a generic login failure.
+
+## [0.6.5] - 2026-03-11
+
+### Added
+- **Direct app-session providers**: `chatgpt_app` and `claude_app` now run through
+  managed Playwright-backed persistent browser profiles instead of requiring an
+  external proxy-first setup.
+- **Session runtime**: Added `neuralclaw/session/runtime.py` with persistent
+  profile launch, login-state detection, readiness checks, session repair, and
+  completion polling for browser-backed providers.
+- **Session CLI**: Added `neuralclaw session setup`, `session status`,
+  `session login`, and `session repair`.
+- **Channel trust layer**: Added simple trust-and-binding modes:
+  `open`, `pair`, and `bound`, with persisted trusted routes in
+  `~/.neuralclaw/data/channel_bindings.json`.
+- **New tests**: Added coverage for channel trust decisions, app-session health,
+  provider override behavior, and Anthropic tool replay conversion.
+
+### Fixed
+- **Provider override bug**: `neuralclaw chat -p proxy` and other overrides now
+  reuse configured provider settings instead of constructing empty defaults.
+- **Anthropic tool replay**: Tool-use follow-up turns are now converted to the
+  correct Anthropic message/content-block format, so tool calling remains usable
+  in fallback chains.
+- **WhatsApp routing mismatch**: The Baileys adapter now registers as
+  `whatsapp`, so inbound responses route back through the correct adapter.
+- **Packaging mismatch**: Added install extras for `telegram`, `discord`,
+  `slack`, `sessions`, `all-channels`, and `all`, matching documented install
+  commands.
+- **Default install coverage**: `pip install neuralclaw` now pulls in the
+  Python dependencies needed for all built-in provider and channel features,
+  while docs clearly separate the remaining external prerequisites.
+- **Build metadata**: Switched to SPDX-style `license = "MIT"` to remove
+  setuptools deprecation warnings from release builds.
+
+### Changed
+- **Documentation refresh**: Updated README, channels, configuration, commands,
+  getting-started, and troubleshooting docs to reflect the actual repo state and
+  current CLI/provider/trust flows.
+- **CLI guidance**: Top-level and subgroup `--help` output now gives a clearer
+  first-run path for install, session setup, channels, chat, and gateway usage.
+- **Session hardening UX**: App-session health now distinguishes login-required,
+  auth-rejected, Cloudflare challenge, and generic session-error states, and the
+  CLI now exposes `session diagnose` and `session open` for manual bootstrap and
+  clearer fallback guidance.
+- **Status/health surfaces**: Provider and channel status output now includes
+  app-session and trust-mode state.
+
 ## [0.6.0] - 2026-03-11
 
 ### Added

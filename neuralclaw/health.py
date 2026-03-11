@@ -147,10 +147,49 @@ class HealthChecker:
             results.append(CheckResult("Provider", CheckStatus.FAIL, "No primary provider"))
             return results
 
-        keyless = {"local", "proxy"}
+        keyless = {"local", "proxy", "chatgpt_app", "claude_app", "chatgpt_token", "claude_token"}
         if p.name in keyless:
-            detail = f"base_url={p.base_url}" if p.base_url else "No base_url"
-            results.append(CheckResult(f"Provider: {p.name}", CheckStatus.OK, detail))
+            if p.name in {"chatgpt_token", "claude_token"}:
+                from neuralclaw.session.auth import AuthManager
+                token_provider = "chatgpt" if "chatgpt" in p.name else "claude"
+                health = AuthManager(token_provider).health_check()
+                if health.get("has_token") and health.get("valid"):
+                    ttl = health.get("ttl_seconds")
+                    detail = f"token={health['token_type']}"
+                    if ttl is not None and ttl < 86400 * 3:
+                        detail += f" (expires in {int(ttl / 3600)}h)"
+                        results.append(CheckResult(f"Provider: {p.name}", CheckStatus.WARN, detail))
+                    else:
+                        results.append(CheckResult(f"Provider: {p.name}", CheckStatus.OK, detail))
+                elif health.get("has_token"):
+                    results.append(CheckResult(
+                        f"Provider: {p.name}", CheckStatus.FAIL,
+                        "Token expired",
+                        repairable=True,
+                        repair_action=f"Run neuralclaw session auth {token_provider}",
+                    ))
+                else:
+                    results.append(CheckResult(
+                        f"Provider: {p.name}", CheckStatus.FAIL,
+                        "No token configured",
+                        repairable=True,
+                        repair_action=f"Run neuralclaw session auth {token_provider}",
+                    ))
+            elif p.name in {"chatgpt_app", "claude_app"}:
+                if p.profile_dir:
+                    detail = f"profile={p.profile_dir}"
+                    results.append(CheckResult(f"Provider: {p.name}", CheckStatus.OK, detail))
+                else:
+                    results.append(CheckResult(
+                        f"Provider: {p.name}",
+                        CheckStatus.FAIL,
+                        "No profile_dir configured",
+                        repairable=True,
+                        repair_action=f"Run neuralclaw session setup {'chatgpt' if p.name == 'chatgpt_app' else 'claude'}",
+                    ))
+            else:
+                detail = f"base_url={p.base_url}" if p.base_url else "No base_url"
+                results.append(CheckResult(f"Provider: {p.name}", CheckStatus.OK, detail))
         elif p.api_key:
             results.append(CheckResult(f"Provider: {p.name}", CheckStatus.OK, "API key configured"))
         else:

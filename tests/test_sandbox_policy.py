@@ -67,7 +67,7 @@ def test_policy_engine_tool_limit():
 
 
 # ---------------------------------------------------------------------------
-# Policy tests for new tools (0.6.0 — github_repos, repo_exec, api_client)
+# Policy tests for repo and API tools
 # ---------------------------------------------------------------------------
 
 

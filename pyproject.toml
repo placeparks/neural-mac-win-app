@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neuralclaw"
-version = "0.6.0"
+version = "0.7.0"
 description = "The Self-Evolving Cognitive Agent Framework"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 requires-python = ">=3.12"
 authors = [
     {name = "Mirac", email = "mirac@cardify.dev"},
@@ -19,7 +19,6 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -34,6 +33,7 @@ dependencies = [
     "aiohttp>=3.9",
     "aiosqlite>=0.19",
     "keyring>=25.0",
+    "playwright>=1.52",
     "python-telegram-bot>=21.0",
     "discord.py>=2.3",
     "slack-bolt>=1.18",
@@ -41,6 +41,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+telegram = ["python-telegram-bot>=21.0"]
+discord = ["discord.py>=2.3"]
+slack = ["slack-bolt>=1.18"]
+sessions = ["playwright>=1.52"]
+all-channels = [
+    "python-telegram-bot>=21.0",
+    "discord.py>=2.3",
+    "slack-bolt>=1.18",
+]
+all = [
+    "python-telegram-bot>=21.0",
+    "discord.py>=2.3",
+    "slack-bolt>=1.18",
+    "playwright>=1.52",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

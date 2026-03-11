@@ -60,6 +60,10 @@ class SlackAdapter(ChannelAdapter):
                 raw=event,
                 metadata={
                     "platform": "slack",
+                    "source": "slack",
+                    "workspace_id": event.get("team", ""),
+                    "is_private": str(event.get("channel_type", "")).startswith("im"),
+                    "is_shared": not str(event.get("channel_type", "")).startswith("im"),
                     "thread_ts": event.get("thread_ts"),
                 },
             )
@@ -80,6 +84,10 @@ class SlackAdapter(ChannelAdapter):
                 raw=event,
                 metadata={
                     "platform": "slack",
+                    "source": "slack",
+                    "workspace_id": event.get("team", ""),
+                    "is_private": str(event.get("channel_type", "")).startswith("im"),
+                    "is_shared": not str(event.get("channel_type", "")).startswith("im"),
                     "is_mention": True,
                     "thread_ts": event.get("thread_ts", event.get("ts")),
                 },

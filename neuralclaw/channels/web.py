@@ -237,7 +237,12 @@ class WebChatAdapter(ChannelAdapter):
                                 author_id=f"web_{session_id}",
                                 author_name="Web User",
                                 channel_id=session_id,
-                                metadata={"source": "web"},
+                                metadata={
+                                    "platform": "web",
+                                    "source": "web",
+                                    "is_private": True,
+                                    "is_shared": False,
+                                },
                             )
                             await self._dispatch(msg)
                     except json.JSONDecodeError:

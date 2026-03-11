@@ -19,7 +19,7 @@ class LocalProvider(OpenAIProvider):
 
     def __init__(
         self,
-        model: str = "llama3",
+        model: str = "qwen3.5:2b",
         base_url: str = "http://localhost:11434/v1",
     ) -> None:
         # Local models don't need an API key, but the parent class expects one

@@ -68,7 +68,12 @@ class DiscordAdapter(ChannelAdapter):
                 channel_id=str(message.channel.id),
                 raw=message,
                 metadata={
+                    "platform": "discord",
+                    "source": "discord",
                     "is_dm": is_dm,
+                    "is_private": is_dm,
+                    "is_shared": not is_dm,
+                    "guild_id": str(message.guild.id) if message.guild else "",
                     "guild": message.guild.name if message.guild else None,
                 },
             )

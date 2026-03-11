@@ -76,7 +76,13 @@ class TelegramAdapter(ChannelAdapter):
                         if update.message.reply_to_message
                         else None
                     ),
-                    metadata={"chat_type": update.message.chat.type},
+                    metadata={
+                        "platform": "telegram",
+                        "source": "telegram",
+                        "chat_type": update.message.chat.type,
+                        "is_private": update.message.chat.type == "private",
+                        "is_shared": update.message.chat.type != "private",
+                    },
                 )
                 await self._dispatch(msg)
 
@@ -88,6 +94,7 @@ class TelegramAdapter(ChannelAdapter):
                     )
 
             self._app.add_handler(CommandHandler("start", handle_start))
+            self._app.add_handler(CommandHandler("pair", handle_message))
             self._app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
             # Initialize + start + poll

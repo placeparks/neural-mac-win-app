@@ -66,6 +66,7 @@ class LLMProvider(ABC):
     """Abstract base class for LLM providers."""
 
     name: str = "base"
+    supports_tools: bool = True
 
     @abstractmethod
     async def complete(
@@ -268,6 +269,8 @@ class ProviderRouter:
         # Try primary with retries
         breaker = self._get_breaker(self._primary)
         try:
+            if tools and not getattr(self._primary, "supports_tools", True):
+                raise RuntimeError(f"Provider {self._primary.name} does not support tool calls")
             breaker.check(self._primary.name)
 
             for attempt in range(self._max_retries + 1):
@@ -297,6 +300,8 @@ class ProviderRouter:
         for provider in self._fallbacks:
             fb_breaker = self._get_breaker(provider)
             try:
+                if tools and not getattr(provider, "supports_tools", True):
+                    continue
                 fb_breaker.check(provider.name)
                 if await provider.is_available():
                     response = await provider.complete(

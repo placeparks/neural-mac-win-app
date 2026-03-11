@@ -1,222 +1,120 @@
-# 📡 Channel Adapters
+# Channel Adapters
 
-NeuralClaw supports **6 messaging channels**, turning your agent into
-a multi-platform AI assistant. All channels connect through the same
-cognitive pipeline — one brain, many interfaces.
+NeuralClaw supports Telegram, Discord, Slack, WhatsApp, Signal, and built-in web chat.
 
----
-
-## Supported Channels
-
-| Channel | Protocol | Dependency | Install Extra |
-|---------|----------|------------|---------------|
-| **Telegram** | Bot API | `python-telegram-bot` | `neuralclaw[telegram]` |
-| **Discord** | Bot (Gateway) | `discord.py` | `neuralclaw[discord]` |
-| **Slack** | Socket Mode | `slack-bolt` | `neuralclaw[slack]` |
-| **WhatsApp** | `whatsapp-web.js` bridge | Node.js 18+ | — |
-| **Signal** | `signal-cli` JSON-RPC | signal-cli installed | — |
-| **Web Chat** | Built-in HTTP | None (bundled) | — |
-
-Install all at once:
+## Install
 
 ```bash
-pip install "neuralclaw[all-channels]"
+pip install -e ".[all-channels]"
 ```
 
----
+## Trust Model
 
-## Quick Setup
+Every channel route is evaluated before perception, memory, or reasoning.
+
+Supported trust modes:
+
+| Mode | Meaning |
+|---|---|
+| `open` | Always trust inbound messages |
+| `pair` | Require `/pair` once for that route |
+| `bound` | Only trusted routes may talk; `/pair` can create the first binding |
+
+Typical defaults:
+
+- web / local interactive routes: `open`
+- private chats and DMs: `pair`
+- shared channels, groups, and servers: `bound`
+
+Bindings are stored in `~/.neuralclaw/data/channel_bindings.json`.
+
+## Setup
 
 ```bash
 neuralclaw channels setup
+neuralclaw channels list
+neuralclaw channels test
 ```
-
-This interactive wizard guides you through configuring each channel.
-Tokens are stored securely in your OS keychain.
-
----
 
 ## Telegram
 
-### Setup
+- token via `@BotFather`
+- inbound trust route is chat-based
+- private chats pair easily
+- group chats are better with `bound`
 
-1. Open Telegram and message **@BotFather**
-2. Send `/newbot` and follow the prompts
-3. Copy the bot token (looks like `123456:ABC-DEF...`)
-4. Run:
+Example:
 
-```bash
-neuralclaw channels setup
-# Paste your token when prompted for Telegram
+```toml
+[channels.telegram]
+enabled = true
+trust_mode = "pair"
 ```
-
-### Start
-
-```bash
-neuralclaw gateway
-```
-
-Message your bot on Telegram — NeuralClaw will respond with full
-cognitive processing.
-
----
 
 ## Discord
 
-### Setup
+- requires `discord.py`
+- responds in DMs or mentions
+- route identity includes guild/channel context when present
 
-1. Go to [discord.com/developers/applications](https://discord.com/developers/applications)
-2. Click **New Application** → give it a name
-3. Go to **Bot** tab → click **Reset Token** → copy the token
-4. **Important:** Enable **Message Content Intent** in Bot settings
-5. Go to **OAuth2 → URL Generator**:
-   - Scopes: `bot`
-   - Permissions: `Send Messages`, `Read Message History`
-6. Copy the generated URL and open it to invite the bot to your server
-7. Run:
+Example:
 
-```bash
-neuralclaw channels setup
-# Paste your token when prompted for Discord
+```toml
+[channels.discord]
+enabled = true
+trust_mode = "bound"
 ```
-
-### Start
-
-```bash
-neuralclaw gateway
-```
-
----
 
 ## Slack
 
-### Setup
+- requires bot token and app token
+- Socket Mode based
+- route identity includes workspace + channel and preserves thread context
 
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App**
-2. Choose **From scratch** → name it → select workspace
-3. Enable **Socket Mode** (Settings → Socket Mode → toggle on)
-4. Generate an **App-Level Token** with `connections:write` scope
-   - This gives you `xapp-...`
-5. Go to **OAuth & Permissions** → add bot scopes:
-   - `chat:write`, `app_mentions:read`, `im:history`, `im:read`, `im:write`
-6. Install to workspace and copy the **Bot User OAuth Token** (`xoxb-...`)
-7. Run:
+Example:
 
-```bash
-neuralclaw channels setup
-# Paste both tokens when prompted
+```toml
+[channels.slack]
+enabled = true
+trust_mode = "bound"
 ```
-
-### Start
-
-```bash
-neuralclaw gateway
-```
-
----
 
 ## WhatsApp
 
-WhatsApp uses a Node.js bridge (`whatsapp-web.js`).
-
-### Prerequisites
-
-- Node.js 18+ installed
-
-### Setup
+- uses the Baileys bridge
+- pair with:
 
 ```bash
-neuralclaw channels setup
-# Enter a session ID (or press Enter for default "neuralclaw")
+neuralclaw channels connect whatsapp
 ```
 
-When the gateway starts, it will show a QR code in the terminal.
-Scan it with WhatsApp on your phone (Linked Devices → Link a Device).
-
-### Start
-
-```bash
-neuralclaw gateway
-```
-
----
+- route identity is WhatsApp chat-based
 
 ## Signal
 
-Signal uses the `signal-cli` JSON-RPC bridge.
-
-### Prerequisites
-
-- [signal-cli](https://github.com/AsamK/signal-cli) installed and registered
-
-### Setup
-
-```bash
-neuralclaw channels setup
-# Enter your Signal phone number (+1234567890)
-```
-
-### Start
-
-```bash
-neuralclaw gateway
-```
-
----
+- uses `signal-cli`
+- route identity is sender/chat-based
 
 ## Web Chat
 
-The built-in web chat adapter starts automatically with the gateway.
-No configuration needed.
+- always added by the gateway
+- intended for local/dev use
+- behaves like a private route
 
----
+## Pairing Flow
 
-## Starting the Gateway
+In `pair` or `bound` mode:
 
-The gateway runs **all configured channels simultaneously**:
-
-```bash
-neuralclaw gateway
-```
-
-Output will show which channels are active:
-
-```
-🧠 NeuralClaw Gateway is running (Phase 3: Swarm)
-   Provider: OpenAI (gpt-4o)
-   Skills: 4 (12 tools)
-   Channels: ['telegram', 'discord', 'web']
-   Evolution: calibrator + distiller + synthesizer
-   Swarm: delegation + consensus + mesh
-```
-
-### View Configured Channels
-
-```bash
-neuralclaw channels list
-```
-
----
-
-## Environment Variables
-
-You can also set channel tokens via environment variables:
-
-```bash
-export NEURALCLAW_TELEGRAM_TOKEN=123456:ABC-DEF...
-export NEURALCLAW_DISCORD_TOKEN=MTIz...
-```
-
-Channels with tokens configured (keychain or env var) are **auto-enabled**.
-
----
+1. send `/pair`
+2. NeuralClaw stores a trusted binding for that route
+3. future messages on that route are trusted automatically
 
 ## Troubleshooting
 
 | Issue | Fix |
-|-------|-----|
-| `ModuleNotFoundError: telegram` | Install: `pip install "neuralclaw[telegram]"` |
-| `ModuleNotFoundError: discord` | Install: `pip install "neuralclaw[discord]"` |
-| Discord bot not responding | Ensure **Message Content Intent** is enabled |
-| Slack not connecting | Verify Socket Mode is enabled and both tokens are correct |
-| WhatsApp QR not showing | Ensure Node.js 18+ is installed |
+|---|---|
+| Telegram bot does not answer | verify token and trust mode |
+| Discord mention ignored | confirm bot mention or DM and trust binding |
+| Slack replies outside thread | ensure thread-capable route is used |
+| WhatsApp not connected | run `neuralclaw channels connect whatsapp` again |
+| Route keeps asking to pair | delete stale binding file and pair again |

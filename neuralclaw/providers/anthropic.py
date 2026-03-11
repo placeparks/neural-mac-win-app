@@ -34,14 +34,50 @@ class AnthropicProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ) -> LLMResponse:
-        # Extract system message
         system_content = ""
-        user_messages = []
+        converted_messages: list[dict[str, Any]] = []
         for msg in messages:
-            if msg["role"] == "system":
-                system_content = msg["content"]
+            role = msg.get("role")
+            if role == "system":
+                system_content = msg.get("content", "")
+                continue
+            if role == "tool":
+                converted_messages.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": msg.get("tool_call_id", ""),
+                        "content": msg.get("content", ""),
+                    }],
+                })
+                continue
+            if role == "assistant" and msg.get("tool_calls"):
+                tool_blocks = []
+                for tc in msg.get("tool_calls", []):
+                    fn = tc.get("function", {})
+                    args = fn.get("arguments", {})
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except Exception:
+                            args = {"raw": args}
+                    tool_blocks.append({
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": fn.get("name", ""),
+                        "input": args,
+                    })
+                converted_messages.append({"role": "assistant", "content": tool_blocks})
+                continue
+
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                converted_messages.append({
+                    "role": role,
+                    "content": [{"type": "text", "text": content}],
+                })
             else:
-                user_messages.append(msg)
+                converted_messages.append({"role": role, "content": content})
 
         # Convert OpenAI tool format to Anthropic format
         anthropic_tools = None
@@ -58,7 +94,7 @@ class AnthropicProvider(LLMProvider):
         payload: dict[str, Any] = {
             "model": self._model,
             "max_tokens": max_tokens,
-            "messages": user_messages,
+            "messages": converted_messages,
         }
         if system_content:
             payload["system"] = system_content

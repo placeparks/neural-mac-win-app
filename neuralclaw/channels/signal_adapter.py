@@ -96,7 +96,12 @@ class SignalAdapter(ChannelAdapter):
                             author_id=envelope.get("source", "unknown"),
                             author_name=envelope.get("sourceName", "Unknown"),
                             channel_id=envelope.get("source", ""),
-                            metadata={"platform": "signal"},
+                            metadata={
+                                "platform": "signal",
+                                "source": "signal",
+                                "is_private": True,
+                                "is_shared": False,
+                            },
                         )
                         await self._dispatch(msg)
 

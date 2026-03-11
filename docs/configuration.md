@@ -1,47 +1,28 @@
-# ⚙️ Configuration
+# Configuration
 
-NeuralClaw uses a TOML config file for settings and the OS keychain for
-secrets. This guide covers every configuration option.
+NeuralClaw stores config in `~/.neuralclaw/config.toml` and secrets in the OS keychain.
 
----
-
-## File Locations
+## Key Paths
 
 | Path | Purpose |
-|------|---------|
-| `~/.neuralclaw/config.toml` | Main configuration file |
-| `~/.neuralclaw/data/memory.db` | SQLite memory database |
-| `~/.neuralclaw/logs/` | Log files |
+|---|---|
+| `~/.neuralclaw/config.toml` | main config |
+| `~/.neuralclaw/data/memory.db` | memory database |
+| `~/.neuralclaw/data/channel_bindings.json` | trusted channel routes |
+| `~/.neuralclaw/sessions/` | managed ChatGPT / Claude browser profiles |
 
-The `~` represents your home directory:
-- **Linux/macOS:** `/home/username/`
-- **Windows:** `C:\Users\Username\`
-
----
-
-## Generating the Config
-
-```bash
-neuralclaw init
-```
-
-This creates `~/.neuralclaw/config.toml` with default values if it
-doesn't exist.
-
----
-
-## Full Config Reference
+## Example Config
 
 ```toml
 [general]
 name = "NeuralClaw"
 persona = "You are NeuralClaw, a helpful and intelligent AI assistant."
-log_level = "INFO"                    # DEBUG, INFO, WARNING, ERROR
-telemetry_stdout = true               # Print reasoning traces to terminal
+log_level = "INFO"
+telemetry_stdout = true
 
 [providers]
-primary = "openai"                    # Primary LLM provider
-fallback = ["openrouter", "local"]    # Fallback order
+primary = "chatgpt_app"
+fallback = ["proxy", "openrouter", "local"]
 
 [providers.openai]
 model = "gpt-4o"
@@ -55,223 +36,117 @@ base_url = "https://api.anthropic.com"
 model = "anthropic/claude-sonnet-4-20250514"
 base_url = "https://openrouter.ai/api/v1"
 
+[providers.proxy]
+model = "gpt-4"
+base_url = "http://localhost:3040/v1"
+
+[providers.chatgpt_app]
+model = "auto"
+profile_dir = "~/.neuralclaw/sessions/chatgpt"
+headless = false
+browser_channel = ""
+site_url = "https://chatgpt.com/"
+
+[providers.claude_app]
+model = "auto"
+profile_dir = "~/.neuralclaw/sessions/claude"
+headless = false
+browser_channel = ""
+site_url = "https://claude.ai/chats"
+
 [providers.local]
-model = "llama3"
-base_url = "http://localhost:11434/v1"  # Ollama
-
-[memory]
-db_path = "~/.neuralclaw/data/memory.db"
-max_episodic_results = 10             # Max episodes per search
-max_semantic_results = 5              # Max facts per search
-importance_threshold = 0.3            # Minimum importance to keep
-
-[security]
-threat_threshold = 0.7                # Score to flag a message
-block_threshold = 0.9                 # Score to block a message
-max_skill_timeout_seconds = 30        # Skill execution timeout
-allow_shell_execution = false         # Allow shell commands (DANGER)
+model = "qwen3.5:2b"
+base_url = "http://localhost:11434/v1"
 
 [channels.telegram]
 enabled = false
+trust_mode = "pair"
 
 [channels.discord]
 enabled = false
+trust_mode = "bound"
 
-[features]
-# Feature flags — set to false to run in lite mode (lower RAM, faster cold start).
-# Lite mode disables: swarm, dashboard, evolution cortex, reflective reasoning,
-# procedural memory, and semantic memory. Core reasoning, security, episodic
-# memory, fast-path, and all channel adapters remain fully active.
-swarm = true                  # Agent mesh, delegation, consensus
-dashboard = true              # Web dashboard on port 7474
-evolution = true              # Behavioral calibrator, distiller, synthesizer
-reflective_reasoning = true   # Multi-step planning (uses extra LLM calls)
-procedural_memory = true      # Trigger-pattern procedure matching
-semantic_memory = true        # Knowledge graph
+[channels.slack]
+enabled = false
+trust_mode = "bound"
 
-[federation]
-enabled = true                    # Start federation server with gateway
-port = 8100                       # Federation HTTP port
-bind_host = "127.0.0.1"          # Bind address
-seed_nodes = []                   # Peers to auto-join on startup, e.g. ["http://peer:8100"]
-heartbeat_interval = 60           # Seconds between heartbeats
-node_name = ""                    # Override node name (defaults to general.name)
+[channels.whatsapp]
+enabled = false
+trust_mode = "pair"
 
-[policy]
-# Tool allowlist — only tools in this list are permitted at runtime.
-# If the list is empty, all tools are allowed (legacy behaviour).
-# Recommended: keep this explicit for production deployments.
-allowed_tools = [
-    "web_search",
-    "fetch_url",
-    "read_file",
-    "write_file",
-    "list_directory",
-    "execute_python",
-    "create_event",
-    "list_events",
-    "delete_event",
-]
-
-# Tools that cause side effects and are protected by idempotency.
-# Retried calls with the same arguments will be de-duplicated automatically.
-mutating_tools = [
-    "write_file",
-    "create_event",
-    "delete_event",
-]
-
-# Filesystem roots the agent may read/write (absolute paths).
-# Paths outside these roots are denied by the policy engine.
-allowed_roots = ["~/.neuralclaw/workspace"]
-
-# Block SSRF: deny requests to private IPs, loopback, and cloud metadata.
-deny_private_networks = true
-
-# Maximum tool calls per single reasoning turn (0 = unlimited).
-max_tool_calls_per_turn = 20
+[channels.signal]
+enabled = false
+trust_mode = "pair"
 ```
 
----
+## Provider Notes
 
-## API Keys
+### API-backed providers
 
-API keys are stored in the **OS keychain**, not in the config file.
-
-### Set via CLI
+Configure with:
 
 ```bash
-neuralclaw init  # Interactive setup
+neuralclaw init
+neuralclaw proxy setup
+neuralclaw local setup
 ```
 
-### Set via Python
+### Browser-session providers
 
-```python
-from neuralclaw.config import set_api_key, get_api_key
-
-set_api_key("openai", "sk-...")
-set_api_key("anthropic", "sk-ant-...")
-set_api_key("telegram", "123456:ABC-DEF...")
-```
-
-### Set via Environment Variables
-
-Environment variables take priority over the keychain:
+Configure with:
 
 ```bash
-# LLM providers
-export OPENAI_API_KEY=sk-...
-export ANTHROPIC_API_KEY=sk-ant-...
-export OPENROUTER_API_KEY=sk-or-...
-
-# Channel tokens
-export NEURALCLAW_TELEGRAM_TOKEN=123456:ABC-DEF...
-export NEURALCLAW_DISCORD_TOKEN=MTIz...
+neuralclaw session setup chatgpt
+neuralclaw session setup claude
+neuralclaw session status
 ```
 
-### Key Lookup Order
+Requirements:
 
-1. Environment variable (e.g., `OPENAI_API_KEY`)
-2. OS keychain (stored via `neuralclaw init` or `set_api_key()`)
+- `pip install -e ".[sessions]"`
+- `python -m playwright install chromium`
 
----
+NeuralClaw stores only the local profile directory and session metadata, not raw cookies in config.
 
-## Provider Configuration
+### Local provider
 
-### Switching Primary Provider
+If Ollama is running on the default port, configure it with:
 
-Edit `~/.neuralclaw/config.toml`:
-
-```toml
-[providers]
-primary = "anthropic"  # Changed from "openai"
+```bash
+neuralclaw local setup
+neuralclaw local status
 ```
 
-### Using Local Models (Ollama)
+NeuralClaw queries `http://localhost:11434/api/tags` and saves the selected
+model into `[providers.local]`.
 
-1. Install Ollama: [ollama.ai](https://ollama.ai)
-2. Pull a model: `ollama pull llama3`
-3. Set primary to local:
+## Channel Trust
 
-```toml
-[providers]
-primary = "local"
+`trust_mode` can be:
 
-[providers.local]
-model = "llama3"
-base_url = "http://localhost:11434/v1"
+- `open`
+- `pair`
+- `bound`
+
+If omitted, the runtime chooses a sensible default from the route type.
+
+## Environment Variables
+
+```bash
+export OPENAI_API_KEY=...
+export ANTHROPIC_API_KEY=...
+export OPENROUTER_API_KEY=...
+
+export NEURALCLAW_TELEGRAM_TOKEN=...
+export NEURALCLAW_DISCORD_TOKEN=...
+export NEURALCLAW_SLACK_BOT_TOKEN=...
+export NEURALCLAW_SLACK_APP_TOKEN=...
 ```
 
-### Custom Base URLs
+## Validation
 
-For self-hosted or proxy endpoints:
-
-```toml
-[providers.openai]
-model = "gpt-4o"
-base_url = "https://my-proxy.example.com/v1"
+```bash
+neuralclaw status
+neuralclaw session status
+neuralclaw doctor
 ```
-
----
-
-## Channel Auto-Enable
-
-Channels are **automatically enabled** when a token is configured
-(either via keychain or environment variable). You can explicitly
-disable a channel:
-
-```toml
-[channels.telegram]
-enabled = false  # Won't start even if token exists
-```
-
----
-
-## Persona Customization
-
-Customize how NeuralClaw responds:
-
-```toml
-[general]
-name = "Jarvis"
-persona = "You are Jarvis, a witty and helpful AI butler with a dry sense of humor."
-```
-
----
-
-## Security Tuning
-
-### Strict Mode (high security)
-
-```toml
-[security]
-threat_threshold = 0.5    # Lower = more sensitive
-block_threshold = 0.7     # Lower = blocks more
-allow_shell_execution = false
-max_skill_timeout_seconds = 10
-```
-
-### Permissive Mode (testing)
-
-```toml
-[security]
-threat_threshold = 0.9
-block_threshold = 0.95
-allow_shell_execution = true
-max_skill_timeout_seconds = 60
-```
-
----
-
-## Data Classes
-
-The config is loaded into typed dataclasses:
-
-| Class | Fields |
-|-------|--------|
-| `NeuralClawConfig` | name, persona, log_level, telemetry_stdout, primary_provider, fallback_providers, memory, security, federation, channels |
-| `ProviderConfig` | name, model, base_url, api_key |
-| `MemoryConfig` | db_path, max_episodic_results, max_semantic_results, importance_threshold |
-| `SecurityConfig` | threat_threshold, block_threshold, max_skill_timeout_seconds, allow_shell_execution |
-| `FederationConfig` | enabled, port, bind_host, seed_nodes, heartbeat_interval, node_name |
-| `ChannelConfig` | name, enabled, token, extra |

@@ -24,7 +24,9 @@ CONFIG_DIR = Path.home() / f".{APP_NAME}"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 DATA_DIR = CONFIG_DIR / "data"
 LOG_DIR = CONFIG_DIR / "logs"
+SESSION_DIR = CONFIG_DIR / "sessions"
 MEMORY_DB = DATA_DIR / "memory.db"
+CHANNEL_BINDINGS_FILE = DATA_DIR / "channel_bindings.json"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "general": {
@@ -58,12 +60,36 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "base_url": "https://openrouter.ai/api/v1",
         },
         "local": {
-            "model": "llama3",
+            "model": "qwen3.5:2b",
             "base_url": "http://localhost:11434/v1",
         },
         "proxy": {
             "model": "gpt-4",
             "base_url": "",
+        },
+        "chatgpt_app": {
+            "model": "auto",
+            "profile_dir": str(SESSION_DIR / "chatgpt"),
+            "headless": False,
+            "browser_channel": "",
+            "site_url": "https://chatgpt.com/",
+        },
+        "claude_app": {
+            "model": "auto",
+            "profile_dir": str(SESSION_DIR / "claude"),
+            "headless": False,
+            "browser_channel": "",
+            "site_url": "https://claude.ai/chats",
+        },
+        "chatgpt_token": {
+            "model": "auto",
+            "auth_method": "oauth",
+            "profile_dir": str(SESSION_DIR / "chatgpt"),
+        },
+        "claude_token": {
+            "model": "auto",
+            "auth_method": "session_key",
+            "profile_dir": str(SESSION_DIR / "claude"),
         },
     },
     "memory": {
@@ -140,8 +166,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "apis": {},  # User-saved API configs: [apis.myapi] = {base_url = "...", auth_type = "bearer"}
     "channels": {
-        "telegram": {"enabled": False},
-        "discord": {"enabled": False},
+        "telegram": {"enabled": False, "trust_mode": ""},
+        "discord": {"enabled": False, "trust_mode": ""},
+        "slack": {"enabled": False, "trust_mode": ""},
+        "whatsapp": {"enabled": False, "trust_mode": ""},
+        "signal": {"enabled": False, "trust_mode": ""},
     },
 }
 
@@ -220,6 +249,8 @@ def get_api_key(provider: str) -> str | None:
         "openai": "OPENAI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
         "openrouter": "OPENROUTER_API_KEY",
+        "chatgpt_token": "CHATGPT_TOKEN",
+        "claude_token": "CLAUDE_SESSION_KEY",
     }
     # Fast path: env var — no keyring import needed
     env_var = env_map.get(provider)
@@ -250,6 +281,11 @@ class ProviderConfig:
     model: str
     base_url: str
     api_key: str | None = None
+    profile_dir: str = ""
+    headless: bool = False
+    browser_channel: str = ""
+    site_url: str = ""
+    auth_method: str = ""  # "oauth", "session_key", "cookie", or ""
 
 
 @dataclass
@@ -340,6 +376,7 @@ class ChannelConfig:
     name: str
     enabled: bool = False
     token: str | None = None
+    trust_mode: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -376,6 +413,11 @@ def _build_provider(name: str, section: dict[str, Any]) -> ProviderConfig:
         model=section.get("model", "gpt-4o"),
         base_url=section.get("base_url", ""),
         api_key=get_api_key(name),
+        profile_dir=section.get("profile_dir", ""),
+        headless=bool(section.get("headless", False)),
+        browser_channel=section.get("browser_channel", ""),
+        site_url=section.get("site_url", ""),
+        auth_method=section.get("auth_method", ""),
     )
 
 
@@ -427,6 +469,7 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
                 name=ch_name,
                 enabled=explicitly_enabled or auto_enabled,
                 token=token,
+                trust_mode=str(ch_data.get("trust_mode", "")),
                 extra=ch_data,
             ))
 
@@ -457,7 +500,7 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
                 if ev:
                     extra[es] = ev
             channels.append(ChannelConfig(
-                name=ch_name, enabled=True, token=token, extra=extra,
+                name=ch_name, enabled=True, token=token, trust_mode="", extra=extra,
             ))
 
     return NeuralClawConfig(
@@ -481,7 +524,7 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
 
 def ensure_dirs() -> None:
     """Create config / data / log directories if needed."""
-    for d in (CONFIG_DIR, DATA_DIR, LOG_DIR):
+    for d in (CONFIG_DIR, DATA_DIR, LOG_DIR, SESSION_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -559,10 +602,15 @@ def validate_config(config: NeuralClawConfig) -> ConfigValidationResult:
     warnings: list[str] = []
 
     # Provider checks
-    keyless = {"local", "proxy"}
+    keyless = {"local", "proxy", "chatgpt_app", "claude_app", "chatgpt_token", "claude_token"}
     if config.primary_provider:
         if config.primary_provider.name == "proxy" and not config.primary_provider.base_url:
             errors.append("Proxy provider requires a base_url in config.toml")
+        elif config.primary_provider.name in {"chatgpt_app", "claude_app"} and not config.primary_provider.profile_dir:
+            errors.append(
+                f"Primary provider '{config.primary_provider.name}' requires a profile_dir. "
+                f"Run: neuralclaw session setup {'chatgpt' if config.primary_provider.name == 'chatgpt_app' else 'claude'}"
+            )
         elif config.primary_provider.name not in keyless and not config.primary_provider.api_key:
             errors.append(
                 f"Primary provider '{config.primary_provider.name}' has no API key. "

@@ -136,7 +136,7 @@ class BaileysWhatsAppAdapter(ChannelAdapter):
     so the runtime can forward them to a dashboard or log.
     """
 
-    name = "whatsapp-baileys"
+    name = "whatsapp"
 
     def __init__(
         self,
@@ -239,7 +239,12 @@ class BaileysWhatsAppAdapter(ChannelAdapter):
                         author_id=data.get("from", "unknown"),
                         author_name=data.get("name", "Unknown"),
                         channel_id=data.get("chat_id", ""),
-                        metadata={"platform": "whatsapp"},
+                        metadata={
+                            "platform": "whatsapp",
+                            "source": "whatsapp",
+                            "is_private": str(data.get("chat_id", "")).endswith("@s.whatsapp.net"),
+                            "is_shared": not str(data.get("chat_id", "")).endswith("@s.whatsapp.net"),
+                        },
                     )
                     await self._dispatch(msg)
 

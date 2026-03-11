@@ -58,7 +58,7 @@ class TestToolCallToDict:
 class TestBaileysWhatsAppAdapter:
     def test_name(self):
         adapter = BaileysWhatsAppAdapter()
-        assert adapter.name == "whatsapp-baileys"
+        assert adapter.name == "whatsapp"
 
     def test_custom_auth_dir(self):
         adapter = BaileysWhatsAppAdapter(auth_dir="/tmp/my_auth")

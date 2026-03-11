@@ -29,6 +29,23 @@ class ChannelMessage:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ChannelIdentity:
+    """Normalized inbound identity for trust decisions."""
+    platform: str
+    user_id: str
+    chat_id: str
+    workspace_id: str = ""
+    thread_id: str = ""
+    is_private: bool = False
+    is_shared: bool = False
+
+    @property
+    def route_key(self) -> str:
+        parts = [self.platform, self.workspace_id or "-", self.chat_id or "-", self.thread_id or "-"]
+        return ":".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Channel adapter ABC
 # ---------------------------------------------------------------------------

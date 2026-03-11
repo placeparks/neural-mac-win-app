@@ -19,8 +19,10 @@ from typing import Any
 from neuralclaw.bus.neural_bus import EventType, NeuralBus
 from neuralclaw.bus.telemetry import Telemetry
 from neuralclaw.channels.protocol import ChannelAdapter, ChannelMessage
+from neuralclaw.channels.trust import ChannelTrustController
 from neuralclaw.config import (
     NeuralClawConfig,
+    ProviderConfig,
     ensure_dirs,
     get_api_key,
     load_config,
@@ -169,6 +171,7 @@ class NeuralClawGateway:
 
         # Channels
         self._channels: dict[str, ChannelAdapter] = {}
+        self._trust = ChannelTrustController()
 
         # Conversation history (per channel_id)
         self._history: dict[str, list[dict[str, str]]] = {}
@@ -295,13 +298,16 @@ class NeuralClawGateway:
             "openrouter": self._build_openrouter,
             "local": self._build_local,
             "proxy": self._build_proxy,
+            "chatgpt_app": self._build_chatgpt_app,
+            "claude_app": self._build_claude_app,
+            "chatgpt_token": self._build_chatgpt_token,
+            "claude_token": self._build_claude_token,
         }
 
         if self._provider_override:
             builder = provider_builders.get(self._provider_override)
             if builder:
-                from neuralclaw.config import ProviderConfig
-                p = builder(ProviderConfig(name=self._provider_override, model="", base_url=""))
+                p = builder(self._get_provider_config(self._provider_override))
                 if p:
                     primary = p
         elif cfg.primary_provider:
@@ -321,8 +327,7 @@ class NeuralClawGateway:
         if not primary:
             # Try to find any available provider
             for name, builder in provider_builders.items():
-                from neuralclaw.config import ProviderConfig
-                p = builder(ProviderConfig(name=name, model="", base_url=""))
+                p = builder(self._get_provider_config(name))
                 if p:
                     primary = p
                     break
@@ -351,11 +356,18 @@ class NeuralClawGateway:
         if not key:
             return None
         from neuralclaw.providers.openrouter import OpenRouterProvider
-        return OpenRouterProvider(api_key=key, model=cfg.model or "anthropic/claude-sonnet-4-20250514")
+        return OpenRouterProvider(
+            api_key=key,
+            model=cfg.model or "anthropic/claude-sonnet-4-20250514",
+            base_url=cfg.base_url or "https://openrouter.ai/api/v1",
+        )
 
     def _build_local(self, cfg: Any) -> LLMProvider | None:
         from neuralclaw.providers.local import LocalProvider
-        return LocalProvider(model=cfg.model or "llama3", base_url=cfg.base_url or "http://localhost:11434/v1")
+        return LocalProvider(
+            model=cfg.model or "qwen3.5:2b",
+            base_url=cfg.base_url or "http://localhost:11434/v1",
+        )
 
     def _build_proxy(self, cfg: Any) -> LLMProvider | None:
         if not cfg.base_url:
@@ -366,6 +378,62 @@ class NeuralClawGateway:
             base_url=cfg.base_url,
             model=cfg.model or "gpt-4",
             api_key=api_key,
+        )
+
+    def _build_chatgpt_app(self, cfg: Any) -> LLMProvider | None:
+        if not cfg.profile_dir:
+            return None
+        from neuralclaw.providers.app_session import ChatGPTAppProvider
+        return ChatGPTAppProvider(
+            model=cfg.model or "auto",
+            profile_dir=cfg.profile_dir,
+            site_url=cfg.site_url or "https://chatgpt.com/",
+            headless=bool(getattr(cfg, "headless", False)),
+            browser_channel=getattr(cfg, "browser_channel", ""),
+        )
+
+    def _build_claude_app(self, cfg: Any) -> LLMProvider | None:
+        if not cfg.profile_dir:
+            return None
+        from neuralclaw.providers.app_session import ClaudeAppProvider
+        return ClaudeAppProvider(
+            model=cfg.model or "auto",
+            profile_dir=cfg.profile_dir,
+            site_url=cfg.site_url or "https://claude.ai/chats",
+            headless=bool(getattr(cfg, "headless", False)),
+            browser_channel=getattr(cfg, "browser_channel", ""),
+        )
+
+    def _build_chatgpt_token(self, cfg: Any) -> LLMProvider | None:
+        from neuralclaw.session.auth import AuthManager
+        auth = AuthManager("chatgpt")
+        health = auth.health_check()
+        if not health.get("has_token") or not health.get("valid"):
+            return None
+        from neuralclaw.providers.chatgpt_token import ChatGPTTokenProvider
+        return ChatGPTTokenProvider(model=cfg.model or "auto")
+
+    def _build_claude_token(self, cfg: Any) -> LLMProvider | None:
+        from neuralclaw.session.auth import AuthManager
+        auth = AuthManager("claude")
+        health = auth.health_check()
+        if not health.get("has_token") or not health.get("valid"):
+            return None
+        from neuralclaw.providers.claude_token import ClaudeTokenProvider
+        return ClaudeTokenProvider(model=cfg.model or "auto")
+
+    def _get_provider_config(self, name: str) -> ProviderConfig:
+        raw = self._config._raw.get("providers", {}).get(name, {})
+        return ProviderConfig(
+            name=name,
+            model=raw.get("model", ""),
+            base_url=raw.get("base_url", ""),
+            api_key=get_api_key(name),
+            profile_dir=raw.get("profile_dir", ""),
+            headless=bool(raw.get("headless", False)),
+            browser_channel=raw.get("browser_channel", ""),
+            site_url=raw.get("site_url", ""),
+            auth_method=raw.get("auth_method", ""),
         )
 
     # -- Channel management -------------------------------------------------
@@ -460,20 +528,29 @@ class NeuralClawGateway:
                 author_name=msg.author_name,
                 channel_id=msg.channel_id,
                 channel_type_name=self._get_channel_type(msg),
+                message_metadata=msg.metadata,
+                raw_message=msg.raw,
             )
+
+            if not response:
+                return
 
             # Route response back to the correct adapter
             source_channel = self._get_source_adapter(msg)
             if source_channel and source_channel in self._channels:
                 try:
-                    await self._channels[source_channel].send(msg.channel_id, response)
+                    await self._channels[source_channel].send(
+                        msg.channel_id,
+                        response,
+                        **self._build_reply_kwargs(msg),
+                    )
                 except Exception as e:
                     print(f"[Gateway] Failed to send via {source_channel}: {e}")
             else:
                 # Fallback: try all channels
                 for name, adapter in self._channels.items():
                     try:
-                        await adapter.send(msg.channel_id, response)
+                        await adapter.send(msg.channel_id, response, **self._build_reply_kwargs(msg))
                         break
                     except Exception:
                         continue
@@ -488,12 +565,31 @@ class NeuralClawGateway:
         author_name: str = "User",
         channel_id: str = "cli",
         channel_type_name: str = "CLI",
+        message_metadata: dict[str, Any] | None = None,
+        raw_message: Any = None,
     ) -> str:
         """
         Process a message through the full cognitive pipeline.
 
         Channel → Perception → Memory → Reasoning → Action → Response
         """
+        # 0. TRUST: gate inbound routes before any cognitive work
+        if message_metadata is not None:
+            trust_msg = ChannelMessage(
+                content=content,
+                author_id=author_id,
+                author_name=author_name,
+                channel_id=channel_id,
+                raw=raw_message,
+                metadata=message_metadata,
+            )
+            trust_cfg = self._get_channel_config(trust_msg)
+            decision = self._trust.evaluate(trust_cfg, trust_msg)
+            if decision.status == "denied":
+                return ""
+            if decision.status in {"unpaired", "paired"}:
+                return decision.response or ""
+
         # 1. PERCEPTION: Intake
         channel_type = ChannelType[channel_type_name.upper()] if channel_type_name.upper() in ChannelType.__members__ else ChannelType.CLI
         signal = await self._intake.process(
@@ -609,6 +705,18 @@ class NeuralClawGateway:
 
     def _get_channel_type(self, msg: ChannelMessage) -> str:
         """Get the channel type name from a ChannelMessage."""
+        meta = msg.metadata or {}
+        platform = str(meta.get("platform") or meta.get("source") or "")
+        if platform:
+            mapping = {
+                "telegram": "TELEGRAM",
+                "discord": "DISCORD",
+                "slack": "SLACK",
+                "whatsapp": "WHATSAPP",
+                "signal": "SIGNAL",
+                "web": "CLI",
+            }
+            return mapping.get(platform, "CLI")
         if msg.raw:
             raw_module = type(msg.raw).__module__
             if "telegram" in raw_module:
@@ -618,7 +726,6 @@ class NeuralClawGateway:
             if "slack" in raw_module:
                 return "SLACK"
         # Check metadata
-        meta = msg.metadata or {}
         if "whatsapp" in str(meta.get("source", "")):
             return "WHATSAPP"
         if "signal" in str(meta.get("source", "")):
@@ -629,6 +736,10 @@ class NeuralClawGateway:
 
     def _get_source_adapter(self, msg: ChannelMessage) -> str | None:
         """Identify which adapter originated this message."""
+        meta = msg.metadata or {}
+        platform = str(meta.get("platform") or meta.get("source") or "")
+        if platform:
+            return platform
         if msg.raw:
             raw_module = type(msg.raw).__module__
             if "telegram" in raw_module:
@@ -637,7 +748,6 @@ class NeuralClawGateway:
                 return "discord"
             if "slack" in raw_module:
                 return "slack"
-        meta = msg.metadata or {}
         source = str(meta.get("source", ""))
         if "whatsapp" in source:
             return "whatsapp"
@@ -646,6 +756,24 @@ class NeuralClawGateway:
         if "web" in source:
             return "web"
         return None
+
+    def _get_channel_config(self, msg: ChannelMessage) -> Any:
+        meta = msg.metadata or {}
+        platform = str(meta.get("platform") or meta.get("source") or "").lower()
+        if not platform:
+            return None
+        for ch in self._config.channels:
+            if ch.name == platform:
+                return ch
+        return None
+
+    def _build_reply_kwargs(self, msg: ChannelMessage) -> dict[str, Any]:
+        meta = msg.metadata or {}
+        kwargs: dict[str, Any] = {}
+        thread_ts = meta.get("thread_id") or meta.get("thread_ts")
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        return kwargs
 
     async def _post_process(self, user_msg: str, agent_msg: str, author: str) -> None:
         """Post-processing: tick metabolism/distiller, run calibration."""

@@ -65,10 +65,26 @@ BANNER = """
 # CLI Group
 # ---------------------------------------------------------------------------
 
-@click.group()
+@click.group(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
+)
 @click.version_option(version=__version__)
 def main() -> None:
-    """NeuralClaw — The Self-Evolving Cognitive Agent Framework."""
+    """NeuralClaw command line interface.
+
+    Common flows:
+      neuralclaw init
+      neuralclaw session setup chatgpt
+      neuralclaw session setup claude
+      neuralclaw channels setup
+      neuralclaw chat -p chatgpt_app
+      neuralclaw gateway
+
+    Base installation already includes the Python dependencies for all built-in
+    providers and channels. Some integrations still require external runtimes,
+    such as Playwright browsers, Node.js for WhatsApp, or signal-cli for Signal.
+    """
     pass
 
 
@@ -94,6 +110,8 @@ def init() -> None:
         ("openai", "OpenAI (GPT-4o, GPT-4o-mini)"),
         ("anthropic", "Anthropic (Claude 3.5 Sonnet)"),
         ("openrouter", "OpenRouter (multi-model)"),
+        ("chatgpt_app", "ChatGPT App (browser session)"),
+        ("claude_app", "Claude App (browser session)"),
         ("proxy", "Proxy (Self-hosted ChatGPT/Claude reverse proxy)"),
         ("local", "Local (Ollama — no API key needed)"),
     ]
@@ -104,8 +122,14 @@ def init() -> None:
             masked = existing[:8] + "..." + existing[-4:]
             console.print(f"  {label}: [green]configured[/green] ({masked})")
         else:
-            if name in ("local", "proxy"):
-                hint = "no key needed" if name == "local" else "run [cyan]neuralclaw proxy setup[/cyan] to configure"
+            if name in ("local", "proxy", "chatgpt_app", "claude_app"):
+                if name == "local":
+                    hint = "run [cyan]neuralclaw local setup[/cyan] to detect Ollama models"
+                elif name == "proxy":
+                    hint = "run [cyan]neuralclaw proxy setup[/cyan] to configure"
+                else:
+                    session_name = "chatgpt" if name == "chatgpt_app" else "claude"
+                    hint = f"run [cyan]neuralclaw session setup {session_name}[/cyan] to configure"
                 console.print(f"  {label}: [dim]{hint}[/dim]")
                 continue
 
@@ -122,6 +146,8 @@ def init() -> None:
 
     console.print(Panel(
         "[green]Setup complete![/green]\n\n"
+        "  [cyan]neuralclaw session setup chatgpt[/cyan] Configure ChatGPT browser session\n"
+        "  [cyan]neuralclaw session setup claude[/cyan]  Configure Claude browser session\n"
         "  [cyan]neuralclaw channels setup[/cyan]  Configure messaging channels\n"
         "  [cyan]neuralclaw chat[/cyan]            Start interactive chat\n"
         "  [cyan]neuralclaw gateway[/cyan]         Start with all channels\n"
@@ -136,9 +162,17 @@ def init() -> None:
 # ---------------------------------------------------------------------------
 
 @main.command()
-@click.option("--provider", "-p", default=None, help="Provider to use (openai, anthropic, openrouter, local)")
+@click.option(
+    "--provider",
+    "-p",
+    default=None,
+    help=(
+        "Provider override "
+        "(openai, anthropic, openrouter, proxy, chatgpt_app, claude_app, local)"
+    ),
+)
 def chat(provider: str | None) -> None:
-    """Interactive terminal chat session."""
+    """Interactive terminal chat session with optional provider override."""
     console.print(BANNER)
     asyncio.run(_chat_loop(provider))
 
@@ -200,12 +234,121 @@ async def _chat_loop(provider_override: str | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Local command group
+# ---------------------------------------------------------------------------
+
+@main.group(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
+)
+def local() -> None:
+    """Manage the local OpenAI-compatible provider, such as Ollama."""
+    pass
+
+
+@local.command("setup")
+def local_setup() -> None:
+    """Detect local Ollama models and save the selected model to config."""
+    asyncio.run(_local_setup())
+
+
+async def _local_setup() -> None:
+    from neuralclaw.config import update_config
+
+    console.print(BANNER)
+    console.print(Panel("Local Provider Setup", style="bold cyan"))
+
+    base_url = Prompt.ask("  Base URL", default="http://localhost:11434/v1").strip()
+    tags_url = base_url.removesuffix("/v1") + "/api/tags"
+    models = await _fetch_ollama_models(tags_url)
+    recommended = "qwen3.5:2b"
+    default_model = recommended if recommended in models else (models[0] if models else recommended)
+
+    if models:
+        console.print("\n[bold]Detected Ollama models[/bold]")
+        for name in models:
+            marker = " [green](recommended)[/green]" if name == default_model else ""
+            console.print(f"  - [cyan]{name}[/cyan]{marker}")
+    else:
+        console.print(
+            "\n[yellow]Could not query Ollama model tags.[/yellow]\n"
+            "[dim]If Ollama is running, you can still enter the model name manually.[/dim]"
+        )
+
+    model = Prompt.ask("  Model", default=default_model).strip() or default_model
+
+    update_config({
+        "providers": {
+            "local": {
+                "model": model,
+                "base_url": base_url,
+            },
+        },
+    })
+    console.print(f"\n[green]Saved[/green] local provider as [cyan]{model}[/cyan] at [cyan]{base_url}[/cyan]")
+
+    set_primary = Prompt.ask("  Set local as your primary provider? (y/N)", default="n")
+    if set_primary.lower() == "y":
+        update_config({"providers": {"primary": "local"}})
+        console.print("[green]Saved[/green] local set as primary provider")
+
+
+@local.command("status")
+def local_status() -> None:
+    """Show the configured local model and currently available Ollama models."""
+    asyncio.run(_local_status())
+
+
+async def _local_status() -> None:
+    config = load_config()
+    raw = config._raw.get("providers", {}).get("local", {})
+    base_url = raw.get("base_url", "http://localhost:11434/v1")
+    model = raw.get("model", "qwen3.5:2b")
+    tags_url = base_url.removesuffix("/v1") + "/api/tags"
+    models = await _fetch_ollama_models(tags_url)
+
+    table = Table(title="Local Provider", style="cyan")
+    table.add_column("Setting", style="bold")
+    table.add_column("Value")
+    table.add_row("Base URL", base_url)
+    table.add_row("Configured model", model)
+    table.add_row("Ollama status", "[green]reachable[/green]" if models else "[yellow]not detected[/yellow]")
+    table.add_row("Detected models", ", ".join(models) if models else "[dim]none[/dim]")
+    console.print(table)
+    console.print()
+
+
+async def _fetch_ollama_models(tags_url: str) -> list[str]:
+    import aiohttp
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(tags_url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+    except Exception:
+        return []
+
+    models = [item.get("name", "") for item in data.get("models", []) if item.get("name")]
+    return sorted(models)
+
+
+# ---------------------------------------------------------------------------
 # Channels command group
 # ---------------------------------------------------------------------------
 
-@main.group()
+@main.group(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
+)
 def channels() -> None:
-    """Manage messaging channel integrations."""
+    """Manage messaging channels.
+
+    Use `setup` for first-run credentials, `list` to inspect configured
+    integrations, `test` to validate connectivity, and `connect whatsapp` for
+    QR-based WhatsApp pairing.
+    """
     pass
 
 
@@ -492,9 +635,16 @@ async def _connect_whatsapp() -> None:
 # Proxy command group
 # ---------------------------------------------------------------------------
 
-@main.group()
+@main.group(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
+)
 def proxy() -> None:
-    """Configure reverse proxy provider for ChatGPT/Claude session access."""
+    """Configure an OpenAI-compatible proxy provider.
+
+    This path is useful for self-hosted relays, normalized session bridges, or
+    gateways such as LiteLLM, one-api, or similar OpenAI-compatible endpoints.
+    """
     pass
 
 
@@ -644,6 +794,421 @@ async def _proxy_status() -> None:
     if not base_url:
         console.print("\n[dim]Run [cyan]neuralclaw proxy setup[/cyan] to configure.[/dim]")
     console.print()
+
+
+# ---------------------------------------------------------------------------
+# Session command group
+# ---------------------------------------------------------------------------
+
+@main.group(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
+)
+def session() -> None:
+    """Manage direct ChatGPT and Claude browser sessions.
+
+    Run `session setup <provider>` once to create the managed profile, then use
+    `session status`, `session diagnose`, `session open`, or `session repair`
+    when needed.
+    """
+    pass
+
+
+@session.command("setup")
+@click.argument("provider_name", type=click.Choice(["chatgpt", "claude"]))
+def session_setup(provider_name: str) -> None:
+    """Set up a managed browser session."""
+    asyncio.run(_session_setup(provider_name))
+
+
+async def _session_setup(provider_name: str) -> None:
+    from neuralclaw.config import SESSION_DIR, update_config
+
+    provider_key = "chatgpt_app" if provider_name == "chatgpt" else "claude_app"
+    default_profile = str(SESSION_DIR / provider_name)
+    default_url = "https://chatgpt.com/" if provider_name == "chatgpt" else "https://claude.ai/chats"
+
+    console.print(BANNER)
+    console.print(Panel(
+        f"[bold]{provider_name.title()} App Session Setup[/bold]\n\n"
+        "This uses a managed persistent browser profile.\n"
+        "You will log in once and NeuralClaw will reuse that local profile.\n\n"
+        "[dim]Use headed mode for first login.[/dim]\n"
+        "[dim]Recommended browser channel for ChatGPT: chrome[/dim]",
+        style="bold cyan",
+    ))
+
+    profile_dir = Prompt.ask("  Profile directory", default=default_profile).strip()
+    model = Prompt.ask("  Preferred model", default="auto").strip() or "auto"
+    headless = Prompt.ask("  Run headless by default? (y/N)", default="n").strip().lower() == "y"
+    browser_channel = Prompt.ask(
+        "  Browser channel (optional: chrome, msedge, or blank for Playwright Chromium)",
+        default="",
+        show_default=False,
+    ).strip()
+
+    update_config({
+        "providers": {
+            provider_key: {
+                "model": model,
+                "profile_dir": profile_dir,
+                "headless": headless,
+                "browser_channel": browser_channel,
+                "site_url": default_url,
+            },
+        },
+    })
+
+    runtime = _build_session_runtime(provider_key)
+    await runtime.login()
+    console.print("\n[dim]Complete the login/subscription flow in the opened browser, then return here.[/dim]")
+    Prompt.ask("  Press Enter after login", default="", show_default=False)
+    health = await runtime.health()
+    await runtime.close()
+
+    if health.logged_in:
+        console.print(f"  [green]✓[/green] {provider_name.title()} session is ready")
+    else:
+        console.print(f"  [yellow]⚠[/yellow] Session saved but not fully ready: {health.message}")
+        if health.recommendation:
+            console.print(f"  [dim]{health.recommendation}[/dim]")
+
+    if not health.logged_in:
+        return
+    set_primary = Prompt.ask(f"  Set {provider_key} as primary provider? (y/N)", default="n")
+    if set_primary.lower() == "y":
+        update_config({"providers": {"primary": provider_key}})
+        console.print(f"  [green]✓[/green] {provider_key} set as primary provider")
+
+
+@session.command("status")
+def session_status() -> None:
+    """Show managed session health."""
+    asyncio.run(_session_status())
+
+
+async def _session_status() -> None:
+    from neuralclaw.session.auth import AuthManager
+
+    config = load_config()
+    table = Table(title="App Session Status", style="cyan")
+    table.add_column("Provider", style="bold")
+    table.add_column("Profile")
+    table.add_column("Status")
+    table.add_column("Token Auth")
+    table.add_column("Details")
+
+    for provider_key in ("chatgpt_app", "claude_app"):
+        raw = config._raw.get("providers", {}).get(provider_key, {})
+        profile_dir = raw.get("profile_dir", "")
+
+        # Token auth status
+        token_provider = "chatgpt" if "chatgpt" in provider_key else "claude"
+        token_health = AuthManager(token_provider).health_check()
+        if token_health.get("has_token") and token_health.get("valid"):
+            token_col = f"[green]{token_health['token_type']}[/green]"
+        elif token_health.get("has_token"):
+            token_col = "[red]expired[/red]"
+        else:
+            token_col = "[dim]none[/dim]"
+
+        if not profile_dir:
+            table.add_row(provider_key, "[dim]not configured[/dim]", "[dim]n/a[/dim]", token_col, "")
+            continue
+        runtime = _build_session_runtime(provider_key)
+        health = await runtime.health()
+        await runtime.close()
+        if health.state == "auth_rejected":
+            status = "[red]auth rejected[/red]"
+        elif health.state == "challenge":
+            status = "[yellow]challenge[/yellow]"
+        elif health.logged_in:
+            status = "[green]ready[/green]"
+        else:
+            status = "[yellow]login required[/yellow]"
+        table.add_row(provider_key, profile_dir, status, token_col, health.message)
+    console.print(table)
+    console.print("[dim]Use `neuralclaw session auth <provider>` for token-based auth.[/dim]")
+    console.print("[dim]Use `neuralclaw session diagnose <provider>` for detailed guidance.[/dim]")
+    console.print()
+
+
+@session.command("login")
+@click.argument("provider_name", type=click.Choice(["chatgpt", "claude"]))
+def session_login(provider_name: str) -> None:
+    """Reopen the managed browser profile for login."""
+    asyncio.run(_session_login(provider_name))
+
+
+async def _session_login(provider_name: str) -> None:
+    provider_key = "chatgpt_app" if provider_name == "chatgpt" else "claude_app"
+    runtime = _build_session_runtime(provider_key)
+    await runtime.login()
+    console.print(f"[green]Opened {provider_name} session profile.[/green]")
+
+
+@session.command("repair")
+@click.argument("provider_name", type=click.Choice(["chatgpt", "claude"]))
+def session_repair(provider_name: str) -> None:
+    """Restart the managed browser runtime for a session."""
+    asyncio.run(_session_repair(provider_name))
+
+
+async def _session_repair(provider_name: str) -> None:
+    provider_key = "chatgpt_app" if provider_name == "chatgpt" else "claude_app"
+    runtime = _build_session_runtime(provider_key)
+    await runtime.repair()
+    health = await runtime.health()
+    await runtime.close()
+    console.print(f"[green]Repair complete:[/green] {health.message}")
+    if health.recommendation:
+        console.print(f"[dim]{health.recommendation}[/dim]")
+
+
+@session.command("open")
+@click.argument("provider_name", type=click.Choice(["chatgpt", "claude"]))
+def session_open(provider_name: str) -> None:
+    """Open the managed profile for manual login/bootstrap and then diagnose it."""
+    asyncio.run(_session_open(provider_name))
+
+
+async def _session_open(provider_name: str) -> None:
+    provider_key = "chatgpt_app" if provider_name == "chatgpt" else "claude_app"
+    runtime = _build_session_runtime(provider_key)
+    await runtime.login()
+    console.print(
+        "[dim]Complete login or any upstream verification in the opened browser, "
+        "then return here.[/dim]"
+    )
+    Prompt.ask("  Press Enter when the provider looks ready", default="", show_default=False)
+    health = await runtime.health()
+    await runtime.close()
+    _print_session_health(provider_name, health)
+
+
+@session.command("diagnose")
+@click.argument("provider_name", type=click.Choice(["chatgpt", "claude"]))
+def session_diagnose(provider_name: str) -> None:
+    """Inspect the managed session and explain common failure states."""
+    asyncio.run(_session_diagnose(provider_name))
+
+
+async def _session_diagnose(provider_name: str) -> None:
+    provider_key = "chatgpt_app" if provider_name == "chatgpt" else "claude_app"
+    runtime = _build_session_runtime(provider_key)
+    health = await runtime.health()
+    await runtime.close()
+    _print_session_health(provider_name, health)
+
+
+def _print_session_health(provider_name: str, health) -> None:
+    console.print(Panel(
+        f"[bold]{provider_name.title()} Session[/bold]\n\n"
+        f"State: [cyan]{health.state}[/cyan]\n"
+        f"Message: {health.message}\n"
+        f"Recommendation: {health.recommendation or 'none'}",
+        style="bold cyan",
+    ))
+
+
+@session.command("auth")
+@click.argument("provider_name", type=click.Choice(["chatgpt", "claude"]))
+def session_auth(provider_name: str) -> None:
+    """Set up token-based authentication (OAuth or session key)."""
+    asyncio.run(_session_auth(provider_name))
+
+
+async def _session_auth(provider_name: str) -> None:
+    from neuralclaw.config import SESSION_DIR, update_config
+    from neuralclaw.session.auth import (
+        AuthManager,
+        ChatGPTAuthFlow,
+        ClaudeAuthFlow,
+        redact_token,
+    )
+
+    console.print(BANNER)
+
+    if provider_name == "chatgpt":
+        console.print(Panel(
+            "[bold]ChatGPT Token Authentication[/bold]\n\n"
+            "[cyan]Option 1:[/cyan] OAuth login — opens your browser for one-click sign-in.\n"
+            "  Tokens refresh automatically. [green](Recommended)[/green]\n\n"
+            "[cyan]Option 2:[/cyan] Cookie extraction — extracts session cookie from an\n"
+            "  existing browser profile. Requires prior browser login.\n\n"
+            "[cyan]Option 3:[/cyan] Skip — use an OpenAI API key instead.",
+            style="bold cyan",
+        ))
+
+        choice = Prompt.ask(
+            "  Choose auth method",
+            choices=["1", "2", "3"],
+            default="1",
+        )
+
+        auth = AuthManager("chatgpt")
+
+        if choice == "1":
+            console.print("\n  [dim]Opening browser for OAuth login...[/dim]")
+            try:
+                flow = ChatGPTAuthFlow()
+                cred = flow.oauth_flow(timeout=120)
+                auth.save_credential(cred)
+                console.print(f"  [green]✓[/green] OAuth token saved (expires in {int(cred.expires_at - __import__('time').time())}s)")
+                console.print(f"  [dim]Token: {redact_token(cred.access_token)}[/dim]")
+            except Exception as e:
+                console.print(f"  [red]✗[/red] OAuth failed: {e}")
+                console.print("  [dim]Try option 2 (cookie extraction) or 3 (API key).[/dim]")
+                return
+
+        elif choice == "2":
+            profile_dir = str(SESSION_DIR / "chatgpt")
+            console.print(f"\n  [dim]Extracting cookie from profile: {profile_dir}[/dim]")
+            try:
+                flow = ChatGPTAuthFlow()
+                cred = await flow.extract_cookie_from_profile(profile_dir)
+                auth.save_credential(cred)
+                console.print(f"  [green]✓[/green] Session cookie saved")
+                console.print(f"  [dim]Token: {redact_token(cred.access_token)}[/dim]")
+            except Exception as e:
+                console.print(f"  [red]✗[/red] Cookie extraction failed: {e}")
+                console.print("  [dim]Run `neuralclaw session login chatgpt` first, then retry.[/dim]")
+                return
+        else:
+            console.print("  [dim]Skipped. Run `neuralclaw init` to set an OpenAI API key.[/dim]")
+            return
+
+        health = auth.health_check()
+        _print_token_health(health)
+
+        set_primary = Prompt.ask("  Set chatgpt_token as primary provider? (y/N)", default="n")
+        if set_primary.lower() == "y":
+            update_config({"providers": {"primary": "chatgpt_token"}})
+            console.print("  [green]✓[/green] chatgpt_token set as primary provider")
+
+    else:  # claude
+        console.print(Panel(
+            "[bold]Claude Token Authentication[/bold]\n\n"
+            "Anthropic does not offer OAuth for consumer accounts.\n"
+            "NeuralClaw extracts the session key from a browser login.\n\n"
+            "[cyan]Option 1:[/cyan] Extract session key — opens a browser for one-time login,\n"
+            "  then extracts the session key automatically.\n\n"
+            "[cyan]Option 2:[/cyan] Skip — use an Anthropic API key instead.",
+            style="bold cyan",
+        ))
+
+        choice = Prompt.ask(
+            "  Choose auth method",
+            choices=["1", "2"],
+            default="1",
+        )
+
+        auth = AuthManager("claude")
+
+        if choice == "1":
+            profile_dir = str(SESSION_DIR / "claude")
+            console.print("\n  [dim]Opening browser for login...[/dim]")
+            try:
+                flow = ClaudeAuthFlow()
+                cred = await flow.guided_browser_login(profile_dir)
+                auth.save_credential(cred)
+                days_left = max(0, int((cred.expires_at - __import__("time").time()) / 86400))
+                console.print(f"  [green]✓[/green] Session key saved (~{days_left} days until expiry)")
+                console.print(f"  [dim]Token: {redact_token(cred.access_token)}[/dim]")
+            except Exception as e:
+                console.print(f"  [red]✗[/red] Session key extraction failed: {e}")
+                return
+        else:
+            console.print("  [dim]Skipped. Run `neuralclaw init` to set an Anthropic API key.[/dim]")
+            return
+
+        health = auth.health_check()
+        _print_token_health(health)
+
+        set_primary = Prompt.ask("  Set claude_token as primary provider? (y/N)", default="n")
+        if set_primary.lower() == "y":
+            update_config({"providers": {"primary": "claude_token"}})
+            console.print("  [green]✓[/green] claude_token set as primary provider")
+
+    console.print()
+
+
+@session.command("refresh")
+@click.argument("provider_name", type=click.Choice(["chatgpt", "claude"]))
+def session_refresh(provider_name: str) -> None:
+    """Force-refresh a token credential."""
+    asyncio.run(_session_refresh(provider_name))
+
+
+async def _session_refresh(provider_name: str) -> None:
+    from neuralclaw.session.auth import AuthManager, ChatGPTAuthFlow, redact_token
+
+    auth = AuthManager(provider_name)
+    health = auth.health_check()
+
+    if not health.get("has_token"):
+        console.print(f"[red]No token stored for {provider_name}.[/red] Run: neuralclaw session auth {provider_name}")
+        return
+
+    if provider_name == "chatgpt" and health.get("token_type") == "oauth":
+        cred = auth._store.load(provider_name)
+        if cred and cred.refresh_token:
+            try:
+                flow = ChatGPTAuthFlow()
+                new_cred = await flow.refresh_token(cred)
+                auth.save_credential(new_cred)
+                console.print(f"[green]✓[/green] Token refreshed: {redact_token(new_cred.access_token)}")
+            except Exception as e:
+                console.print(f"[red]✗[/red] Refresh failed: {e}")
+                console.print("[dim]Run `neuralclaw session auth chatgpt` to re-authenticate.[/dim]")
+        else:
+            console.print("[yellow]No refresh token available.[/yellow] Run: neuralclaw session auth chatgpt")
+    elif provider_name == "claude":
+        console.print(
+            "[yellow]Claude session keys cannot be refreshed automatically.[/yellow]\n"
+            "Run: neuralclaw session auth claude"
+        )
+    else:
+        console.print(f"[dim]Token type does not support refresh. Re-run: neuralclaw session auth {provider_name}[/dim]")
+
+
+def _print_token_health(health: dict) -> None:
+    """Print token health info."""
+    status = "[green]valid[/green]" if health.get("valid") else "[red]invalid[/red]"
+    token_type = health.get("token_type", "unknown")
+    ttl = health.get("ttl_seconds")
+    if ttl is not None:
+        if ttl > 86400:
+            ttl_str = f"{int(ttl / 86400)} days"
+        elif ttl > 3600:
+            ttl_str = f"{int(ttl / 3600)} hours"
+        else:
+            ttl_str = f"{int(ttl)} seconds"
+    else:
+        ttl_str = "unknown"
+
+    console.print(f"\n  Token status: {status}")
+    console.print(f"  Type: {token_type}")
+    console.print(f"  Time to expiry: {ttl_str}")
+    if health.get("needs_refresh"):
+        console.print("  [yellow]⚠ Refresh recommended[/yellow]")
+
+
+def _build_session_runtime(provider_key: str):
+    from neuralclaw.session.runtime import ManagedBrowserSession, SessionRuntimeConfig
+
+    config = load_config()
+    raw = config._raw.get("providers", {}).get(provider_key, {})
+    site_url = raw.get("site_url") or ("https://chatgpt.com/" if provider_key == "chatgpt_app" else "https://claude.ai/chats")
+    profile_dir = raw.get("profile_dir") or str(Path.home() / ".neuralclaw" / "sessions" / provider_key.replace("_app", ""))
+    return ManagedBrowserSession(SessionRuntimeConfig(
+        provider=provider_key,
+        profile_dir=profile_dir,
+        site_url=site_url,
+        model=raw.get("model", "auto"),
+        headless=bool(raw.get("headless", False)),
+        browser_channel=raw.get("browser_channel", ""),
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -831,19 +1396,24 @@ def status() -> None:
     table.add_row("Log Level", config.log_level)
 
     # Providers
-    providers = ["openai", "anthropic", "openrouter", "proxy", "local"]
+    providers = ["openai", "anthropic", "openrouter", "chatgpt_app", "claude_app", "proxy", "local"]
     for p in providers:
         key = get_api_key(p)
         status_str = "[green]✓ configured[/green]" if key else "[dim]not set[/dim]"
-        if p in ("local", "proxy"):
-            status_str = "[dim]no key needed[/dim]"
+        if p in ("local", "proxy", "chatgpt_app", "claude_app"):
+            if p in ("chatgpt_app", "claude_app"):
+                profile = config._raw.get("providers", {}).get(p, {}).get("profile_dir", "")
+                status_str = "[green]session configured[/green]" if profile else "[dim]not configured[/dim]"
+            else:
+                status_str = "[dim]no key needed[/dim]"
         table.add_row(f"Provider: {p}", status_str)
 
     table.add_row("Primary Provider", config.primary_provider.name if config.primary_provider else "none")
 
     # Channels (unified — all channels now in config.channels)
     for ch in config.channels:
-        ch_status = "[green]enabled[/green]" if ch.enabled else "[dim]disabled[/dim]"
+        trust_mode = ch.trust_mode or "auto"
+        ch_status = f"[green]enabled[/green] ({trust_mode})" if ch.enabled else f"[dim]disabled[/dim] ({trust_mode})"
         table.add_row(f"Channel: {ch.name}", ch_status)
 
     # Security
