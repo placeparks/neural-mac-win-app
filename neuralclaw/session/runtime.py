@@ -147,6 +147,11 @@ class ManagedBrowserSession:
         await self.close()
         await self.launch(force_page=True)
 
+    async def current_state(self) -> tuple[str, bool, str, str]:
+        """Inspect the current page state without forcing a navigation."""
+        await self.launch()
+        return await self._inspect_session_state()
+
     async def health(self) -> SessionHealth:
         if not self.is_supported:
             return SessionHealth(

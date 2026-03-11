@@ -101,6 +101,23 @@ class TestChatGPTTokenProvider:
         assert "Cookie" in headers
         assert "sess_abc" in headers["Cookie"]
 
+    async def test_is_available_recovers_from_profile(self):
+        from neuralclaw.providers.chatgpt_token import ChatGPTTokenProvider
+
+        provider = ChatGPTTokenProvider(model="auto", profile_dir="C:/profiles/chatgpt")
+        provider._auth = MagicMock()
+        provider._auth.get_valid_credential = AsyncMock(
+            return_value=TokenCredential(
+                access_token="cookie_tok",
+                provider="chatgpt",
+                token_type="cookie",
+                expires_at=time.time() + 3600,
+            )
+        )
+
+        assert await provider.is_available() is True
+        provider._auth.get_valid_credential.assert_awaited_once_with("C:/profiles/chatgpt")
+
 
 # ---------------------------------------------------------------------------
 # ClaudeTokenProvider
@@ -153,6 +170,23 @@ class TestClaudeTokenProvider:
         headers = provider._build_headers("sk_abc")
         assert "Cookie" in headers
         assert "sessionKey=sk_abc" in headers["Cookie"]
+
+    async def test_is_available_recovers_from_profile(self):
+        from neuralclaw.providers.claude_token import ClaudeTokenProvider
+
+        provider = ClaudeTokenProvider(model="auto", profile_dir="C:/profiles/claude")
+        provider._auth = MagicMock()
+        provider._auth.get_valid_credential = AsyncMock(
+            return_value=TokenCredential(
+                access_token="fresh_sk",
+                provider="claude",
+                token_type="session_key",
+                expires_at=time.time() + 86400,
+            )
+        )
+
+        assert await provider.is_available() is True
+        provider._auth.get_valid_credential.assert_awaited_once_with("C:/profiles/claude")
 
 
 # ---------------------------------------------------------------------------

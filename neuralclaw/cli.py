@@ -1014,7 +1014,7 @@ def _print_session_health(provider_name: str, health) -> None:
 @session.command("auth")
 @click.argument("provider_name", type=click.Choice(["chatgpt", "claude"]))
 def session_auth(provider_name: str) -> None:
-    """Set up token-based authentication (OAuth or session key)."""
+    """Set up token-based authentication (managed cookie or session key)."""
     asyncio.run(_session_auth(provider_name))
 
 
@@ -1028,14 +1028,17 @@ async def _session_auth(provider_name: str) -> None:
     )
 
     console.print(BANNER)
+    config = load_config()
 
     if provider_name == "chatgpt":
+        provider_cfg = config._raw.get("providers", {}).get("chatgpt_token", {})
+        profile_dir = provider_cfg.get("profile_dir") or str(SESSION_DIR / "chatgpt")
         console.print(Panel(
             "[bold]ChatGPT Token Authentication[/bold]\n\n"
-            "[cyan]Option 1:[/cyan] OAuth login — opens your browser for one-click sign-in.\n"
-            "  Tokens refresh automatically. [green](Recommended)[/green]\n\n"
+            "[cyan]Option 1:[/cyan] Managed browser login — opens the managed profile for\n"
+            "  manual ChatGPT login, then extracts the session cookie. [green](Recommended)[/green]\n\n"
             "[cyan]Option 2:[/cyan] Cookie extraction — extracts session cookie from an\n"
-            "  existing browser profile. Requires prior browser login.\n\n"
+            "  existing managed browser profile. Requires prior browser login.\n\n"
             "[cyan]Option 3:[/cyan] Skip — use an OpenAI API key instead.",
             style="bold cyan",
         ))
@@ -1049,20 +1052,45 @@ async def _session_auth(provider_name: str) -> None:
         auth = AuthManager("chatgpt")
 
         if choice == "1":
-            console.print("\n  [dim]Opening browser for OAuth login...[/dim]")
+            console.print("\n  [dim]Opening managed browser for ChatGPT login...[/dim]")
+            console.print("  [dim]If Cloudflare appears, complete it in the browser and keep this window open.[/dim]")
             try:
                 flow = ChatGPTAuthFlow()
-                cred = flow.oauth_flow(timeout=120)
+                seen_states: set[str] = set()
+
+                def _status_update(state: str, message: str, recommendation: str) -> None:
+                    if state in seen_states:
+                        return
+                    seen_states.add(state)
+                    if state == "challenge":
+                        console.print("  [yellow]Cloudflare challenge detected.[/yellow]")
+                        console.print("  [dim]Tick the checkbox or finish the challenge in the opened browser. NeuralClaw will keep waiting.[/dim]")
+                    elif state == "login_required":
+                        console.print("  [dim]Waiting for ChatGPT login in the managed browser...[/dim]")
+                    elif state == "ready":
+                        console.print("  [green]Session looks ready. Capturing the cookie...[/green]")
+                    elif recommendation:
+                        console.print(f"  [dim]{message}. {recommendation}[/dim]")
+
+                cred = await flow.guided_browser_login_with_status(profile_dir, _status_update)
                 auth.save_credential(cred)
-                console.print(f"  [green]✓[/green] OAuth token saved (expires in {int(cred.expires_at - __import__('time').time())}s)")
+                ttl = int(cred.expires_at - __import__('time').time()) if cred.expires_at > 0 else 0
+                console.print(f"  [green]✓[/green] Session cookie saved (expires in {ttl}s)")
                 console.print(f"  [dim]Token: {redact_token(cred.access_token)}[/dim]")
             except Exception as e:
-                console.print(f"  [red]✗[/red] OAuth failed: {e}")
-                console.print("  [dim]Try option 2 (cookie extraction) or 3 (API key).[/dim]")
-                return
+                console.print(f"  [red]✗[/red] ChatGPT login failed: {e}")
+                console.print("  [dim]Trying managed-profile cookie recovery...[/dim]")
+                try:
+                    flow = ChatGPTAuthFlow()
+                    cred = await flow.extract_cookie_from_profile(profile_dir)
+                    auth.save_credential(cred)
+                    console.print("  [green]✓[/green] Recovered ChatGPT session cookie from profile")
+                    console.print(f"  [dim]Token: {redact_token(cred.access_token)}[/dim]")
+                except Exception:
+                    console.print("  [dim]Try option 2 (cookie extraction) or 3 (API key).[/dim]")
+                    return
 
         elif choice == "2":
-            profile_dir = str(SESSION_DIR / "chatgpt")
             console.print(f"\n  [dim]Extracting cookie from profile: {profile_dir}[/dim]")
             try:
                 flow = ChatGPTAuthFlow()
@@ -1087,6 +1115,8 @@ async def _session_auth(provider_name: str) -> None:
             console.print("  [green]✓[/green] chatgpt_token set as primary provider")
 
     else:  # claude
+        provider_cfg = config._raw.get("providers", {}).get("claude_token", {})
+        profile_dir = provider_cfg.get("profile_dir") or str(SESSION_DIR / "claude")
         console.print(Panel(
             "[bold]Claude Token Authentication[/bold]\n\n"
             "Anthropic does not offer OAuth for consumer accounts.\n"
@@ -1106,7 +1136,6 @@ async def _session_auth(provider_name: str) -> None:
         auth = AuthManager("claude")
 
         if choice == "1":
-            profile_dir = str(SESSION_DIR / "claude")
             console.print("\n  [dim]Opening browser for login...[/dim]")
             try:
                 flow = ClaudeAuthFlow()
@@ -1141,35 +1170,21 @@ def session_refresh(provider_name: str) -> None:
 
 
 async def _session_refresh(provider_name: str) -> None:
-    from neuralclaw.session.auth import AuthManager, ChatGPTAuthFlow, redact_token
+    from neuralclaw.config import SESSION_DIR
+    from neuralclaw.session.auth import AuthManager, redact_token
 
     auth = AuthManager(provider_name)
     health = auth.health_check()
+    config = load_config()
+    provider_cfg = config._raw.get("providers", {}).get(f"{provider_name}_token", {})
+    profile_dir = provider_cfg.get("profile_dir") or str(SESSION_DIR / provider_name)
 
-    if not health.get("has_token"):
-        console.print(f"[red]No token stored for {provider_name}.[/red] Run: neuralclaw session auth {provider_name}")
-        return
-
-    if provider_name == "chatgpt" and health.get("token_type") == "oauth":
-        cred = auth._store.load(provider_name)
-        if cred and cred.refresh_token:
-            try:
-                flow = ChatGPTAuthFlow()
-                new_cred = await flow.refresh_token(cred)
-                auth.save_credential(new_cred)
-                console.print(f"[green]✓[/green] Token refreshed: {redact_token(new_cred.access_token)}")
-            except Exception as e:
-                console.print(f"[red]✗[/red] Refresh failed: {e}")
-                console.print("[dim]Run `neuralclaw session auth chatgpt` to re-authenticate.[/dim]")
-        else:
-            console.print("[yellow]No refresh token available.[/yellow] Run: neuralclaw session auth chatgpt")
-    elif provider_name == "claude":
-        console.print(
-            "[yellow]Claude session keys cannot be refreshed automatically.[/yellow]\n"
-            "Run: neuralclaw session auth claude"
-        )
-    else:
-        console.print(f"[dim]Token type does not support refresh. Re-run: neuralclaw session auth {provider_name}[/dim]")
+    try:
+        new_cred = await auth.force_refresh(profile_dir)
+        console.print(f"[green]✓[/green] Token refreshed: {redact_token(new_cred.access_token)}")
+    except Exception as e:
+        console.print(f"[red]✗[/red] Refresh failed: {e}")
+        console.print(f"[dim]Run `neuralclaw session auth {provider_name}` to re-authenticate.[/dim]")
 
 
 def _print_token_health(health: dict) -> None:

@@ -183,6 +183,73 @@ class TestAuthManager:
         assert result is not None
         assert result.access_token == "new_tok"
 
+    @patch("neuralclaw.session.auth._set_secret")
+    @patch("neuralclaw.session.auth._get_secret", return_value=None)
+    async def test_recovers_missing_chatgpt_credential_from_profile(self, mock_get, mock_set):
+        mgr = AuthManager("chatgpt")
+        recovered = TokenCredential(
+            access_token="cookie_tok",
+            provider="chatgpt",
+            token_type="cookie",
+            expires_at=time.time() + 3600,
+        )
+        mgr._chatgpt_flow = MagicMock()
+        mgr._chatgpt_flow.extract_cookie_from_profile = AsyncMock(return_value=recovered)
+
+        result = await mgr.get_valid_credential("C:/profiles/chatgpt")
+        assert result is not None
+        assert result.access_token == "cookie_tok"
+        mock_set.assert_called()
+
+    @patch("neuralclaw.session.auth._set_secret")
+    @patch("neuralclaw.session.auth._get_secret")
+    async def test_recovers_expired_claude_credential_from_profile(self, mock_get, mock_set):
+        expired = TokenCredential(
+            access_token="old_sk",
+            provider="claude",
+            token_type="session_key",
+            expires_at=time.time() - 10,
+        )
+        mock_get.return_value = expired.to_json()
+        mgr = AuthManager("claude")
+        recovered = TokenCredential(
+            access_token="new_sk",
+            provider="claude",
+            token_type="session_key",
+            expires_at=time.time() + 86400,
+        )
+        mgr._claude_flow = MagicMock()
+        mgr._claude_flow.extract_session_key = AsyncMock(return_value=recovered)
+
+        result = await mgr.get_valid_credential("C:/profiles/claude")
+        assert result is not None
+        assert result.access_token == "new_sk"
+        mock_set.assert_called()
+
+    @patch("neuralclaw.session.auth._set_secret")
+    @patch("neuralclaw.session.auth._get_secret")
+    async def test_force_refresh_claude_recovers_from_profile(self, mock_get, mock_set):
+        existing = TokenCredential(
+            access_token="old_sk",
+            provider="claude",
+            token_type="session_key",
+            expires_at=time.time() + 100,
+        )
+        mock_get.return_value = existing.to_json()
+        mgr = AuthManager("claude")
+        recovered = TokenCredential(
+            access_token="fresh_sk",
+            provider="claude",
+            token_type="session_key",
+            expires_at=time.time() + 86400,
+        )
+        mgr._claude_flow = MagicMock()
+        mgr._claude_flow.extract_session_key = AsyncMock(return_value=recovered)
+
+        result = await mgr.force_refresh("C:/profiles/claude")
+        assert result.access_token == "fresh_sk"
+        mock_set.assert_called()
+
     @patch("neuralclaw.session.auth._get_secret", return_value=None)
     def test_health_check_no_token(self, _):
         mgr = AuthManager("chatgpt")
@@ -246,6 +313,37 @@ class TestChatGPTAuthFlow:
             flow = ChatGPTAuthFlow()
             with pytest.raises(RuntimeError, match="Session cookie not found"):
                 await flow.extract_cookie_from_profile("/tmp/profile")
+
+    async def test_extract_cookie_supports_legacy_cookie_name(self):
+        mock_runtime = AsyncMock()
+        mock_runtime.extract_cookies.side_effect = [
+            [],
+            [{"name": "next-auth.session-token", "value": "legacy_cookie", "domain": ".chat.openai.com"}],
+        ]
+        mock_runtime.close = AsyncMock()
+
+        with patch("neuralclaw.session.runtime.ManagedBrowserSession", return_value=mock_runtime):
+            flow = ChatGPTAuthFlow()
+            cred = await flow.extract_cookie_from_profile("/tmp/profile")
+            assert cred.access_token == "legacy_cookie"
+            assert cred.token_type == "cookie"
+
+    async def test_guided_browser_login_extracts_cookie(self):
+        mock_runtime = AsyncMock()
+        mock_runtime.launch = AsyncMock()
+        mock_runtime.current_state = AsyncMock(return_value=("ready", True, "session ready", ""))
+        mock_runtime.extract_cookies.side_effect = [
+            [],
+            [{"name": "__Secure-next-auth.session-token", "value": "guided_cookie", "domain": ".chatgpt.com", "expires": time.time() + 86400}],
+        ]
+        mock_runtime.close = AsyncMock()
+
+        with patch("neuralclaw.session.runtime.ManagedBrowserSession", return_value=mock_runtime):
+            flow = ChatGPTAuthFlow()
+            cred = await flow.guided_browser_login("/tmp/profile")
+            assert cred.access_token == "guided_cookie"
+            assert cred.token_type == "cookie"
+            assert cred.provider == "chatgpt"
 
 
 # ---------------------------------------------------------------------------

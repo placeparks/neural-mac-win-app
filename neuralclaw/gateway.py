@@ -408,19 +408,19 @@ class NeuralClawGateway:
         from neuralclaw.session.auth import AuthManager
         auth = AuthManager("chatgpt")
         health = auth.health_check()
-        if not health.get("has_token") or not health.get("valid"):
+        if not health.get("has_token") and not cfg.profile_dir:
             return None
         from neuralclaw.providers.chatgpt_token import ChatGPTTokenProvider
-        return ChatGPTTokenProvider(model=cfg.model or "auto")
+        return ChatGPTTokenProvider(model=cfg.model or "auto", profile_dir=cfg.profile_dir)
 
     def _build_claude_token(self, cfg: Any) -> LLMProvider | None:
         from neuralclaw.session.auth import AuthManager
         auth = AuthManager("claude")
         health = auth.health_check()
-        if not health.get("has_token") or not health.get("valid"):
+        if not health.get("has_token") and not cfg.profile_dir:
             return None
         from neuralclaw.providers.claude_token import ClaudeTokenProvider
-        return ClaudeTokenProvider(model=cfg.model or "auto")
+        return ClaudeTokenProvider(model=cfg.model or "auto", profile_dir=cfg.profile_dir)
 
     def _get_provider_config(self, name: str) -> ProviderConfig:
         raw = self._config._raw.get("providers", {}).get(name, {})

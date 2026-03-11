@@ -1,6 +1,6 @@
 # NeuralClaw Documentation
 
-Version: `0.7.0`
+Version: `0.7.5`
 
 Core docs for the current repository state:
 
@@ -24,4 +24,4 @@ Current highlights:
 - direct browser-session providers: `chatgpt_app`, `claude_app`
 - API-backed providers: `openai`, `anthropic`, `openrouter`, `proxy`, `local`
 - channel trust modes: `open`, `pair`, `bound`
-- CLI session commands: `setup`, `status`, `login`, `repair`
+- CLI session commands: `setup`, `status`, `login`, `open`, `diagnose`, `auth`, `refresh`, `repair`

@@ -2,22 +2,46 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
+## [0.7.5] - 2026-03-11
+
+### Changed
+- **ChatGPT token bootstrap**: `neuralclaw session auth chatgpt` now uses a
+  managed-browser login flow that captures the ChatGPT session cookie directly
+  from the managed profile instead of relying on the dead Auth0 login endpoint.
+- **Cloudflare UX**: ChatGPT auth now surfaces state changes while it waits,
+  including explicit terminal guidance when Cloudflare verification is active,
+  when normal login is still pending, and when the session is ready for cookie
+  capture.
+- **Token recovery**: `chatgpt_token` and `claude_token` providers now try to
+  recover credentials from their managed browser profiles when stored tokens are
+  stale or missing, and `session refresh` can reacquire credentials from those
+  profiles.
+
+### Fixed
+- **Gateway token-provider bootstrapping**: token-backed providers are no longer
+  rejected just because the stored credential has expired when a recoverable
+  managed profile exists.
+- **Legacy ChatGPT cookie support**: ChatGPT token auth now accepts both
+  `__Secure-next-auth.session-token` and `next-auth.session-token` cookies
+  across `chatgpt.com` and `chat.openai.com` profile domains.
+
 ## [0.7.0] - 2026-03-11
 
 ### Added
-- **Token-based auth for ChatGPT**: OAuth 2.0 flow with automatic token refresh,
-  plus session cookie extraction as fallback. Run `neuralclaw session auth chatgpt`.
+- **Token-based auth for ChatGPT**: Managed-browser login and session cookie
+  extraction for `neuralclaw session auth chatgpt`.
 - **Token-based auth for Claude**: Session key extraction from browser cookies.
   Run `neuralclaw session auth claude`.
 - **New providers**: `chatgpt_token` (supports tool use) and `claude_token` for
   token-based API access without persistent browser automation.
 - **CLI auth wizard**: `neuralclaw session auth <provider>` guides users through
-  OAuth or session key setup with Rich panels and step-by-step flow.
-- **Token refresh**: `neuralclaw session refresh chatgpt` force-refreshes OAuth tokens.
+  managed cookie or session key setup with Rich panels and step-by-step flow.
+- **Token refresh**: `neuralclaw session refresh chatgpt` refreshes or reacquires
+  the stored ChatGPT credential when possible.
 - **Token health monitoring**: `neuralclaw session status` shows token validity and
   expiry alongside browser session status. `neuralclaw doctor` reports token health.
 - **Secure token storage**: All tokens stored in OS keychain via `keyring`, never
-  in config files or logs. CSRF protection on OAuth callback.
+  in config files or logs.
 - **Auto-fallback chain**: Token providers automatically fall back to browser session
   providers, then to API key providers.
 - **42 new tests**: Comprehensive coverage for auth module, token store, credential

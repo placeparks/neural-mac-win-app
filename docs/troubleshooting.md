@@ -71,6 +71,17 @@ then rerun:
 neuralclaw session diagnose chatgpt
 ```
 
+If you are using token auth, the preferred bootstrap flow is:
+
+```bash
+neuralclaw session auth chatgpt
+```
+
+NeuralClaw now keeps waiting while the challenge is active and prints a
+terminal hint when Cloudflare is detected. Complete the checkbox in the opened
+browser window, keep the terminal open, and wait for the cookie capture to
+finish.
+
 ### Proxy override does not behave as expected
 
 ```bash

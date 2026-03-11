@@ -1,5 +1,5 @@
 """
-ChatGPT token-based provider — uses OAuth or cookie tokens for API access.
+ChatGPT token-based provider — primarily uses managed-session cookies.
 """
 
 from __future__ import annotations
@@ -16,13 +16,14 @@ _CHATGPT_API_URL = "https://chatgpt.com/backend-api/conversation"
 
 
 class ChatGPTTokenProvider(LLMProvider):
-    """ChatGPT provider using token-based auth (OAuth or session cookie)."""
+    """ChatGPT provider using token-based auth (managed cookie or bearer token)."""
 
     name = "chatgpt_token"
     supports_tools = True
 
-    def __init__(self, *, model: str = "auto") -> None:
+    def __init__(self, *, model: str = "auto", profile_dir: str = "") -> None:
         self._model = model or "auto"
+        self._profile_dir = profile_dir
         self._auth = AuthManager("chatgpt")
 
     async def complete(
@@ -32,7 +33,7 @@ class ChatGPTTokenProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ) -> LLMResponse:
-        cred = await self._auth.get_valid_credential()
+        cred = await self._auth.get_valid_credential(self._profile_dir)
         if cred is None:
             raise RuntimeError(
                 "No valid ChatGPT token. Run: neuralclaw session auth chatgpt"
@@ -66,7 +67,7 @@ class ChatGPTTokenProvider(LLMProvider):
                 return await self._parse_response(resp)
 
     async def is_available(self) -> bool:
-        cred = await self._auth.get_valid_credential()
+        cred = await self._auth.get_valid_credential(self._profile_dir)
         return cred is not None
 
     async def get_health(self) -> dict[str, Any]:

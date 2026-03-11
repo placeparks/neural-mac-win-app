@@ -1,7 +1,7 @@
 """
 Token-based authentication for ChatGPT and Claude app sessions.
 
-Provides OAuth 2.0 flow for ChatGPT, session key extraction for Claude,
+Provides managed-cookie auth for ChatGPT, session-key extraction for Claude,
 and unified token management with secure keyring storage.
 """
 
@@ -16,7 +16,7 @@ import webbrowser
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import aiohttp
@@ -102,6 +102,20 @@ _OPENAI_AUDIENCE = "https://api.openai.com/v1"
 _OPENAI_SCOPE = "openid email profile offline_access"
 
 
+def _run_coro_sync(coro: Any) -> Any:
+    """Run a coroutine from synchronous code without relying on a global loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -109,7 +123,7 @@ def _find_free_port() -> int:
 
 
 class ChatGPTAuthFlow:
-    """Handles ChatGPT token acquisition via OAuth or cookie extraction."""
+    """Handles ChatGPT token acquisition from managed browser profiles."""
 
     def oauth_flow(self, timeout: int = 120) -> TokenCredential:
         """Run OAuth 2.0 authorization code flow with local callback server."""
@@ -219,7 +233,7 @@ class ChatGPTAuthFlow:
                         )
                     return await resp.json()
 
-        data = asyncio.get_event_loop().run_until_complete(_fetch())
+        data = _run_coro_sync(_fetch())
 
         expires_in = data.get("expires_in", 3600)
         return TokenCredential(
@@ -276,8 +290,12 @@ class ChatGPTAuthFlow:
         )
         try:
             cookies = await runtime.extract_cookies("chatgpt.com")
+            cookies.extend(await runtime.extract_cookies("chat.openai.com"))
             for cookie in cookies:
-                if cookie.get("name") == "__Secure-next-auth.session-token":
+                if cookie.get("name") in {
+                    "__Secure-next-auth.session-token",
+                    "next-auth.session-token",
+                }:
                     expires = cookie.get("expires", 0)
                     return TokenCredential(
                         access_token=cookie["value"],
@@ -289,6 +307,63 @@ class ChatGPTAuthFlow:
                 "Session cookie not found. Log in to ChatGPT first: "
                 "neuralclaw session login chatgpt"
             )
+        finally:
+            await runtime.close()
+
+    async def guided_browser_login(self, profile_dir: str) -> TokenCredential:
+        """Open a headed browser for manual login, then extract the session cookie."""
+        return await self.guided_browser_login_with_status(profile_dir)
+
+    async def guided_browser_login_with_status(
+        self,
+        profile_dir: str,
+        status_callback: Callable[[str, str, str], None] | None = None,
+    ) -> TokenCredential:
+        """Open a headed browser, report session state changes, then extract the cookie."""
+        from neuralclaw.session.runtime import ManagedBrowserSession, SessionRuntimeConfig
+
+        runtime = ManagedBrowserSession(
+            SessionRuntimeConfig(
+                provider="chatgpt_app",
+                profile_dir=profile_dir,
+                site_url="https://chatgpt.com",
+                headless=False,
+            )
+        )
+        try:
+            await runtime.launch(force_page=True)
+            last_state = ""
+            for _ in range(180):
+                state, _logged_in, message, recommendation = await runtime.current_state()
+                if state != last_state:
+                    last_state = state
+                    if status_callback:
+                        status_callback(state, message, recommendation)
+                if state == "auth_rejected":
+                    raise RuntimeError(message)
+
+                cookies = await runtime.extract_cookies("chatgpt.com")
+                cookies.extend(await runtime.extract_cookies("chat.openai.com"))
+                for cookie in cookies:
+                    if cookie.get("name") in {
+                        "__Secure-next-auth.session-token",
+                        "next-auth.session-token",
+                    }:
+                        expires = cookie.get("expires", 0)
+                        return TokenCredential(
+                            access_token=cookie["value"],
+                            expires_at=expires if expires > 0 else time.time() + 86400 * 30,
+                            token_type="cookie",
+                            provider="chatgpt",
+                        )
+                await asyncio.sleep(1)
+            if last_state == "challenge":
+                raise RuntimeError(
+                    "Timed out while Cloudflare verification was still active. "
+                    "Complete the checkbox/challenge in the managed browser, then rerun "
+                    "`neuralclaw session auth chatgpt`."
+                )
+            raise RuntimeError("Timed out waiting for ChatGPT login")
         finally:
             await runtime.close()
 
@@ -377,11 +452,29 @@ class AuthManager:
         self._chatgpt_flow = ChatGPTAuthFlow() if provider == "chatgpt" else None
         self._claude_flow = ClaudeAuthFlow() if provider == "claude" else None
 
-    async def get_valid_credential(self) -> TokenCredential | None:
+    async def recover_from_profile(self, profile_dir: str) -> TokenCredential | None:
+        """Recover a provider credential from a managed browser profile."""
+        if not profile_dir:
+            return None
+
+        try:
+            if self.provider == "chatgpt" and self._chatgpt_flow:
+                cred = await self._chatgpt_flow.extract_cookie_from_profile(profile_dir)
+            elif self.provider == "claude" and self._claude_flow:
+                cred = await self._claude_flow.extract_session_key(profile_dir)
+            else:
+                return None
+        except Exception:
+            return None
+
+        self._store.save(self.provider, cred)
+        return cred
+
+    async def get_valid_credential(self, profile_dir: str = "") -> TokenCredential | None:
         """Load credential, auto-refresh if possible, return None if invalid."""
         cred = self._store.load(self.provider)
         if cred is None:
-            return None
+            return await self.recover_from_profile(profile_dir)
 
         if not self._store.is_expired(cred):
             # Proactively refresh if approaching expiry (ChatGPT OAuth only)
@@ -394,7 +487,9 @@ class AuthManager:
                     cred = await self._chatgpt_flow.refresh_token(cred)
                     self._store.save(self.provider, cred)
                 except Exception:
-                    pass  # Still valid, just couldn't refresh yet
+                    recovered = await self.recover_from_profile(profile_dir)
+                    if recovered is not None:
+                        cred = recovered
             return cred
 
         # Token is expired — try refresh for ChatGPT OAuth
@@ -404,9 +499,41 @@ class AuthManager:
                 self._store.save(self.provider, cred)
                 return cred
             except Exception:
+                recovered = await self.recover_from_profile(profile_dir)
+                if recovered is not None:
+                    return recovered
                 return None
 
+        recovered = await self.recover_from_profile(profile_dir)
+        if recovered is not None:
+            return recovered
+
         return None  # Expired and can't refresh
+
+    async def force_refresh(self, profile_dir: str = "") -> TokenCredential:
+        """Refresh or reacquire a credential, depending on provider/token type."""
+        cred = self._store.load(self.provider)
+
+        if (
+            self.provider == "chatgpt"
+            and cred
+            and cred.token_type == "oauth"
+            and cred.refresh_token
+            and self._chatgpt_flow
+        ):
+            new_cred = await self._chatgpt_flow.refresh_token(cred)
+            self._store.save(self.provider, new_cred)
+            return new_cred
+
+        recovered = await self.recover_from_profile(profile_dir)
+        if recovered is not None:
+            return recovered
+
+        if self.provider == "chatgpt":
+            raise RuntimeError(
+                "No refreshable ChatGPT OAuth token and no recoverable browser session"
+            )
+        raise RuntimeError("No recoverable Claude session key found in the managed profile")
 
     def save_credential(self, credential: TokenCredential) -> None:
         self._store.save(self.provider, credential)

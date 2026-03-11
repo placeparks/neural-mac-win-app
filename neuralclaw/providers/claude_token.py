@@ -22,8 +22,9 @@ class ClaudeTokenProvider(LLMProvider):
     name = "claude_token"
     supports_tools = False
 
-    def __init__(self, *, model: str = "auto") -> None:
+    def __init__(self, *, model: str = "auto", profile_dir: str = "") -> None:
         self._model = model or "auto"
+        self._profile_dir = profile_dir
         self._auth = AuthManager("claude")
         self._org_id: str | None = None
 
@@ -34,7 +35,7 @@ class ClaudeTokenProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ) -> LLMResponse:
-        cred = await self._auth.get_valid_credential()
+        cred = await self._auth.get_valid_credential(self._profile_dir)
         if cred is None:
             raise RuntimeError(
                 "No valid Claude session key. Run: neuralclaw session auth claude"
@@ -61,7 +62,7 @@ class ClaudeTokenProvider(LLMProvider):
         )
 
     async def is_available(self) -> bool:
-        cred = await self._auth.get_valid_credential()
+        cred = await self._auth.get_valid_credential(self._profile_dir)
         return cred is not None
 
     async def get_health(self) -> dict[str, Any]:

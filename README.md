@@ -89,6 +89,8 @@ Notes:
 - `chatgpt_app` and `claude_app` use managed persistent browser profiles.
 - `chatgpt_app` is experimental because upstream auth may reject browser-controlled login.
 - Use `neuralclaw session diagnose chatgpt` if ChatGPT lands on `/api/auth/error` or a verification loop.
+- Use `neuralclaw session auth chatgpt` to capture a managed-profile ChatGPT session cookie.
+- If ChatGPT shows Cloudflare, complete the challenge in the opened browser and leave the terminal running until NeuralClaw captures the cookie.
 - App-session providers are text-first and may fall back to tool-capable providers when tool calls are required.
 - `proxy` remains useful for self-hosted relays or API-normalized session bridges.
 - `local` works with Ollama and defaults to `qwen3.5:2b` unless you choose another local model.

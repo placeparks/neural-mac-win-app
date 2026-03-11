@@ -83,7 +83,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "chatgpt_token": {
             "model": "auto",
-            "auth_method": "oauth",
+            "auth_method": "cookie",
             "profile_dir": str(SESSION_DIR / "chatgpt"),
         },
         "claude_token": {
