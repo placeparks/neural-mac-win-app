@@ -11,7 +11,7 @@ import asyncio
 import json
 import time
 import uuid
-from typing import Any
+from typing import Any, AsyncIterator
 
 from neuralclaw.channels.protocol import ChannelAdapter, ChannelMessage
 
@@ -92,6 +92,7 @@ CHAT_HTML = """<!DOCTYPE html>
 <script>
   const $ = id => document.getElementById(id);
   let ws;
+  let streamingNode = null;
 
   function connect() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -103,9 +104,35 @@ CHAT_HTML = """<!DOCTYPE html>
     };
     ws.onmessage = e => {
       const data = JSON.parse(e.data);
+      if (data.type === 'response_delta') {
+        $('typing').style.display = 'none';
+        if (!streamingNode) {
+          streamingNode = addMsg('', 'agent');
+          streamingNode.dataset.content = '';
+        }
+        const next = (streamingNode.dataset.content || '') + (data.delta || '');
+        streamingNode.dataset.content = next;
+        streamingNode.childNodes[0].textContent = next;
+        $('messages').scrollTop = $('messages').scrollHeight;
+        return;
+      }
       if (data.type === 'response') {
         $('typing').style.display = 'none';
+        if (streamingNode) {
+          streamingNode.remove();
+          streamingNode = null;
+        }
         addMsg(data.content, 'agent', data.confidence);
+        return;
+      }
+      if (data.type === 'response_complete') {
+        $('typing').style.display = 'none';
+        const content = data.content || (streamingNode ? streamingNode.dataset.content : '') || '';
+        if (streamingNode) {
+          streamingNode.remove();
+          streamingNode = null;
+        }
+        addMsg(content, 'agent', data.confidence);
       }
     };
   }
@@ -119,6 +146,7 @@ CHAT_HTML = """<!DOCTYPE html>
     el.innerHTML = text + `<div class="meta">${meta}</div>`;
     $('messages').appendChild(el);
     $('messages').scrollTop = $('messages').scrollHeight;
+    return el;
   }
 
   function sendMsg() {
@@ -213,6 +241,38 @@ class WebChatAdapter(ChannelAdapter):
 
         print(f"[WebChat] No active WS client for response")
 
+    async def send_stream(
+        self,
+        channel_id: str,
+        token_iterator: AsyncIterator[str],
+        **kwargs: Any,
+    ) -> None:
+        """Send incremental response chunks over the active WebSocket."""
+        ws_client = self._get_ws_client(channel_id)
+        if ws_client is None:
+            await super().send_stream(channel_id, token_iterator, **kwargs)
+            return
+
+        parts: list[str] = []
+        async for token in token_iterator:
+            parts.append(token)
+            try:
+                await ws_client.send_json({"type": "response_delta", "delta": token})
+            except Exception as e:
+                print(f"[WebChat] Stream send error: {e}")
+                break
+
+        try:
+            await ws_client.send_json(
+                {
+                    "type": "response_complete",
+                    "content": "".join(parts),
+                    "confidence": kwargs.get("confidence"),
+                }
+            )
+        except Exception as e:
+            print(f"[WebChat] Stream completion error: {e}")
+
     async def _handle_chat_page(self, request: Any) -> Any:
         """Serve the embedded chat HTML."""
         return web.Response(text=CHAT_HTML, content_type="text/html")
@@ -251,3 +311,12 @@ class WebChatAdapter(ChannelAdapter):
             self._ws_clients.pop(session_id, None)
 
         return ws_response
+
+    def _get_ws_client(self, channel_id: str) -> Any | None:
+        ws_client = self._ws_clients.get(channel_id)
+        if ws_client is not None and not ws_client.closed:
+            return ws_client
+        for ws in self._ws_clients.values():
+            if not ws.closed:
+                return ws
+        return None

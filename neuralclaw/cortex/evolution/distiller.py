@@ -22,6 +22,7 @@ from neuralclaw.bus.neural_bus import EventType, NeuralBus
 from neuralclaw.cortex.memory.episodic import EpisodicMemory
 from neuralclaw.cortex.memory.procedural import ProceduralMemory, ProcedureStep
 from neuralclaw.cortex.memory.semantic import SemanticMemory
+from neuralclaw.cortex.reasoning.structured import ExtractedFact, StructuredReasoner
 
 
 # ---------------------------------------------------------------------------
@@ -56,14 +57,20 @@ class ExperienceDistiller:
         procedural: ProceduralMemory,
         bus: NeuralBus | None = None,
         distill_interval: int = 50,  # Every N interactions
+        structured: StructuredReasoner | None = None,
     ) -> None:
         self._episodic = episodic
         self._semantic = semantic
         self._procedural = procedural
         self._bus = bus
         self._distill_interval = distill_interval
+        self._structured = structured
         self._interaction_count = 0
         self._last_distill: float = 0.0
+
+    def set_structured(self, structured: StructuredReasoner | None) -> None:
+        """Inject the shared structured reasoner."""
+        self._structured = structured
 
     @property
     def should_distill(self) -> bool:
@@ -85,16 +92,14 @@ class ExperienceDistiller:
         start = time.time()
         report = DistillationReport()
 
-        # Get recent episodes
-        assert self._episodic._db is not None
-        rows = await self._episodic._db.execute_fetchall(
-            """SELECT id, content, source, importance, access_count, created_at
-               FROM episodes
-               WHERE created_at > ?
-               ORDER BY created_at DESC
-               LIMIT 200""",
-            (self._last_distill or (time.time() - 86400 * 7),),  # Last 7 days or since last distill
-        )
+        # Get recent episodes via public API
+        since_ts = self._last_distill if self._last_distill > 0 else (time.time() - 86400 * 7)
+        episodes = await self._episodic.get_recent(limit=200, since=since_ts)
+        # Convert to the tuple format the pattern-finding code expects
+        rows = [
+            (ep.id, ep.content, ep.source, ep.importance, ep.access_count, ep.timestamp)
+            for ep in episodes
+        ]
         report.episodes_reviewed = len(rows)
 
         if not rows:
@@ -112,12 +117,11 @@ class ExperienceDistiller:
                     await self._semantic.upsert_entity(
                         name=pattern["name"],
                         entity_type="distilled_knowledge",
-                        properties={
+                        attributes={
                             "source": "distillation",
                             "frequency": pattern["frequency"],
                             "context": pattern.get("context", ""),
                         },
-                        confidence=min(0.9, 0.5 + pattern["frequency"] * 0.1),
                     )
                     report.facts_extracted += 1
                 except Exception:
@@ -143,6 +147,22 @@ class ExperienceDistiller:
                 except Exception:
                     pass
 
+        structured_facts = await self._extract_structured_facts(rows)
+        for episode_id, fact in structured_facts:
+            try:
+                await self._semantic.add_relationship(
+                    from_name=fact.subject,
+                    relation_type=fact.predicate,
+                    to_name=fact.obj,
+                    confidence=fact.confidence,
+                    from_type="distilled_subject",
+                    to_type="distilled_object",
+                    source_event_id=episode_id,
+                )
+                report.facts_extracted += 1
+            except Exception:
+                pass
+
         report.elapsed_ms = (time.time() - start) * 1000
 
         # Reset
@@ -164,6 +184,34 @@ class ExperienceDistiller:
             )
 
         return report
+
+    async def _extract_structured_facts(
+        self,
+        rows: list[tuple],
+    ) -> list[tuple[str, ExtractedFact]]:
+        if not self._structured:
+            return []
+
+        facts: list[tuple[str, ExtractedFact]] = []
+        for row in rows[:10]:
+            episode_id = str(row[0])
+            content = str(row[1] or "").strip()
+            if not content:
+                continue
+            try:
+                fact = await self._structured.extract(
+                    text=content,
+                    schema=ExtractedFact,
+                    instructions=(
+                        "Extract one durable factual relationship from this episode. "
+                        "Use concise normalized subject, predicate, and object fields."
+                    ),
+                )
+            except Exception:
+                continue
+            if fact.subject and fact.predicate and fact.obj:
+                facts.append((episode_id, fact))
+        return facts
 
     def _find_patterns(self, rows: list[tuple]) -> list[dict[str, Any]]:
         """

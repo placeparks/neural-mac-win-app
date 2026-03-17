@@ -27,6 +27,7 @@ class ToolParameter:
     required: bool = True
     default: Any = None
     enum: list[str] | None = None
+    items_type: str = "string"  # For arrays: the type of each element
 
     def to_json_schema(self) -> dict[str, Any]:
         schema: dict[str, Any] = {
@@ -35,6 +36,13 @@ class ToolParameter:
         }
         if self.enum:
             schema["enum"] = self.enum
+        # OpenAI requires "items" for array types
+        if self.type == "array":
+            if self.items_type == "array":
+                # Nested array (e.g. 2D sheet values)
+                schema["items"] = {"type": "array", "items": {"type": "string"}}
+            else:
+                schema["items"] = {"type": self.items_type}
         return schema
 
 

@@ -22,6 +22,7 @@ from neuralclaw.bus.neural_bus import EventType, NeuralBus
 from neuralclaw.cortex.memory.retrieval import MemoryContext
 from neuralclaw.cortex.perception.intake import Signal
 from neuralclaw.cortex.reasoning.deliberate import ConfidenceEnvelope, DeliberativeReasoner, ToolDef
+from neuralclaw.cortex.reasoning.structured import StructuredOutputError, StructuredReasoner, TaskDecomposition
 
 
 # ---------------------------------------------------------------------------
@@ -71,9 +72,11 @@ class ReflectiveReasoner:
         self,
         bus: NeuralBus,
         deliberate: DeliberativeReasoner,
+        structured: StructuredReasoner | None = None,
     ) -> None:
         self._bus = bus
         self._deliberate = deliberate
+        self._structured = structured
 
     def should_reflect(self, signal: Signal, memory_ctx: MemoryContext) -> bool:
         """
@@ -109,6 +112,7 @@ class ReflectiveReasoner:
         memory_ctx: MemoryContext,
         tools: list[ToolDef] | None = None,
         conversation_history: list[dict[str, str]] | None = None,
+        extra_system_sections: list[str] | None = None,
     ) -> ConfidenceEnvelope:
         """Run the full reflective reasoning loop."""
 
@@ -119,12 +123,12 @@ class ReflectiveReasoner:
         )
 
         # Step 1: Decompose into sub-tasks
-        plan = await self._decompose(signal, memory_ctx)
+        plan = await self._decompose(signal, memory_ctx, extra_system_sections)
 
         if not plan.sub_tasks:
             # Fall back to deliberative if decomposition fails
             return await self._deliberate.reason(
-                signal, memory_ctx, tools, conversation_history,
+                signal, memory_ctx, tools, conversation_history, extra_system_sections,
             )
 
         # Step 2: Execute each sub-task
@@ -142,7 +146,7 @@ class ReflectiveReasoner:
             )
 
             result = await self._deliberate.reason(
-                sub_signal, memory_ctx, tools, conversation_history,
+                sub_signal, memory_ctx, tools, conversation_history, extra_system_sections,
             )
 
             task.result = result.response
@@ -150,15 +154,22 @@ class ReflectiveReasoner:
             task.status = "complete"
 
         # Step 3: Self-critique
-        critique_passed = await self._self_critique(plan, signal, memory_ctx)
+        critique_passed = await self._self_critique(plan, signal, memory_ctx, extra_system_sections)
 
         # Step 4: Revise if needed (one revision attempt)
         if not critique_passed and plan.revisions < plan.max_revisions:
             plan.revisions += 1
-            plan = await self._revise_plan(plan, signal, memory_ctx, tools, conversation_history)
+            plan = await self._revise_plan(
+                plan,
+                signal,
+                memory_ctx,
+                tools,
+                conversation_history,
+                extra_system_sections,
+            )
 
         # Step 5: Synthesize final answer
-        envelope = await self._synthesize(plan, signal, memory_ctx)
+        envelope = await self._synthesize(plan, signal, memory_ctx, extra_system_sections)
 
         await self._bus.publish(
             EventType.REFLECTION_COMPLETE,
@@ -174,9 +185,37 @@ class ReflectiveReasoner:
         return envelope
 
     async def _decompose(
-        self, signal: Signal, memory_ctx: MemoryContext,
+        self,
+        signal: Signal,
+        memory_ctx: MemoryContext,
+        extra_system_sections: list[str] | None = None,
     ) -> ReflectionPlan:
         """Ask the LLM to decompose the query into sub-tasks."""
+        if self._structured:
+            try:
+                result = await self._structured.extract(
+                    text=signal.content,
+                    schema=TaskDecomposition,
+                    instructions=(
+                        f"Break down the request into {self.MAX_SUB_TASKS} or fewer "
+                        "clear sequential sub_tasks. Set estimated_complexity and list any "
+                        "tools that are likely required."
+                    ),
+                    max_retries=3,
+                    extra_system_sections=extra_system_sections,
+                )
+                sub_tasks = [
+                    SubTask(id=i, description=str(desc))
+                    for i, desc in enumerate(result.sub_tasks[: self.MAX_SUB_TASKS])
+                ]
+                if sub_tasks:
+                    return ReflectionPlan(
+                        original_query=signal.content,
+                        sub_tasks=sub_tasks,
+                    )
+            except StructuredOutputError:
+                pass
+
         decompose_signal = Signal(
             content=(
                 f"Break down this complex request into {self.MAX_SUB_TASKS} or fewer "
@@ -191,7 +230,11 @@ class ReflectiveReasoner:
             channel_id=signal.channel_id,
         )
 
-        result = await self._deliberate.reason(decompose_signal, memory_ctx)
+        result = await self._deliberate.reason(
+            decompose_signal,
+            memory_ctx,
+            extra_system_sections=extra_system_sections,
+        )
 
         # Parse sub-tasks from LLM response
         sub_tasks: list[SubTask] = []
@@ -214,7 +257,11 @@ class ReflectiveReasoner:
         )
 
     async def _self_critique(
-        self, plan: ReflectionPlan, signal: Signal, memory_ctx: MemoryContext,
+        self,
+        plan: ReflectionPlan,
+        signal: Signal,
+        memory_ctx: MemoryContext,
+        extra_system_sections: list[str] | None = None,
     ) -> bool:
         """
         Ask the LLM to evaluate the quality of sub-task results.
@@ -238,7 +285,11 @@ class ReflectiveReasoner:
             channel_id=signal.channel_id,
         )
 
-        result = await self._deliberate.reason(critique_signal, memory_ctx)
+        result = await self._deliberate.reason(
+            critique_signal,
+            memory_ctx,
+            extra_system_sections=extra_system_sections,
+        )
         return "PASS" in result.response.upper()
 
     async def _revise_plan(
@@ -248,6 +299,7 @@ class ReflectiveReasoner:
         memory_ctx: MemoryContext,
         tools: list[ToolDef] | None,
         history: list[dict[str, str]] | None,
+        extra_system_sections: list[str] | None = None,
     ) -> ReflectionPlan:
         """Re-execute failed or low-confidence sub-tasks."""
         for task in plan.sub_tasks:
@@ -264,14 +316,24 @@ class ReflectiveReasoner:
                     channel_type=signal.channel_type,
                     channel_id=signal.channel_id,
                 )
-                result = await self._deliberate.reason(sub_signal, memory_ctx, tools, history)
+                result = await self._deliberate.reason(
+                    sub_signal,
+                    memory_ctx,
+                    tools,
+                    history,
+                    extra_system_sections,
+                )
                 task.result = result.response
                 task.confidence = result.confidence
 
         return plan
 
     async def _synthesize(
-        self, plan: ReflectionPlan, signal: Signal, memory_ctx: MemoryContext,
+        self,
+        plan: ReflectionPlan,
+        signal: Signal,
+        memory_ctx: MemoryContext,
+        extra_system_sections: list[str] | None = None,
     ) -> ConfidenceEnvelope:
         """Synthesize the final answer from all sub-task results."""
         results_text = "\n\n".join(
@@ -292,7 +354,11 @@ class ReflectiveReasoner:
             channel_id=signal.channel_id,
         )
 
-        result = await self._deliberate.reason(synth_signal, memory_ctx)
+        result = await self._deliberate.reason(
+            synth_signal,
+            memory_ctx,
+            extra_system_sections=extra_system_sections,
+        )
 
         # Compute aggregate confidence
         avg_confidence = (

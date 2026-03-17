@@ -14,10 +14,15 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import aiosqlite
+
+from neuralclaw.bus.neural_bus import EventType, NeuralBus
+
+if TYPE_CHECKING:
+    from neuralclaw.cortex.memory.vector import VectorMemory
 
 
 # ---------------------------------------------------------------------------
@@ -61,9 +66,16 @@ class EpisodicMemory:
     - Access tracking (strengthens frequently accessed memories)
     """
 
-    def __init__(self, db_path: str = ":memory:") -> None:
+    def __init__(
+        self,
+        db_path: str = ":memory:",
+        vector_memory: VectorMemory | None = None,
+        bus: NeuralBus | None = None,
+    ) -> None:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
+        self._vector_memory = vector_memory
+        self._bus = bus
 
     async def initialize(self) -> None:
         """Initialize the database and create tables."""
@@ -153,6 +165,27 @@ class EpisodicMemory:
             ),
         )
         await self._db.commit()
+
+        if self._vector_memory:
+            try:
+                await self._vector_memory.embed_and_store(
+                    episode.content,
+                    episode.id,
+                    "episodic",
+                )
+            except Exception as exc:
+                if self._bus:
+                    await self._bus.publish(
+                        EventType.ERROR,
+                        {
+                            "component": "episodic_memory",
+                            "operation": "vector_store",
+                            "episode_id": episode.id,
+                            "error": str(exc),
+                        },
+                        source="memory.episodic",
+                    )
+
         return episode
 
     async def search(
@@ -163,6 +196,18 @@ class EpisodicMemory:
     ) -> list[EpisodeSearchResult]:
         """Full-text search across episodic memories."""
         assert self._db is not None
+
+        # Sanitize query for FTS5: strip special chars, require at least one word
+        import re
+        sanitized = re.sub(r'[^\w\s]', ' ', query).strip()
+        if not sanitized or len(sanitized) < 2:
+            return []
+
+        # Use prefix matching for better recall on partial words
+        tokens = sanitized.split()
+        fts_query = " OR ".join(f'"{t}"' for t in tokens[:10] if len(t) >= 2)
+        if not fts_query:
+            return []
 
         rows = await self._db.execute_fetchall(
             """SELECT e.id, e.timestamp, e.source, e.author, e.content,
@@ -175,7 +220,7 @@ class EpisodicMemory:
                AND e.importance >= ?
                ORDER BY rank
                LIMIT ?""",
-            (query, min_importance, limit),
+            (fts_query, min_importance, limit),
         )
 
         results = []
@@ -252,6 +297,43 @@ class EpisodicMemory:
         assert self._db is not None
         row = await self._db.execute_fetchall("SELECT COUNT(*) FROM episodes")
         return row[0][0] if row else 0
+
+    async def get_by_id(self, episode_id: str) -> Episode | None:
+        """Fetch a single episode by ID."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            """SELECT id, timestamp, source, author, content,
+                      importance, emotional_valence, tags_json,
+                      access_count, last_accessed
+               FROM episodes
+               WHERE id = ?""",
+            (episode_id,),
+        )
+        return self._row_to_episode(rows[0]) if rows else None
+
+    async def get_recent_for_user(
+        self,
+        user_id: str,
+        limit: int = 50,
+    ) -> list[Episode]:
+        """Get recent episodes from a specific user.
+
+        Matches by author field OR by a ``user_id:<id>`` tag so both the
+        display name and the canonical identity hash resolve correctly.
+        """
+        assert self._db is not None
+        tag_pattern = f'%"user_id:{user_id}"%'
+        rows = await self._db.execute_fetchall(
+            """SELECT id, timestamp, source, author, content,
+                      importance, emotional_valence, tags_json,
+                      access_count, last_accessed
+               FROM episodes
+               WHERE author = ? OR tags_json LIKE ?
+               ORDER BY timestamp DESC
+               LIMIT ?""",
+            (user_id, tag_pattern, limit),
+        )
+        return [self._row_to_episode(row) for row in rows]
 
     async def clear(self) -> int:
         """Delete all episodes and rebuild FTS index. Returns count deleted."""

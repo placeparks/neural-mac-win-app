@@ -1,120 +1,90 @@
 # Channel Adapters
 
-NeuralClaw supports Telegram, Discord, Slack, WhatsApp, Signal, and built-in web chat.
+NeuralClaw supports Telegram, Discord, Slack, WhatsApp, Signal, and built-in
+web chat.
 
 ## Install
 
 ```bash
 pip install -e ".[all-channels]"
+pip install -e ".[voice]"   # optional Discord voice playback
 ```
 
 ## Trust Model
 
-Every channel route is evaluated before perception, memory, or reasoning.
-
-Supported trust modes:
+Every inbound route is evaluated before perception, memory, or reasoning.
 
 | Mode | Meaning |
 |---|---|
-| `open` | Always trust inbound messages |
-| `pair` | Require `/pair` once for that route |
-| `bound` | Only trusted routes may talk; `/pair` can create the first binding |
-
-Typical defaults:
-
-- web / local interactive routes: `open`
-- private chats and DMs: `pair`
-- shared channels, groups, and servers: `bound`
+| `open` | always trust inbound messages |
+| `pair` | require `/pair` once for that route |
+| `bound` | only trusted routes may talk |
 
 Bindings are stored in `~/.neuralclaw/data/channel_bindings.json`.
 
-## Setup
+Typical defaults:
 
-```bash
-neuralclaw channels setup
-neuralclaw channels list
-neuralclaw channels test
-```
+- web / local routes: `open`
+- private chats and DMs: `pair`
+- shared servers and channels: `bound`
 
-## Telegram
+## Streaming
 
-- token via `@BotFather`
-- inbound trust route is chat-based
-- private chats pair easily
-- group chats are better with `bound`
+Streaming response support is additive:
 
-Example:
+- Discord edits a placeholder message
+- Telegram edits a placeholder message
+- Web pushes incremental deltas
+- other adapters fall back to buffered `send()`
 
-```toml
-[channels.telegram]
-enabled = true
-trust_mode = "pair"
-```
+If output filtering is enabled, the gateway deliberately falls back to buffered
+delivery so Prompt Armor can screen the final text before it is sent.
 
 ## Discord
 
-- requires `discord.py`
-- responds in DMs or mentions
-- route identity includes guild/channel context when present
+Discord supports:
 
-Example:
+- DMs and mention replies
+- streamed text editing
+- optional voice-channel playback of responses
 
 ```toml
 [channels.discord]
 enabled = true
 trust_mode = "bound"
+voice_responses = false
+auto_disconnect_empty_vc = true
+voice_channel_id = ""
 ```
+
+Voice playback requires:
+
+- `features.voice = true`
+- `[tts].enabled = true`
+- either `channels.discord.voice_responses = true` or `[tts].auto_speak = true`
+
+## Telegram
+
+- token via `@BotFather`
+- route identity is chat-based
+- supports streaming edit updates
 
 ## Slack
 
 - requires bot token and app token
-- Socket Mode based
-- route identity includes workspace + channel and preserves thread context
-
-Example:
-
-```toml
-[channels.slack]
-enabled = true
-trust_mode = "bound"
-```
+- uses Socket Mode
+- preserves `thread_ts` so replies stay inside the originating thread
 
 ## WhatsApp
 
 - uses the Baileys bridge
-- pair with:
-
-```bash
-neuralclaw channels connect whatsapp
-```
-
-- route identity is WhatsApp chat-based
+- pair with `neuralclaw channels connect whatsapp`
 
 ## Signal
 
 - uses `signal-cli`
-- route identity is sender/chat-based
 
 ## Web Chat
 
 - always added by the gateway
 - intended for local/dev use
-- behaves like a private route
-
-## Pairing Flow
-
-In `pair` or `bound` mode:
-
-1. send `/pair`
-2. NeuralClaw stores a trusted binding for that route
-3. future messages on that route are trusted automatically
-
-## Troubleshooting
-
-| Issue | Fix |
-|---|---|
-| Telegram bot does not answer | verify token and trust mode |
-| Discord mention ignored | confirm bot mention or DM and trust binding |
-| Slack replies outside thread | ensure thread-capable route is used |
-| WhatsApp not connected | run `neuralclaw channels connect whatsapp` again |
-| Route keeps asking to pair | delete stale binding file and pair again |

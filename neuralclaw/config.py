@@ -26,45 +26,58 @@ DATA_DIR = CONFIG_DIR / "data"
 LOG_DIR = CONFIG_DIR / "logs"
 SESSION_DIR = CONFIG_DIR / "sessions"
 MEMORY_DB = DATA_DIR / "memory.db"
+TRACES_DB = DATA_DIR / "traces.db"
+AUDIT_LOG = LOG_DIR / "audit.jsonl"
 CHANNEL_BINDINGS_FILE = DATA_DIR / "channel_bindings.json"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "general": {
         "name": "NeuralClaw",
-        "persona": "You are NeuralClaw, a helpful and intelligent AI assistant.",
+        "persona": "You are NeuralClaw, a self-evolving cognitive AI agent with persistent memory and tool use capabilities.",
         "log_level": "INFO",
         "telemetry_stdout": True,
     },
     # Feature flags — disable to run in lite mode (lower RAM, faster boot)
     "features": {
+        "vector_memory": True,   # Semantic similarity search for episodic memory
+        "identity": True,        # Persistent per-user mental model
+        "vision": False,         # Multimodal image perception
+        "voice": False,          # TTS output and Discord voice responses
+        "browser": False,        # Stateful browser automation
+        "structured_output": True,  # Pydantic-enforced structured reasoning
+        "streaming_responses": False,  # Stream responses to supported channels
+        "streaming_edit_interval": 20,
+        "traceline": True,      # Full reasoning trace observability
+        "desktop": False,       # Local desktop control (high risk, explicit opt-in)
         "swarm": True,           # Agent mesh, delegation, consensus
         "dashboard": True,       # Web dashboard on port 7474
         "evolution": True,       # Behavioral calibrator, distiller, synthesizer
         "reflective_reasoning": True,  # Multi-step planning (uses extra LLM calls)
         "procedural_memory": True,     # Trigger-pattern procedure matching
         "semantic_memory": True,       # Knowledge graph
+        "a2a_federation": False,       # Agent-to-Agent protocol endpoints
     },
     "providers": {
         "primary": "openai",
         "fallback": ["openrouter", "local"],
         "openai": {
-            "model": "gpt-4o",
+            "model": "gpt-5.4",
             "base_url": "https://api.openai.com/v1",
         },
         "anthropic": {
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-sonnet-4-6",
             "base_url": "https://api.anthropic.com",
         },
         "openrouter": {
-            "model": "anthropic/claude-sonnet-4-20250514",
+            "model": "anthropic/claude-sonnet-4-6",
             "base_url": "https://openrouter.ai/api/v1",
         },
         "local": {
-            "model": "qwen3.5:2b",
+            "model": "qwen3:8b",
             "base_url": "http://localhost:11434/v1",
         },
         "proxy": {
-            "model": "gpt-4",
+            "model": "gpt-5.4",
             "base_url": "",
         },
         "chatgpt_app": {
@@ -97,6 +110,98 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_episodic_results": 10,
         "max_semantic_results": 5,
         "importance_threshold": 0.3,
+        "vector_memory": True,
+        "embedding_provider": "local",
+        "embedding_model": "nomic-embed-text",
+        "embedding_dimension": 768,
+        "vector_similarity_top_k": 10,
+    },
+    "identity": {
+        "enabled": True,
+        "cross_channel": True,
+        "inject_in_prompt": True,
+        "notes_enabled": True,
+    },
+    "traceline": {
+        "enabled": True,
+        "db_path": str(TRACES_DB),
+        "retention_days": 30,
+        "export_otlp": False,
+        "otlp_endpoint": "",
+        "export_prometheus": False,
+        "metrics_port": 9090,
+        "include_input": True,
+        "include_output": True,
+        "max_preview_chars": 500,
+    },
+    "audit": {
+        "enabled": True,
+        "jsonl_path": str(AUDIT_LOG),
+        "max_memory_entries": 200,
+        "retention_days": 90,
+        "siem_export": False,
+        "include_args": True,
+    },
+    "desktop": {
+        "enabled": False,
+        "screenshot_on_action": True,
+        "action_delay_ms": 100,
+    },
+    "tts": {
+        "enabled": False,
+        "provider": "edge-tts",
+        "voice": "en-US-AriaNeural",
+        "speed": 1.0,
+        "output_format": "mp3",
+        "piper_binary": "piper",
+        "piper_model": "",
+        "auto_speak": False,
+        "max_tts_chars": 2000,
+        "temp_dir": "",
+    },
+    "browser": {
+        "enabled": False,
+        "headless": True,
+        "browser_type": "chromium",
+        "viewport_width": 1280,
+        "viewport_height": 900,
+        "stealth": True,
+        "allow_js_execution": False,
+        "max_steps_per_task": 20,
+        "screenshot_on_error": True,
+        "chrome_ai_enabled": False,
+        "navigation_timeout": 30,
+        "user_data_dir": "",
+        "allowed_domains": [],
+        "blocked_domains": ["localhost", "127.0.0.1", "169.254.169.254"],
+    },
+    "google_workspace": {
+        "enabled": False,
+        "scopes": [
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/documents",
+            "https://www.googleapis.com/auth/spreadsheets",
+        ],
+        "max_email_results": 10,
+        "max_drive_results": 10,
+        "default_calendar_id": "primary",
+        "response_body_limit": 20000,
+    },
+    "microsoft365": {
+        "enabled": False,
+        "tenant_id": "",
+        "scopes": [
+            "Mail.ReadWrite",
+            "Calendars.ReadWrite",
+            "Files.ReadWrite",
+            "Chat.ReadWrite",
+            "ChannelMessage.Send",
+        ],
+        "max_email_results": 10,
+        "max_file_results": 10,
+        "default_user": "me",
     },
     "security": {
         "threat_threshold": 0.7,
@@ -107,6 +212,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_content_chars": 8000,
         "max_skill_timeout_seconds": 30,
         "allow_shell_execution": False,
+        "output_filtering": True,
+        "output_pii_detection": True,
+        "output_prompt_leak_check": True,
+        "canary_tokens": True,
+        "pii_patterns": [],
     },
     "policy": {
         "max_tool_calls_per_request": 10,
@@ -147,6 +257,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "allowed_filesystem_roots": ["~/workspace", "~/.neuralclaw/workspace/repos"],
         "deny_private_networks": True,
         "deny_shell_execution": True,
+        "parallel_tool_execution": True,
     },
     "federation": {
         "enabled": True,
@@ -155,6 +266,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "seed_nodes": [],
         "heartbeat_interval": 60,
         "node_name": "",
+        "a2a_enabled": False,
+        "a2a_auth_required": True,
     },
     "workspace": {
         "repos_dir": "~/.neuralclaw/workspace/repos",
@@ -167,7 +280,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "apis": {},  # User-saved API configs: [apis.myapi] = {base_url = "...", auth_type = "bearer"}
     "channels": {
         "telegram": {"enabled": False, "trust_mode": ""},
-        "discord": {"enabled": False, "trust_mode": ""},
+        "discord": {
+            "enabled": False,
+            "trust_mode": "",
+            "voice_responses": False,
+            "auto_disconnect_empty_vc": True,
+            "voice_channel_id": "",
+        },
         "slack": {"enabled": False, "trust_mode": ""},
         "whatsapp": {"enabled": False, "trust_mode": ""},
         "signal": {"enabled": False, "trust_mode": ""},
@@ -294,6 +413,11 @@ class MemoryConfig:
     max_episodic_results: int = 10
     max_semantic_results: int = 5
     importance_threshold: float = 0.3
+    vector_memory: bool = True
+    embedding_provider: str = "local"
+    embedding_model: str = "nomic-embed-text"
+    embedding_dimension: int = 768
+    vector_similarity_top_k: int = 10
 
 
 @dataclass
@@ -306,6 +430,102 @@ class SecurityConfig:
     max_content_chars: int = 8000
     max_skill_timeout_seconds: int = 30
     allow_shell_execution: bool = False
+    output_filtering: bool = True
+    output_pii_detection: bool = True
+    output_prompt_leak_check: bool = True
+    canary_tokens: bool = True
+    pii_patterns: list[str] = field(default_factory=list)
+
+
+@dataclass
+class IdentityConfig:
+    enabled: bool = True
+    cross_channel: bool = True
+    inject_in_prompt: bool = True
+    notes_enabled: bool = True
+
+
+@dataclass
+class TracelineConfig:
+    enabled: bool = True
+    db_path: str = str(TRACES_DB)
+    retention_days: int = 30
+    export_otlp: bool = False
+    otlp_endpoint: str = ""
+    export_prometheus: bool = False
+    metrics_port: int = 9090
+    include_input: bool = True
+    include_output: bool = True
+    max_preview_chars: int = 500
+
+
+@dataclass
+class AuditConfig:
+    enabled: bool = True
+    jsonl_path: str = str(AUDIT_LOG)
+    max_memory_entries: int = 200
+    retention_days: int = 90
+    siem_export: bool = False
+    include_args: bool = True
+
+
+@dataclass
+class DesktopConfig:
+    enabled: bool = False
+    screenshot_on_action: bool = True
+    action_delay_ms: int = 100
+
+
+@dataclass
+class VoiceConfig:
+    enabled: bool = False
+    provider: str = "edge-tts"
+    voice: str = "en-US-AriaNeural"
+    speed: float = 1.0
+    output_format: str = "mp3"
+    piper_binary: str = "piper"
+    piper_model: str = ""
+    auto_speak: bool = False
+    max_tts_chars: int = 2000
+    temp_dir: str = ""
+
+
+@dataclass
+class BrowserConfig:
+    enabled: bool = False
+    headless: bool = True
+    browser_type: str = "chromium"
+    viewport_width: int = 1280
+    viewport_height: int = 900
+    stealth: bool = True
+    allow_js_execution: bool = False
+    max_steps_per_task: int = 20
+    screenshot_on_error: bool = True
+    chrome_ai_enabled: bool = False
+    navigation_timeout: int = 30
+    user_data_dir: str = ""
+    allowed_domains: list[str] = field(default_factory=list)
+    blocked_domains: list[str] = field(default_factory=lambda: ["localhost", "127.0.0.1", "169.254.169.254"])
+
+
+@dataclass
+class GoogleWorkspaceConfig:
+    enabled: bool = False
+    scopes: list[str] = field(default_factory=list)
+    max_email_results: int = 10
+    max_drive_results: int = 10
+    default_calendar_id: str = "primary"
+    response_body_limit: int = 20000
+
+
+@dataclass
+class Microsoft365Config:
+    enabled: bool = False
+    tenant_id: str = ""
+    scopes: list[str] = field(default_factory=list)
+    max_email_results: int = 10
+    max_file_results: int = 10
+    default_user: str = "me"
 
 
 @dataclass
@@ -324,6 +544,9 @@ class PolicyConfig:
     allowed_filesystem_roots: list[str] = field(default_factory=lambda: ["~/workspace"])
     deny_private_networks: bool = True
     deny_shell_execution: bool = True
+    parallel_tool_execution: bool = True
+    desktop_allowed_apps: list[str] = field(default_factory=list)
+    desktop_blocked_regions: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -335,28 +558,52 @@ class FederationConfig:
     seed_nodes: list[str] = field(default_factory=list)
     heartbeat_interval: int = 60
     node_name: str = ""
+    a2a_enabled: bool = False
+    a2a_auth_required: bool = True
 
 
 @dataclass
 class FeaturesConfig:
     """Feature flags for enabling/disabling subsystems (lite mode support)."""
+    vector_memory: bool = True
+    identity: bool = True
+    vision: bool = False
+    voice: bool = False
+    browser: bool = False
+    structured_output: bool = True
+    streaming_responses: bool = False
+    streaming_edit_interval: int = 20
+    traceline: bool = True
+    desktop: bool = False
     swarm: bool = True
     dashboard: bool = True
     evolution: bool = True
     reflective_reasoning: bool = True
     procedural_memory: bool = True
     semantic_memory: bool = True
+    a2a_federation: bool = False
 
     @classmethod
     def lite(cls) -> "FeaturesConfig":
         """Minimal footprint — core reasoning only, no swarm/dashboard/evolution."""
         return cls(
+            vector_memory=False,
+            identity=False,
+            vision=False,
+            voice=False,
+            browser=False,
+            structured_output=False,
+            streaming_responses=False,
+            streaming_edit_interval=20,
+            traceline=False,
+            desktop=False,
             swarm=False,
             dashboard=False,
             evolution=False,
             reflective_reasoning=False,
             procedural_memory=False,
             semantic_memory=False,
+            a2a_federation=False,
         )
 
 
@@ -383,7 +630,7 @@ class ChannelConfig:
 @dataclass
 class NeuralClawConfig:
     name: str = "NeuralClaw"
-    persona: str = "You are NeuralClaw, a helpful and intelligent AI assistant."
+    persona: str = ""  # Set from DEFAULT_CONFIG on load
     log_level: str = "INFO"
     telemetry_stdout: bool = True
 
@@ -393,6 +640,14 @@ class NeuralClawConfig:
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
+    identity: IdentityConfig = field(default_factory=IdentityConfig)
+    traceline: TracelineConfig = field(default_factory=TracelineConfig)
+    audit: AuditConfig = field(default_factory=AuditConfig)
+    desktop: DesktopConfig = field(default_factory=DesktopConfig)
+    tts: VoiceConfig = field(default_factory=VoiceConfig)
+    browser: BrowserConfig = field(default_factory=BrowserConfig)
+    google_workspace: GoogleWorkspaceConfig = field(default_factory=GoogleWorkspaceConfig)
+    microsoft365: Microsoft365Config = field(default_factory=Microsoft365Config)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     federation: FederationConfig = field(default_factory=FederationConfig)
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
@@ -410,7 +665,7 @@ class NeuralClawConfig:
 def _build_provider(name: str, section: dict[str, Any]) -> ProviderConfig:
     return ProviderConfig(
         name=name,
-        model=section.get("model", "gpt-4o"),
+        model=section.get("model", "gpt-5.4"),
         base_url=section.get("base_url", ""),
         api_key=get_api_key(name),
         profile_dir=section.get("profile_dir", ""),
@@ -438,6 +693,14 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
     mem_section = merged.get("memory", {})
     sec_section = merged.get("security", {})
     pol_section = merged.get("policy", {})
+    id_section = merged.get("identity", {})
+    trace_section = merged.get("traceline", {})
+    audit_section = merged.get("audit", {})
+    desktop_section = merged.get("desktop", {})
+    tts_section = merged.get("tts", {})
+    browser_section = merged.get("browser", {})
+    google_section = merged.get("google_workspace", {})
+    microsoft_section = merged.get("microsoft365", {})
     feat_section = merged.get("features", {})
     fed_section = merged.get("federation", {})
     ws_section = merged.get("workspace", {})
@@ -503,7 +766,7 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
                 name=ch_name, enabled=True, token=token, trust_mode="", extra=extra,
             ))
 
-    return NeuralClawConfig(
+    config = NeuralClawConfig(
         name=general.get("name", "NeuralClaw"),
         persona=general.get("persona", DEFAULT_CONFIG["general"]["persona"]),
         log_level=general.get("log_level", "INFO"),
@@ -513,6 +776,14 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
         memory=MemoryConfig(**_filter_fields(MemoryConfig, mem_section)),
         security=SecurityConfig(**_filter_fields(SecurityConfig, sec_section)),
         policy=PolicyConfig(**_filter_fields(PolicyConfig, pol_section)),
+        identity=IdentityConfig(**_filter_fields(IdentityConfig, id_section)) if id_section else IdentityConfig(),
+        traceline=TracelineConfig(**_filter_fields(TracelineConfig, trace_section)) if trace_section else TracelineConfig(),
+        audit=AuditConfig(**_filter_fields(AuditConfig, audit_section)) if audit_section else AuditConfig(),
+        desktop=DesktopConfig(**_filter_fields(DesktopConfig, desktop_section)) if desktop_section else DesktopConfig(),
+        tts=VoiceConfig(**_filter_fields(VoiceConfig, tts_section)) if tts_section else VoiceConfig(),
+        browser=BrowserConfig(**_filter_fields(BrowserConfig, browser_section)) if browser_section else BrowserConfig(),
+        google_workspace=GoogleWorkspaceConfig(**_filter_fields(GoogleWorkspaceConfig, google_section)) if google_section else GoogleWorkspaceConfig(),
+        microsoft365=Microsoft365Config(**_filter_fields(Microsoft365Config, microsoft_section)) if microsoft_section else Microsoft365Config(),
         features=FeaturesConfig(**_filter_fields(FeaturesConfig, feat_section)) if feat_section else FeaturesConfig(),
         federation=FederationConfig(**_filter_fields(FederationConfig, fed_section)) if fed_section else FederationConfig(),
         workspace=WorkspaceConfig(**_filter_fields(WorkspaceConfig, ws_section)) if ws_section else WorkspaceConfig(),
@@ -520,6 +791,82 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
         channels=channels,
         _raw=merged,
     )
+
+    if config.desktop.enabled:
+        desktop_tools = [
+            "desktop_screenshot",
+            "desktop_click",
+            "desktop_type",
+            "desktop_hotkey",
+            "desktop_get_clipboard",
+            "desktop_set_clipboard",
+            "desktop_run_app",
+        ]
+        for tool_name in desktop_tools:
+            if tool_name not in config.policy.allowed_tools:
+                config.policy.allowed_tools.append(tool_name)
+
+    if config.tts.enabled:
+        tts_tools = ["speak", "list_voices", "speak_and_play"]
+        for tool_name in tts_tools:
+            if tool_name not in config.policy.allowed_tools:
+                config.policy.allowed_tools.append(tool_name)
+
+    if config.browser.enabled:
+        browser_tools = [
+            "browser_navigate",
+            "browser_screenshot",
+            "browser_click",
+            "browser_type",
+            "browser_scroll",
+            "browser_extract",
+            "browser_execute_js",
+            "browser_wait_for",
+            "browser_act",
+            "chrome_summarize",
+            "chrome_translate",
+            "chrome_prompt",
+        ]
+        for tool_name in browser_tools:
+            if tool_name not in config.policy.allowed_tools:
+                config.policy.allowed_tools.append(tool_name)
+
+    if config.google_workspace.enabled:
+        google_tools = [
+            "gmail_search", "gmail_send", "gmail_get", "gmail_label", "gmail_draft",
+            "gcal_list_events", "gcal_create_event", "gcal_update_event", "gcal_delete_event",
+            "gdrive_search", "gdrive_read", "gdrive_upload",
+            "gdocs_read", "gdocs_append", "gsheets_read", "gsheets_write",
+            "gmeet_create",
+        ]
+        for tool_name in google_tools:
+            if tool_name not in config.policy.allowed_tools:
+                config.policy.allowed_tools.append(tool_name)
+        for tool_name in [
+            "gmail_send", "gcal_create_event", "gcal_update_event", "gcal_delete_event",
+            "gdrive_upload", "gdocs_append", "gsheets_write", "gmeet_create",
+        ]:
+            if tool_name not in config.policy.mutating_tools:
+                config.policy.mutating_tools.append(tool_name)
+
+    if config.microsoft365.enabled:
+        microsoft_tools = [
+            "outlook_search", "outlook_send", "outlook_get",
+            "ms_cal_list", "ms_cal_create", "ms_cal_delete",
+            "teams_send", "teams_list_channels",
+            "onedrive_search", "onedrive_read", "onedrive_upload",
+            "sharepoint_search", "sharepoint_read",
+        ]
+        for tool_name in microsoft_tools:
+            if tool_name not in config.policy.allowed_tools:
+                config.policy.allowed_tools.append(tool_name)
+        for tool_name in [
+            "outlook_send", "ms_cal_create", "ms_cal_delete", "teams_send", "onedrive_upload",
+        ]:
+            if tool_name not in config.policy.mutating_tools:
+                config.policy.mutating_tools.append(tool_name)
+
+    return config
 
 
 def ensure_dirs() -> None:
@@ -598,6 +945,8 @@ class ConfigValidationResult:
 
 def validate_config(config: NeuralClawConfig) -> ConfigValidationResult:
     """Validate a loaded config for common issues."""
+    import re
+
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -630,6 +979,100 @@ def validate_config(config: NeuralClawConfig) -> ConfigValidationResult:
         errors.append(f"threat_threshold must be 0.0-1.0, got {config.security.threat_threshold}")
     if not (0.0 <= config.security.block_threshold <= 1.0):
         errors.append(f"block_threshold must be 0.0-1.0, got {config.security.block_threshold}")
+    if config.memory.embedding_dimension <= 0:
+        errors.append(
+            f"embedding_dimension must be > 0, got {config.memory.embedding_dimension}"
+        )
+    if config.memory.vector_similarity_top_k <= 0:
+        errors.append(
+            "vector_similarity_top_k must be > 0, "
+            f"got {config.memory.vector_similarity_top_k}"
+        )
+    if config.audit.max_memory_entries <= 0:
+        errors.append(
+            "audit.max_memory_entries must be > 0, "
+            f"got {config.audit.max_memory_entries}"
+        )
+    if config.audit.retention_days < 0:
+        errors.append(
+            "audit.retention_days must be >= 0, "
+            f"got {config.audit.retention_days}"
+        )
+    if config.desktop.action_delay_ms < 0:
+        errors.append(
+            "desktop.action_delay_ms must be >= 0, "
+            f"got {config.desktop.action_delay_ms}"
+        )
+    if config.tts.max_tts_chars <= 0:
+        errors.append(
+            "tts.max_tts_chars must be > 0, "
+            f"got {config.tts.max_tts_chars}"
+        )
+    if config.tts.speed <= 0:
+        errors.append(
+            "tts.speed must be > 0, "
+            f"got {config.tts.speed}"
+        )
+    if config.browser.navigation_timeout <= 0:
+        errors.append(
+            "browser.navigation_timeout must be > 0, "
+            f"got {config.browser.navigation_timeout}"
+        )
+    if config.browser.max_steps_per_task <= 0:
+        errors.append(
+            "browser.max_steps_per_task must be > 0, "
+            f"got {config.browser.max_steps_per_task}"
+        )
+    if config.browser.viewport_width <= 0 or config.browser.viewport_height <= 0:
+        errors.append(
+            "browser viewport must be positive, "
+            f"got {config.browser.viewport_width}x{config.browser.viewport_height}"
+        )
+    if config.google_workspace.response_body_limit <= 0:
+        errors.append(
+            "google_workspace.response_body_limit must be > 0, "
+            f"got {config.google_workspace.response_body_limit}"
+        )
+    if config.google_workspace.max_email_results <= 0:
+        errors.append(
+            "google_workspace.max_email_results must be > 0, "
+            f"got {config.google_workspace.max_email_results}"
+        )
+    if config.google_workspace.max_drive_results <= 0:
+        errors.append(
+            "google_workspace.max_drive_results must be > 0, "
+            f"got {config.google_workspace.max_drive_results}"
+        )
+    if config.microsoft365.max_email_results <= 0:
+        errors.append(
+            "microsoft365.max_email_results must be > 0, "
+            f"got {config.microsoft365.max_email_results}"
+        )
+    if config.microsoft365.max_file_results <= 0:
+        errors.append(
+            "microsoft365.max_file_results must be > 0, "
+            f"got {config.microsoft365.max_file_results}"
+        )
+    for pattern in config.security.pii_patterns:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            errors.append(f"Invalid security.pii_patterns regex '{pattern}': {exc}")
+    for region in config.policy.desktop_blocked_regions:
+        parts = [part.strip() for part in region.split(",")]
+        if len(parts) != 4:
+            errors.append(
+                "policy.desktop_blocked_regions entries must be 'x1,y1,x2,y2', "
+                f"got '{region}'"
+            )
+            continue
+        try:
+            [int(part) for part in parts]
+        except ValueError:
+            errors.append(
+                "policy.desktop_blocked_regions entries must contain integers, "
+                f"got '{region}'"
+            )
 
     # Memory path check
     db_dir = Path(config.memory.db_path).parent

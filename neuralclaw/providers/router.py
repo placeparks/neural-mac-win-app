@@ -19,7 +19,7 @@ import random
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, AsyncIterator
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +83,23 @@ class LLMProvider(ABC):
     async def is_available(self) -> bool:
         """Check if the provider is configured and reachable."""
         ...
+
+    async def stream_complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> AsyncIterator[str]:
+        """Default buffered streaming fallback for providers without native streams."""
+        response = await self.complete(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        for chunk in _chunk_text(response.content or ""):
+            yield chunk
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +341,23 @@ class ProviderRouter:
             f"Last error: {last_error}"
         )
 
+    async def stream_complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> AsyncIterator[str]:
+        """Route a streaming completion with buffered fallback behavior."""
+        response = await self.complete(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        for chunk in _chunk_text(response.content or ""):
+            yield chunk
+
     async def is_available(self) -> bool:
         """Check if any provider is available."""
         if await self._primary.is_available():
@@ -331,3 +365,20 @@ class ProviderRouter:
         return any(
             await p.is_available() for p in self._fallbacks
         )
+
+
+def _chunk_text(text: str, chunk_size: int = 24) -> list[str]:
+    """Split text into UI-friendly chunks for buffered streaming fallbacks."""
+    if not text:
+        return []
+    parts: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        end = min(len(text), cursor + chunk_size)
+        if end < len(text):
+            split = text.rfind(" ", cursor, end)
+            if split > cursor:
+                end = split + 1
+        parts.append(text[cursor:end])
+        cursor = end
+    return parts

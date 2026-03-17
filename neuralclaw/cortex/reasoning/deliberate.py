@@ -8,13 +8,15 @@ runs a tool-use loop, and wraps every response in a ConfidenceEnvelope.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, AsyncIterator
 
 from neuralclaw.bus.neural_bus import EventType, NeuralBus
+from neuralclaw.cortex.action.audit import AuditLogger
 from neuralclaw.cortex.action.idempotency import IdempotencyStore
 from neuralclaw.cortex.action.policy import PolicyEngine, RequestContext
 from neuralclaw.cortex.memory.retrieval import MemoryContext
@@ -35,6 +37,7 @@ class ConfidenceEnvelope:
     alternatives_considered: int = 0
     uncertainty_factors: list[str] = field(default_factory=list)
     tool_calls_made: int = 0
+    media: list[dict[str, Any]] = field(default_factory=list)  # e.g. [{"type": "image", "data": b"...", "mime": "image/png"}]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -100,12 +103,14 @@ class DeliberativeReasoner:
         persona: str = "You are NeuralClaw, a helpful AI assistant.",
         policy: PolicyEngine | None = None,
         idempotency: IdempotencyStore | None = None,
+        audit: AuditLogger | None = None,
     ) -> None:
         self._bus = bus
         self._persona = persona
         self._provider: Any = None  # Set via set_provider()
         self._policy = policy
         self._idempotency = idempotency
+        self._audit = audit
 
     def set_provider(self, provider: Any) -> None:
         """Set the LLM provider for reasoning."""
@@ -117,6 +122,7 @@ class DeliberativeReasoner:
         memory_ctx: MemoryContext,
         tools: list[ToolDef] | None = None,
         conversation_history: list[dict[str, str]] | None = None,
+        extra_system_sections: list[str] | None = None,
     ) -> ConfidenceEnvelope:
         """
         Run deliberative reasoning with tool-use loop.
@@ -137,14 +143,27 @@ class DeliberativeReasoner:
         )
 
         # Build messages
-        messages = self._build_messages(signal, memory_ctx, conversation_history)
+        messages = self._build_messages(
+            signal,
+            memory_ctx,
+            conversation_history,
+            extra_system_sections=extra_system_sections,
+        )
 
         # Build tool defs for the provider
         tool_defs = [t.to_openai_format() for t in (tools or [])] if tools else None
 
         tool_calls_made = 0
         iterations = 0
-        request_ctx = RequestContext(request_id=signal.id)
+        captured_media: list[dict[str, Any]] = []
+        consecutive_errors = 0
+        signal_context = getattr(signal, "context", {}) or {}
+        request_ctx = RequestContext(
+            request_id=signal.id,
+            user_id=str(signal_context.get("user_id", signal.author_id) or signal.author_id),
+            channel_id=signal.channel_id,
+            platform=signal.channel_type.name.lower(),
+        )
 
         while iterations < self.MAX_ITERATIONS:
             iterations += 1
@@ -164,19 +183,110 @@ class DeliberativeReasoner:
 
             # Check if LLM wants to call tools
             if response.tool_calls and tools:
-                for tc in response.tool_calls:
-                    tool_calls_made += 1
-                    result = await self._execute_tool_call(tc, tools, request_ctx)
+                if self._policy and not self._policy.config.parallel_tool_execution:
+                    tool_results = [
+                        await self._execute_tool_call(tc, tools, request_ctx)
+                        for tc in response.tool_calls
+                    ]
+                else:
+                    tool_results = await asyncio.gather(*[
+                        self._execute_tool_call(tc, tools, request_ctx)
+                        for tc in response.tool_calls
+                    ], return_exceptions=True)
+                tool_calls_made += len(response.tool_calls)
+
+                # Track consecutive errors — bail early if tools keep failing
+                all_errors = True
+                for tc, result in zip(response.tool_calls, tool_results):
+                    if isinstance(result, Exception):
+                        result = {"error": str(result)}
+
+                    # Capture screenshot media for sending to user AND for LLM vision
+                    screenshot_b64_for_vision: str | None = None
+                    if isinstance(result, dict) and result.get("screenshot_b64"):
+                        import base64 as _b64
+                        screenshot_b64_for_vision = result["screenshot_b64"]
+                        try:
+                            img_bytes = _b64.b64decode(screenshot_b64_for_vision)
+                            captured_media.append({
+                                "type": "image",
+                                "data": img_bytes,
+                                "mime": "image/png",
+                                "width": result.get("width", 0),
+                                "height": result.get("height", 0),
+                            })
+                        except Exception:
+                            pass
+                        # Remove raw b64 from JSON result (will be sent as vision content instead)
+                        result = {
+                            k: v for k, v in result.items() if k != "screenshot_b64"
+                        }
+                        result["screenshot_captured"] = True
+
+                    result_str = json.dumps(result)
+                    if "error" not in result_str.lower()[:100]:
+                        all_errors = False
                     messages.append({
                         "role": "assistant",
                         "content": None,
                         "tool_calls": [tc.to_dict()],
                     })
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": json.dumps(result),
-                    })
+
+                    # For screenshots, send the image as vision content so LLM can analyze it
+                    if screenshot_b64_for_vision:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": [
+                                {"type": "text", "text": result_str},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{screenshot_b64_for_vision}",
+                                        "detail": "low",  # low-res to save tokens
+                                    },
+                                },
+                            ],
+                        })
+                    else:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": result_str,
+                        })
+
+                if all_errors:
+                    consecutive_errors += 1
+                else:
+                    consecutive_errors = 0
+
+                # If 3+ rounds of nothing but errors, force a text-only response
+                if consecutive_errors >= 3:
+                    try:
+                        fallback = await self._provider.complete(
+                            messages=messages + [{
+                                "role": "user",
+                                "content": (
+                                    "The tools you tried are failing or denied. "
+                                    "Please answer the user directly with what you know, "
+                                    "explain what you tried and why it didn't work, "
+                                    "and suggest what they could do instead."
+                                ),
+                            }],
+                            tools=None,  # No tools — force text response
+                        )
+                        content = fallback.content or "I tried several approaches but they all failed. Could you try a different request?"
+                    except Exception:
+                        content = "I tried several tools but they kept failing. Could you try rephrasing your request?"
+                    return ConfidenceEnvelope(
+                        response=content,
+                        confidence=0.3,
+                        source="tool_fallback",
+                        uncertainty_factors=["tools_failed_repeatedly"],
+                        tool_calls_made=tool_calls_made,
+                        media=captured_media,
+                    )
+
                 continue  # Let LLM process tool results
 
             # No tool calls — we have our final response
@@ -192,6 +302,7 @@ class DeliberativeReasoner:
                 source=source,
                 tool_calls_made=tool_calls_made,
                 uncertainty_factors=self._detect_uncertainty(content),
+                media=captured_media,
             )
 
             # Publish completion
@@ -209,13 +320,109 @@ class DeliberativeReasoner:
 
             return envelope
 
-        # Max iterations reached
+        # Max iterations reached — still give a useful answer instead of a useless cop-out
+        try:
+            fallback = await self._provider.complete(
+                messages=messages + [{
+                    "role": "user",
+                    "content": (
+                        "You've been working on this for a while. "
+                        "Please give the user a final answer now based on everything you've gathered so far. "
+                        "Summarize what you found, what worked, what didn't, and any next steps."
+                    ),
+                }],
+                tools=None,  # Force text-only
+            )
+            content = fallback.content or ""
+        except Exception:
+            content = ""
+
+        if not content:
+            content = "I've been working on this but hit my limit. Here's what I tried so far — could you break this into smaller steps?"
+
         return ConfidenceEnvelope(
-            response="I spent too many iterations trying to answer. Let me try a simpler approach — could you rephrase?",
-            confidence=0.1,
+            response=content,
+            confidence=0.2,
             source="max_iterations",
             uncertainty_factors=["max_iterations_reached"],
             tool_calls_made=tool_calls_made,
+            media=captured_media,
+        )
+
+    async def reason_stream(
+        self,
+        signal: Signal,
+        memory_ctx: MemoryContext,
+        tools: list[ToolDef] | None = None,
+        conversation_history: list[dict[str, str]] | None = None,
+        extra_system_sections: list[str] | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield response chunks for simple streaming delivery."""
+        if not self._provider:
+            for chunk in self._chunk_text(
+                "I'm not configured with an LLM provider yet. Run `neuralclaw init` to set up."
+            ):
+                yield chunk
+            return
+
+        # Tool-use loops are not stream-safe yet. Fall back to buffered reasoning.
+        if tools:
+            envelope = await self.reason(
+                signal=signal,
+                memory_ctx=memory_ctx,
+                tools=tools,
+                conversation_history=conversation_history,
+                extra_system_sections=extra_system_sections,
+            )
+            for chunk in self._chunk_text(envelope.response):
+                yield chunk
+            return
+
+        await self._bus.publish(
+            EventType.REASONING_STARTED,
+            {"signal_id": signal.id, "path": "deliberative_stream", "tools_available": 0},
+            source="reasoning.deliberate",
+        )
+
+        messages = self._build_messages(
+            signal,
+            memory_ctx,
+            conversation_history,
+            extra_system_sections=extra_system_sections,
+        )
+
+        try:
+            async for chunk in self._provider.stream_complete(messages=messages, tools=None):
+                if chunk:
+                    yield chunk
+        except Exception as exc:
+            await self._bus.publish(
+                EventType.ERROR,
+                {
+                    "component": "deliberative_reasoner",
+                    "operation": "reason_stream",
+                    "error": str(exc),
+                },
+                source="reasoning.deliberate",
+            )
+            for chunk in self._chunk_text(f"I encountered an error: {exc}"):
+                yield chunk
+
+    def wrap_streamed_response(
+        self,
+        content: str,
+        memory_ctx: MemoryContext,
+        tool_calls_made: int = 0,
+    ) -> ConfidenceEnvelope:
+        """Wrap a streamed final response in the normal confidence envelope."""
+        confidence = self._estimate_confidence(content, memory_ctx, tool_calls_made)
+        source = "tool_verified" if tool_calls_made > 0 else "llm"
+        return ConfidenceEnvelope(
+            response=content,
+            confidence=confidence,
+            source=source,
+            tool_calls_made=tool_calls_made,
+            uncertainty_factors=self._detect_uncertainty(content),
         )
 
     # -- Prompt construction ------------------------------------------------
@@ -225,6 +432,7 @@ class DeliberativeReasoner:
         signal: Signal,
         memory_ctx: MemoryContext,
         history: list[dict[str, str]] | None = None,
+        extra_system_sections: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the message list for the LLM."""
         system_prompt = self._persona
@@ -234,13 +442,20 @@ class DeliberativeReasoner:
         if mem_section:
             system_prompt += f"\n\n{mem_section}"
 
-        system_prompt += (
-            "\n\n## Guidelines\n"
-            "- Be concise and helpful\n"
-            "- If you're uncertain, say so explicitly\n"
-            "- Use tools when available instead of guessing\n"
-            "- Reference memory context when relevant\n"
-        )
+        if extra_system_sections:
+            for section in extra_system_sections:
+                if section:
+                    system_prompt += f"\n\n{section}"
+
+        # Only append minimal guidelines if the persona doesn't already contain them
+        if "## Guidelines" not in system_prompt and "## Your Capabilities" not in system_prompt:
+            system_prompt += (
+                "\n\n## Guidelines\n"
+                "- Be concise and helpful\n"
+                "- If you're uncertain, say so explicitly\n"
+                "- Use tools when available instead of guessing\n"
+                "- Reference memory context when relevant\n"
+            )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
@@ -253,6 +468,21 @@ class DeliberativeReasoner:
 
         return messages
 
+    def _chunk_text(self, text: str, chunk_size: int = 24) -> list[str]:
+        if not text:
+            return []
+        parts: list[str] = []
+        cursor = 0
+        while cursor < len(text):
+            end = min(len(text), cursor + chunk_size)
+            if end < len(text):
+                split = text.rfind(" ", cursor, end)
+                if split > cursor:
+                    end = split + 1
+            parts.append(text[cursor:end])
+            cursor = end
+        return parts
+
     # -- Tool execution -----------------------------------------------------
 
     async def _execute_tool_call(
@@ -264,10 +494,21 @@ class DeliberativeReasoner:
         """Execute a tool call with policy + idempotency enforcement."""
         tool_name = tool_call.name
         tool_args = tool_call.arguments if isinstance(tool_call.arguments, dict) else {}
+        args_preview = json.dumps(tool_args, ensure_ascii=False, sort_keys=True, default=str)
 
         # Find the tool
         tool = next((t for t in tools if t.name == tool_name), None)
         if not tool or not tool.handler:
+            await self._log_audit(
+                tool_name=tool_name,
+                args_preview=args_preview,
+                result_preview="tool_not_found",
+                success=False,
+                execution_time_ms=0.0,
+                request_ctx=request_ctx,
+                allowed=False,
+                denied_reason="tool_not_found",
+            )
             return {"error": f"Tool '{tool_name}' not found or has no handler"}
 
         # Policy enforcement (default-deny allowlist)
@@ -276,8 +517,26 @@ class DeliberativeReasoner:
             if not pol.allowed:
                 await self._bus.publish(
                     EventType.ACTION_DENIED,
-                    {"skill": tool_name, "reason": redact_secrets(pol.reason)[:200]},
+                    {
+                        "signal_id": request_ctx.request_id if request_ctx else "",
+                        "user_id": request_ctx.user_id if request_ctx else "",
+                        "channel_id": request_ctx.channel_id if request_ctx else "",
+                        "platform": request_ctx.platform if request_ctx else "",
+                        "skill": tool_name,
+                        "reason": redact_secrets(pol.reason)[:200],
+                        "args": redact_secrets(args_preview[:200]),
+                    },
                     source="reasoning.deliberate",
+                )
+                await self._log_audit(
+                    tool_name=tool_name,
+                    args_preview=args_preview,
+                    result_preview="",
+                    success=False,
+                    execution_time_ms=0.0,
+                    request_ctx=request_ctx,
+                    allowed=False,
+                    denied_reason=pol.reason,
                 )
                 return {"error": f"Denied by policy: {pol.reason}", "details": pol.details}
 
@@ -291,8 +550,26 @@ class DeliberativeReasoner:
                             request_ctx.increment_denials()
                         await self._bus.publish(
                             EventType.ACTION_DENIED,
-                            {"skill": tool_name, "reason": redact_secrets(url_pol.reason)[:200]},
+                            {
+                                "signal_id": request_ctx.request_id if request_ctx else "",
+                                "user_id": request_ctx.user_id if request_ctx else "",
+                                "channel_id": request_ctx.channel_id if request_ctx else "",
+                                "platform": request_ctx.platform if request_ctx else "",
+                                "skill": tool_name,
+                                "reason": redact_secrets(url_pol.reason)[:200],
+                                "args": redact_secrets(args_preview[:200]),
+                            },
                             source="reasoning.deliberate",
+                        )
+                        await self._log_audit(
+                            tool_name=tool_name,
+                            args_preview=args_preview,
+                            result_preview="",
+                            success=False,
+                            execution_time_ms=0.0,
+                            request_ctx=request_ctx,
+                            allowed=False,
+                            denied_reason=url_pol.reason,
                         )
                         return {"error": f"Denied by policy: {url_pol.reason}"}
 
@@ -315,18 +592,41 @@ class DeliberativeReasoner:
         try:
             await self._bus.publish(
                 EventType.ACTION_EXECUTING,
-                {"skill": tool_name, "args": redact_secrets(str(tool_args)[:200])},
+                {
+                    "signal_id": request_ctx.request_id if request_ctx else "",
+                    "user_id": request_ctx.user_id if request_ctx else "",
+                    "channel_id": request_ctx.channel_id if request_ctx else "",
+                    "platform": request_ctx.platform if request_ctx else "",
+                    "skill": tool_name,
+                    "args": redact_secrets(str(tool_args)[:200]),
+                },
                 source="reasoning.deliberate",
             )
 
             start = time.time()
             result = await tool.handler(**tool_args)
-            _ = (time.time() - start) * 1000.0
+            elapsed_ms = (time.time() - start) * 1000.0
 
             await self._bus.publish(
                 EventType.ACTION_COMPLETE,
-                {"skill": tool_name, "success": True},
+                {
+                    "signal_id": request_ctx.request_id if request_ctx else "",
+                    "user_id": request_ctx.user_id if request_ctx else "",
+                    "channel_id": request_ctx.channel_id if request_ctx else "",
+                    "platform": request_ctx.platform if request_ctx else "",
+                    "skill": tool_name,
+                    "success": True,
+                    "result_preview": redact_secrets(str(result)[:200]),
+                },
                 source="reasoning.deliberate",
+            )
+            await self._log_audit(
+                tool_name=tool_name,
+                args_preview=args_preview,
+                result_preview=str(result),
+                success=True,
+                execution_time_ms=elapsed_ms,
+                request_ctx=request_ctx,
             )
 
             if is_mutating and self._idempotency and idem_key:
@@ -338,12 +638,60 @@ class DeliberativeReasoner:
 
             return result
         except Exception as e:
+            elapsed_ms = 0.0
             await self._bus.publish(
                 EventType.ACTION_COMPLETE,
-                {"skill": tool_name, "success": False, "error": redact_secrets(str(e))[:200]},
+                {
+                    "signal_id": request_ctx.request_id if request_ctx else "",
+                    "user_id": request_ctx.user_id if request_ctx else "",
+                    "channel_id": request_ctx.channel_id if request_ctx else "",
+                    "platform": request_ctx.platform if request_ctx else "",
+                    "skill": tool_name,
+                    "success": False,
+                    "error": redact_secrets(str(e))[:200],
+                },
                 source="reasoning.deliberate",
             )
+            await self._log_audit(
+                tool_name=tool_name,
+                args_preview=args_preview,
+                result_preview=str(e),
+                success=False,
+                execution_time_ms=elapsed_ms,
+                request_ctx=request_ctx,
+            )
             return {"error": str(e)}
+
+    async def _log_audit(
+        self,
+        *,
+        tool_name: str,
+        args_preview: str,
+        result_preview: str,
+        success: bool,
+        execution_time_ms: float,
+        request_ctx: RequestContext | None,
+        allowed: bool = True,
+        denied_reason: str = "",
+    ) -> None:
+        if not self._audit:
+            return
+        await self._audit.log_action(
+            skill_name=tool_name,
+            action="execute",
+            args_preview=args_preview,
+            result_preview=result_preview,
+            success=success,
+            execution_time_ms=execution_time_ms,
+            request_id=request_ctx.request_id if request_ctx else "",
+            user_id=request_ctx.user_id if request_ctx else "",
+            channel_id=request_ctx.channel_id if request_ctx else "",
+            platform=request_ctx.platform if request_ctx else "",
+            allowed=allowed,
+            denied_reason=denied_reason,
+            signal_id=request_ctx.request_id if request_ctx else "",
+            correlation_id=request_ctx.request_id if request_ctx else "",
+        )
 
     # -- Confidence estimation ----------------------------------------------
 

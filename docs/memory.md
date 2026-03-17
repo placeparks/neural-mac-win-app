@@ -1,161 +1,71 @@
-# 🧠 Memory System
+# Memory System
 
-NeuralClaw implements a **biologically-inspired memory architecture** with three
-memory stores and an automatic metabolism cycle. Memories aren't just appended —
-they consolidate, strengthen, decay, and get pruned over time.
+NeuralClaw now has five cooperating memory layers:
 
----
+- episodic memory
+- semantic memory
+- procedural memory
+- vector memory
+- user identity memory
 
-## Three Memory Stores
+## Episodic Memory
 
-### Episodic Memory
+Stores concrete interactions in SQLite with FTS5 search.
 
-**What:** Stores specific events and conversations, like personal experiences.
+## Semantic Memory
 
-**Storage:** SQLite database with FTS5 (full-text search).
+Stores facts and entity relationships extracted from interactions and
+distillation.
 
-**Location:** `~/.neuralclaw/data/memory.db`
+## Procedural Memory
 
-```python
-from neuralclaw.cortex.memory.episodic import EpisodicMemory
+Stores reusable workflow templates keyed by trigger patterns.
 
-episodic = EpisodicMemory("~/.neuralclaw/data/memory.db")
-await episodic.initialize()
+## Vector Memory
 
-# Store an episode
-await episodic.store(
-    content="User asked about Python decorators",
-    source="conversation",
-    author="User",
-    importance=0.6,
-)
+`vector.py` adds similarity-based retrieval alongside lexical search.
 
-# Search episodes
-results = await episodic.search("decorators", limit=5)
-```
+Important config:
 
-### Semantic Memory
+- `memory.vector_memory`
+- `memory.embedding_provider`
+- `memory.embedding_model`
+- `memory.embedding_dimension`
+- `memory.vector_similarity_top_k`
 
-**What:** Stores facts and entity relationships — the knowledge graph.
+Integration points:
 
-**Use case:** "Paris is the capital of France" or "User prefers dark mode."
+- episodic writes are embedded and indexed
+- retriever merges vector hits with lexical and semantic results
+- metabolism deletes vector rows when episodes are pruned
 
-```python
-from neuralclaw.cortex.memory.semantic import SemanticMemory
+## Identity Memory
 
-semantic = SemanticMemory("~/.neuralclaw/data/memory.db")
-await semantic.initialize()
+`identity.py` persists a canonical user model across channels.
 
-# Store a fact
-await semantic.store(
-    entity="Python",
-    relation="has_feature",
-    value="decorators",
-    confidence=0.9,
-)
+It tracks:
 
-# Query facts
-facts = await semantic.query("Python")
-```
+- platform aliases
+- communication style
+- active projects
+- expertise domains
+- language and timezone
+- explicit user preferences
+- session and message counts
 
-### Procedural Memory
+When enabled, the gateway injects a user-context prompt section into
+deliberative and reflective reasoning.
 
-**What:** Reusable workflow templates matched by trigger patterns.
+## Retrieval
 
-**Use case:** "When the user asks to deploy, run these 5 steps."
+`MemoryRetriever` merges:
 
-```python
-from neuralclaw.cortex.memory.procedural import ProceduralMemory
+- recent episodic context
+- lexical episode search
+- semantic facts
+- vector similarity results
 
-procedural = ProceduralMemory("~/.neuralclaw/data/memory.db")
-await procedural.initialize()
+## Metabolism
 
-# Store a procedure
-await procedural.store(
-    name="deploy_app",
-    trigger_patterns=["deploy", "push to production", "ship it"],
-    steps=["Run tests", "Build docker image", "Push to registry", "Deploy"],
-    source="synthesizer",
-)
-
-# Find matching procedures
-matches = await procedural.find_matching("Can you deploy the app?")
-```
-
----
-
-## Memory Retrieval
-
-The `MemoryRetriever` provides a unified search across all memory stores:
-
-```python
-from neuralclaw.cortex.memory.retrieval import MemoryRetriever
-
-retriever = MemoryRetriever(
-    episodic, semantic, bus,
-    max_episodes=10,
-    max_facts=5,
-)
-
-# Search across all stores
-context = await retriever.retrieve("Tell me about Python decorators")
-# Returns a MemoryContext with episodes + facts
-```
-
----
-
-## Memory Metabolism
-
-Memories have a biological lifecycle — they aren't just appended forever.
-
-```
-Formation → Consolidation → Strengthening/Decay → Retrieval → Reconsolidation
-```
-
-### Lifecycle Stages
-
-| Stage | What Happens |
-|-------|-------------|
-| **Consolidation** | Repeated episodic events merge into semantic knowledge |
-| **Strengthening** | Frequently accessed memories gain importance |
-| **Decay** | Stale, unused memories gradually lose relevance |
-| **Pruning** | Very low-importance memories are archived |
-
-### How It Works
-
-The metabolism runs automatically during gateway operation:
-
-```python
-from neuralclaw.cortex.memory.metabolism import MemoryMetabolism
-
-metabolism = MemoryMetabolism(episodic, semantic, bus)
-
-# Check if a cycle is due
-if metabolism.should_run:
-    await metabolism.run_cycle()
-```
-
-### Configuration
-
-In `~/.neuralclaw/config.toml`:
-
-```toml
-[memory]
-db_path = "~/.neuralclaw/data/memory.db"
-max_episodic_results = 10    # Max episodes returned per search
-max_semantic_results = 5     # Max facts returned per search
-importance_threshold = 0.3   # Minimum importance to keep
-```
-
----
-
-## Where Memories Live
-
-```
-~/.neuralclaw/
-└── data/
-    └── memory.db    ← SQLite database (episodic + semantic + procedural)
-```
-
-All three stores share a single SQLite database, using separate tables.
-FTS5 virtual tables enable fast full-text search on episodic content.
+`MemoryMetabolism` still handles consolidation and pruning, and now also keeps
+vector state coherent with episodic retention.

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neuralclaw"
-version = "0.7.7"
+version = "0.8.0"
 description = "The Self-Evolving Cognitive Agent Framework"
 readme = "README.md"
 license = "MIT"
@@ -15,6 +15,7 @@ authors = [
 keywords = [
     "ai", "agent", "cognitive", "autonomous", "llm",
     "self-evolving", "multi-channel", "framework",
+    "computer-use", "desktop-control", "vision",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -32,6 +33,7 @@ dependencies = [
     "toml>=0.10",
     "aiohttp>=3.9",
     "aiosqlite>=0.19",
+    "pydantic>=2.0",
     "keyring>=25.0",
     "playwright>=1.52",
     "python-telegram-bot>=21.0",
@@ -50,11 +52,30 @@ all-channels = [
     "discord.py>=2.3",
     "slack-bolt>=1.18",
 ]
+vector = ["sqlite-vec>=0.1"]
+desktop = ["mss>=9.0", "pyautogui>=0.9", "pillow>=10.0"]
+browser = ["playwright>=1.52"]
+voice = ["edge-tts>=6.1", "ffmpeg-python>=0.2", "PyNaCl>=1.5"]
+google = ["google-api-python-client>=2.0", "google-auth-oauthlib>=1.2", "google-auth-httplib2>=0.2"]
+microsoft = ["msal>=1.30"]
+tray = ["pystray>=0.19", "pillow>=10.0"]
 all = [
     "python-telegram-bot>=21.0",
     "discord.py>=2.3",
     "slack-bolt>=1.18",
     "playwright>=1.52",
+    "sqlite-vec>=0.1",
+    "mss>=9.0",
+    "pyautogui>=0.9",
+    "pillow>=10.0",
+    "edge-tts>=6.1",
+    "ffmpeg-python>=0.2",
+    "PyNaCl>=1.5",
+    "google-api-python-client>=2.0",
+    "google-auth-oauthlib>=1.2",
+    "google-auth-httplib2>=0.2",
+    "msal>=1.30",
+    "pystray>=0.19",
 ]
 dev = [
     "pytest>=8.0",

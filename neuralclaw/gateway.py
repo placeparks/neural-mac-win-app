@@ -12,6 +12,7 @@ This is the brain of NeuralClaw.
 from __future__ import annotations
 
 import asyncio
+import secrets
 import signal
 import sys
 from typing import Any
@@ -23,6 +24,7 @@ from neuralclaw.channels.trust import ChannelTrustController
 from neuralclaw.config import (
     NeuralClawConfig,
     ProviderConfig,
+    _get_secret,
     ensure_dirs,
     get_api_key,
     load_config,
@@ -32,17 +34,23 @@ from neuralclaw.cortex.action.capabilities import CapabilityVerifier
 from neuralclaw.cortex.action.idempotency import IdempotencyStore
 from neuralclaw.cortex.action.policy import PolicyEngine
 from neuralclaw.cortex.memory.episodic import EpisodicMemory
+from neuralclaw.cortex.memory.identity import UserIdentityStore
 from neuralclaw.cortex.memory.metabolism import MemoryMetabolism
 from neuralclaw.cortex.memory.procedural import ProceduralMemory
 from neuralclaw.cortex.memory.retrieval import MemoryRetriever
 from neuralclaw.cortex.memory.semantic import SemanticMemory
+from neuralclaw.cortex.memory.vector import VectorMemory
 from neuralclaw.cortex.perception.classifier import IntentClassifier
 from neuralclaw.cortex.perception.intake import ChannelType, PerceptionIntake, Signal
+from neuralclaw.cortex.perception.output_filter import OutputThreatFilter
 from neuralclaw.cortex.perception.threat_screen import ThreatScreener
+from neuralclaw.cortex.perception.vision import VisionPerception
 from neuralclaw.cortex.reasoning.deliberate import DeliberativeReasoner
 from neuralclaw.cortex.reasoning.fast_path import FastPathReasoner
 from neuralclaw.cortex.reasoning.reflective import ReflectiveReasoner
 from neuralclaw.cortex.reasoning.meta import MetaCognitive
+from neuralclaw.cortex.reasoning.structured import StructuredReasoner
+from neuralclaw.cortex.observability.traceline import Traceline
 from neuralclaw.cortex.evolution.calibrator import BehavioralCalibrator
 from neuralclaw.cortex.evolution.distiller import ExperienceDistiller
 from neuralclaw.cortex.evolution.synthesizer import SkillSynthesizer
@@ -78,60 +86,121 @@ class NeuralClawGateway:
             log_to_stdout=self._config.telemetry_stdout,
         )
         self._bus.subscribe_all(self._telemetry.handle_event)
+        feat = self._config.features
 
         # Perception cortex
-        self._intake = PerceptionIntake(self._bus)
+        self._intake = PerceptionIntake(
+            self._bus,
+            max_content_chars=self._config.security.max_content_chars,
+        )
         self._classifier = IntentClassifier(self._bus)
         self._threat_screener = ThreatScreener(
             bus=self._bus,
             threat_threshold=self._config.security.threat_threshold,
             block_threshold=self._config.security.block_threshold,
         )
+        self._output_filter = OutputThreatFilter(
+            self._bus,
+            self._config.security,
+        ) if self._config.security.output_filtering else None
+        self._canary_token = (
+            f"CANARY_{secrets.token_hex(6)}"
+            if self._config.security.canary_tokens and self._config.security.output_filtering
+            else ""
+        )
+        if self._canary_token:
+            self._threat_screener.set_canary_token(self._canary_token)
+        if self._output_filter:
+            self._output_filter.set_system_fragments(self._default_system_prompt_fragments())
+            if self._canary_token:
+                self._output_filter.set_canary_token(self._canary_token)
+        self._vision: VisionPerception | None = None
 
         # Memory cortex
-        self._episodic = EpisodicMemory(self._config.memory.db_path)
+        self._vector_memory = VectorMemory(
+            self._config.memory.db_path,
+            embedding_provider=self._config.memory.embedding_provider,
+            embedding_model=self._config.memory.embedding_model,
+            dimension=self._config.memory.embedding_dimension,
+            bus=self._bus,
+        ) if feat.vector_memory and self._config.memory.vector_memory else None
+        self._episodic = EpisodicMemory(
+            self._config.memory.db_path,
+            vector_memory=self._vector_memory,
+            bus=self._bus,
+        )
         self._semantic = SemanticMemory(self._config.memory.db_path)
+        self._identity = UserIdentityStore(
+            self._config.memory.db_path,
+            bus=self._bus,
+            episodic=self._episodic,
+            semantic=self._semantic,
+        ) if feat.identity and self._config.identity.enabled else None
         self._retriever = MemoryRetriever(
             self._episodic, self._semantic, self._bus,
+            vector_memory=self._vector_memory,
             max_episodes=self._config.memory.max_episodic_results,
             max_facts=self._config.memory.max_semantic_results,
+            vector_top_k=self._config.memory.vector_similarity_top_k,
         )
 
         # Reasoning cortex
         self._fast_path = FastPathReasoner(self._bus, self._config.name)
         self._policy = PolicyEngine(self._config.policy)
         self._idempotency = IdempotencyStore(self._config.memory.db_path)
+        self._audit = AuditLogger(config=self._config.audit, bus=self._bus)
         self._deliberate = DeliberativeReasoner(
             self._bus,
             self._config.persona,
             policy=self._policy,
             idempotency=self._idempotency,
+            audit=self._audit,
         )
-        self._reflective = ReflectiveReasoner(self._bus, self._deliberate)
+        self._structured = StructuredReasoner(self._deliberate, self._bus) if feat.structured_output else None
+        self._reflective = ReflectiveReasoner(self._bus, self._deliberate, structured=self._structured)
 
         # Action cortex
         self._capability_verifier = CapabilityVerifier(
             bus=self._bus,
             allow_shell=self._config.security.allow_shell_execution,
         )
-        self._audit = AuditLogger()
+        self._skills = SkillRegistry()
+        self._desktop = None
+        self._browser = None
+        if feat.desktop and self._config.desktop.enabled:
+            from neuralclaw.cortex.action.desktop import DesktopCortex
+
+            self._desktop = DesktopCortex(
+                config=self._config.desktop,
+                policy=self._config.policy,
+                bus=self._bus,
+            )
 
         # Phase 2: Procedural memory + metabolism
-        feat = self._config.features
         self._procedural = ProceduralMemory(self._config.memory.db_path, self._bus) if feat.procedural_memory else None
         self._metabolism = MemoryMetabolism(
             self._episodic, self._semantic if feat.semantic_memory else None, self._bus,
+            vector_memory=self._vector_memory,
         ) if feat.evolution else None
 
         # Phase 2: Evolution cortex
         self._calibrator = BehavioralCalibrator(bus=self._bus) if feat.evolution else None
         self._distiller = ExperienceDistiller(
             self._episodic, self._semantic, self._procedural, self._bus,
+            structured=self._structured,
         ) if feat.evolution else None
-        self._synthesizer = SkillSynthesizer(bus=self._bus) if feat.evolution else None
+        self._synthesizer = SkillSynthesizer(bus=self._bus, structured=self._structured) if feat.evolution else None
 
         # Phase 3: Meta-cognitive reasoning
         self._meta_cognitive = MetaCognitive(bus=self._bus) if feat.evolution else None
+        self._traceline = Traceline(
+            self._config.traceline.db_path,
+            self._bus,
+            config=self._config.traceline,
+        ) if feat.traceline and self._config.traceline.enabled else None
+
+        if self._identity and self._calibrator:
+            self._identity.set_calibrator(self._calibrator)
 
         # Phase 3: Swarm
         self._delegation = DelegationChain(bus=self._bus) if feat.swarm else None
@@ -154,6 +223,11 @@ class NeuralClawGateway:
                     bus=self._bus,
                     port=fed_cfg.port,
                     bind_host=fed_cfg.bind_host,
+                    description=self._config.persona,
+                    skills_provider=self._get_a2a_skills,
+                    a2a_enabled=bool(self._config.features.a2a_federation and fed_cfg.a2a_enabled),
+                    a2a_auth_required=fed_cfg.a2a_auth_required,
+                    a2a_token=_get_secret("a2a_token") or "",
                 )
                 self._federation_bridge = FederationBridge(
                     self._federation, self._spawner, self._bus,
@@ -165,9 +239,6 @@ class NeuralClawGateway:
             self._dashboard = Dashboard(port=self._config.dashboard_port)
         else:
             self._dashboard = None
-
-        # Skills
-        self._skills = SkillRegistry()
 
         # Channels
         self._channels: dict[str, ChannelAdapter] = {}
@@ -184,8 +255,15 @@ class NeuralClawGateway:
         ensure_dirs()
 
         # Initialize memory databases
+        if self._vector_memory:
+            await self._vector_memory.initialize()
         await self._episodic.initialize()
         await self._semantic.initialize()
+        await self._audit.initialize()
+        if self._identity:
+            await self._identity.initialize()
+        if self._traceline:
+            await self._traceline.initialize()
         if self._procedural:
             await self._procedural.initialize()
 
@@ -231,12 +309,53 @@ class NeuralClawGateway:
         except Exception:
             pass
 
+        # Configure optional integration skills
+        try:
+            from neuralclaw.skills.builtins import tts as _tts
+
+            _tts.set_tts_config(self._config.tts)
+        except Exception:
+            pass
+
+        try:
+            from neuralclaw.skills.builtins import google_workspace as _google_workspace
+
+            _google_workspace.set_google_workspace_config(self._config.google_workspace)
+        except Exception:
+            pass
+
+        try:
+            from neuralclaw.skills.builtins import microsoft365 as _microsoft365
+
+            _microsoft365.set_microsoft365_config(self._config.microsoft365)
+        except Exception:
+            pass
+
+        if self._desktop:
+            self._register_desktop_tools()
+
         # Initialize LLM provider
         self._provider = self._build_provider()
         if self._provider:
             self._deliberate.set_provider(self._provider)
+            if self._config.features.vision:
+                self._vision = VisionPerception(self._provider, self._bus)
+            if self._distiller:
+                self._distiller.set_structured(self._structured)
             if self._synthesizer:
+                self._synthesizer.set_structured(self._structured)
                 self._synthesizer.set_provider(self._provider)
+        if self._config.features.browser and self._config.browser.enabled:
+            from neuralclaw.cortex.action.browser import BrowserCortex
+
+            self._browser = BrowserCortex(
+                config=self._config.browser,
+                bus=self._bus,
+                vision=self._vision,
+                provider=self._provider,
+            )
+            await self._browser.start()
+            self._register_browser_tools()
 
         # Phase 3: Wire dashboard providers and actions
         if self._dashboard:
@@ -472,7 +591,10 @@ class NeuralClawGateway:
 
     def _build_discord_channel(self, cfg: Any) -> ChannelAdapter | None:
         from neuralclaw.channels.discord_adapter import DiscordAdapter
-        return DiscordAdapter(cfg.token)
+        return DiscordAdapter(
+            cfg.token,
+            auto_disconnect_empty_vc=bool(cfg.extra.get("auto_disconnect_empty_vc", True)),
+        )
 
     def _build_slack_channel(self, cfg: Any) -> ChannelAdapter | None:
         app_token = cfg.extra.get("slack_app")
@@ -499,6 +621,12 @@ class NeuralClawGateway:
         """Register a channel adapter."""
         adapter.on_message(self._on_channel_message)
         self._channels[adapter.name] = adapter
+        try:
+            from neuralclaw.skills.builtins import tts as _tts
+
+            _tts.register_adapter(adapter.name, adapter)
+        except Exception:
+            pass
 
     async def _start_channels(self) -> None:
         """Start all registered channel adapters."""
@@ -522,12 +650,17 @@ class NeuralClawGateway:
     async def _on_channel_message(self, msg: ChannelMessage) -> None:
         """Handle an incoming message from any channel."""
         try:
+            media = getattr(msg, "media", []) or []
+            if await self._try_stream_channel_message(msg):
+                return
+
             response = await self.process_message(
                 content=msg.content,
                 author_id=msg.author_id,
                 author_name=msg.author_name,
                 channel_id=msg.channel_id,
                 channel_type_name=self._get_channel_type(msg),
+                media=media,
                 message_metadata=msg.metadata,
                 raw_message=msg.raw,
             )
@@ -535,15 +668,30 @@ class NeuralClawGateway:
             if not response:
                 return
 
+            # Collect any pending media (e.g. screenshots) before sending
+            pending_media = []
+            if hasattr(self, "_pending_media") and msg.channel_id in self._pending_media:
+                pending_media = self._pending_media.pop(msg.channel_id, [])
+
             # Route response back to the correct adapter
             source_channel = self._get_source_adapter(msg)
             if source_channel and source_channel in self._channels:
+                adapter = self._channels[source_channel]
                 try:
-                    await self._channels[source_channel].send(
+                    await adapter.send(
                         msg.channel_id,
                         response,
                         **self._build_reply_kwargs(msg),
                     )
+                    # Send any captured media (screenshots, etc.) as images
+                    for media_item in pending_media:
+                        if media_item.get("type") == "image" and hasattr(adapter, "send_photo"):
+                            await adapter.send_photo(
+                                msg.channel_id,
+                                media_item["data"],
+                                caption="",
+                            )
+                    await self._maybe_send_voice_response(source_channel, msg.channel_id, response)
                 except Exception as e:
                     print(f"[Gateway] Failed to send via {source_channel}: {e}")
             else:
@@ -551,12 +699,229 @@ class NeuralClawGateway:
                 for name, adapter in self._channels.items():
                     try:
                         await adapter.send(msg.channel_id, response, **self._build_reply_kwargs(msg))
+                        for media_item in pending_media:
+                            if media_item.get("type") == "image" and hasattr(adapter, "send_photo"):
+                                await adapter.send_photo(msg.channel_id, media_item["data"], caption="")
+                        await self._maybe_send_voice_response(name, msg.channel_id, response)
                         break
                     except Exception:
                         continue
 
         except Exception as e:
             print(f"[Gateway] Error processing message: {e}")
+
+    async def _try_stream_channel_message(self, msg: ChannelMessage) -> bool:
+        """Attempt streaming delivery; return True if handled."""
+        if not self._config.features.streaming_responses:
+            return False
+        if self._config.security.output_filtering:
+            return False
+
+        source_channel = self._get_source_adapter(msg)
+        if not source_channel or source_channel not in self._channels:
+            return False
+
+        adapter = self._channels[source_channel]
+        if not self._provider:
+            return False
+
+        try:
+            result = await self._build_streaming_response(msg)
+            if result is None:
+                return False
+
+            token_parts: list[str] = []
+
+            async def token_iterator():
+                async for token in result["token_iterator"]:
+                    token_parts.append(token)
+                    yield token
+
+            await adapter.send_stream(
+                msg.channel_id,
+                token_iterator(),
+                **self._build_reply_kwargs(msg),
+                confidence=result["confidence"],
+                edit_interval=self._config.features.streaming_edit_interval,
+            )
+
+            final_response = "".join(token_parts)
+            if not final_response:
+                return False
+
+            confidence = result["confidence"]
+            if result.get("memory_ctx") is not None:
+                envelope = self._deliberate.wrap_streamed_response(
+                    final_response,
+                    result["memory_ctx"],
+                )
+                confidence = envelope.confidence
+                await self._bus.publish(
+                    EventType.REASONING_COMPLETE,
+                    {
+                        "signal_id": result.get("signal_id", ""),
+                        "confidence": confidence,
+                        "source": envelope.source,
+                        "tool_calls": 0,
+                        "iterations": 1,
+                    },
+                    source="reasoning.deliberate",
+                )
+
+            await self._store_interaction(
+                msg.content,
+                final_response,
+                msg.author_name,
+                user_id=result["user_id"],
+                channel_id=msg.channel_id,
+            )
+            self._append_history(msg.channel_id, msg.content, final_response)
+            await self._post_process(
+                msg.content,
+                final_response,
+                msg.author_name,
+                user_id=result["user_id"],
+            )
+            await self._bus.publish(
+                EventType.RESPONSE_READY,
+                {
+                    "signal_id": result.get("signal_id", ""),
+                    "user_id": result["user_id"],
+                    "channel_id": msg.channel_id,
+                    "platform": self._get_channel_type(msg).lower(),
+                    "content": final_response[:200],
+                    "confidence": confidence,
+                },
+                source="gateway",
+            )
+            await self._maybe_send_voice_response(source_channel, msg.channel_id, final_response)
+            return True
+        except Exception as exc:
+            await self._bus.publish(
+                EventType.ERROR,
+                {"error": f"Streaming response failed: {exc}", "component": "gateway_stream"},
+                source="gateway",
+            )
+            return False
+
+    async def _build_streaming_response(self, msg: ChannelMessage) -> dict[str, Any] | None:
+        """Prepare a streamed response for a simple deliberative path."""
+        trust_cfg = self._get_channel_config(msg)
+        decision = self._trust.evaluate(trust_cfg, msg)
+        if decision.status == "denied":
+            return {"token_iterator": self._iter_once(""), "confidence": 0.0, "user_id": ""}
+        if decision.status in {"unpaired", "paired"}:
+            return {
+                "token_iterator": self._iter_once(decision.response or ""),
+                "confidence": 1.0,
+                "user_id": "",
+                "memory_ctx": None,
+            }
+
+        channel_type_name = self._get_channel_type(msg)
+        channel_type = ChannelType[channel_type_name.upper()] if channel_type_name.upper() in ChannelType.__members__ else ChannelType.CLI
+        signal = await self._intake.process(
+            content=msg.content,
+            author_id=msg.author_id,
+            author_name=msg.author_name,
+            channel_type=channel_type,
+            channel_id=msg.channel_id,
+            media=getattr(msg, "media", []) or [],
+            metadata=msg.metadata,
+        )
+        await self._apply_visual_context(signal, msg.content)
+
+        user_model = None
+        # Include capability awareness fragments (skip first = persona, already in deliberate reasoner)
+        extra_system_sections: list[str] = list(self._default_system_prompt_fragments()[1:])
+        if not hasattr(signal, "context") or getattr(signal, "context") is None:
+            signal.context = {}
+        if self._identity:
+            user_model = await self._identity.get_or_create(
+                platform=channel_type_name.lower(),
+                platform_user_id=msg.author_id,
+                display_name=msg.author_name,
+            )
+            signal.context["user_id"] = user_model.user_id if user_model else signal.author_id
+            if self._config.identity.inject_in_prompt and user_model:
+                user_section = await self._identity.to_prompt_section(user_model.user_id)
+                if user_section:
+                    extra_system_sections.append(user_section)
+        else:
+            signal.context["user_id"] = signal.author_id
+        self._apply_prompt_armor_context(signal, extra_system_sections)
+
+        threat = await self._threat_screener.screen(signal)
+        if threat.blocked:
+            return {
+                "token_iterator": self._iter_once(
+                    "⚠️ I've detected a potentially harmful request and blocked it for safety. If this was a mistake, try rephrasing."
+                ),
+                "confidence": 1.0,
+                "user_id": user_model.user_id if user_model else "",
+                "memory_ctx": None,
+            }
+
+        fast_result = await self._fast_path.try_fast_path(signal, memory_ctx=None)
+        if fast_result:
+            return {
+                "token_iterator": self._iter_once(fast_result.content),
+                "confidence": fast_result.confidence,
+                "user_id": user_model.user_id if user_model else "",
+                "memory_ctx": None,
+            }
+
+        await self._classifier.classify(signal)
+        memory_ctx = await self._retriever.retrieve(msg.content)
+        tools = self._skills.get_all_tools() if self._skills.tool_count > 0 else None
+        history = self._history.get(msg.channel_id, [])
+        persona_mods = self._calibrator.preferences.to_persona_modifiers() if self._calibrator else ""
+        if persona_mods:
+            extra_system_sections.append(f"## User Style Guidance\n{persona_mods}")
+
+        # Inject active tool awareness so the agent knows what's available right now
+        if tools:
+            tool_names = [t.name for t in tools]
+            extra_system_sections.append(
+                f"## Active Tools (this session)\n"
+                f"You have {len(tool_names)} tools available: {', '.join(tool_names)}.\n"
+                f"Use them proactively when the user's request matches a tool's capability."
+            )
+            # Extra desktop hint when desktop tools are active
+            if any(n.startswith("desktop_") for n in tool_names):
+                extra_system_sections.append(
+                    "## Desktop Control\n"
+                    "The desktop_* tools control the PHYSICAL COMPUTER this agent runs on. "
+                    "When the user says 'take a screenshot', 'show my screen', 'click on X', "
+                    "'open app Y', or anything about their computer — ALWAYS use the desktop tools. "
+                    "The user may be on a phone/remote device, but the tools act on THIS machine."
+                )
+
+        use_reflective = (
+            self._config.features.reflective_reasoning
+            and self._reflective.should_reflect(signal, memory_ctx)
+        )
+        if use_reflective:
+            return None
+
+        token_iterator = self._deliberate.reason_stream(
+            signal=signal,
+            memory_ctx=memory_ctx,
+            tools=tools,
+            conversation_history=history[-20:],
+            extra_system_sections=extra_system_sections,
+        )
+        return {
+            "token_iterator": token_iterator,
+            "confidence": 0.8,
+            "user_id": user_model.user_id if user_model else "",
+            "memory_ctx": memory_ctx,
+            "signal_id": signal.id,
+        }
+
+    async def _iter_once(self, text: str):
+        if text:
+            yield text
 
     async def process_message(
         self,
@@ -565,6 +930,7 @@ class NeuralClawGateway:
         author_name: str = "User",
         channel_id: str = "cli",
         channel_type_name: str = "CLI",
+        media: list[dict[str, Any]] | None = None,
         message_metadata: dict[str, Any] | None = None,
         raw_message: Any = None,
     ) -> str:
@@ -598,7 +964,33 @@ class NeuralClawGateway:
             author_name=author_name,
             channel_type=channel_type,
             channel_id=channel_id,
+            media=media,
+            metadata=message_metadata,
         )
+        await self._apply_visual_context(signal, content)
+
+        user_model = None
+        # Include capability awareness fragments (skip first = persona, already in deliberate reasoner)
+        extra_system_sections: list[str] = list(self._default_system_prompt_fragments()[1:])
+        if not hasattr(signal, "context") or getattr(signal, "context") is None:
+            signal.context = {}
+        if self._identity:
+            user_model = await self._identity.get_or_create(
+                platform=channel_type_name.lower(),
+                platform_user_id=author_id,
+                display_name=author_name,
+            )
+            signal.context["user_id"] = user_model.user_id if user_model else signal.author_id
+            if (
+                self._config.identity.inject_in_prompt
+                and user_model
+            ):
+                user_section = await self._identity.to_prompt_section(user_model.user_id)
+                if user_section:
+                    extra_system_sections.append(user_section)
+        else:
+            signal.context["user_id"] = signal.author_id
+        self._apply_prompt_armor_context(signal, extra_system_sections)
 
         # 2. PERCEPTION: Threat screening
         threat = await self._threat_screener.screen(signal)
@@ -608,18 +1000,56 @@ class NeuralClawGateway:
         # 3. REASONING: Try fast path before any DB/memory ops (zero-cost early exit)
         fast_result = await self._fast_path.try_fast_path(signal, memory_ctx=None)
         if fast_result:
-            await self._store_interaction(content, fast_result.content, author_name)
+            filtered_response = await self._filter_response(fast_result.content, signal)
+            await self._store_interaction(
+                content,
+                filtered_response,
+                author_name,
+                user_id=user_model.user_id if user_model else "",
+                channel_id=channel_id,
+            )
             try:
-                await self._post_process(content, fast_result.content, author_name)
+                await self._post_process(
+                    content,
+                    filtered_response,
+                    author_name,
+                    user_id=user_model.user_id if user_model else "",
+                )
             except Exception:
                 pass
-            return fast_result.content
+            try:
+                await self._bus.publish(
+                    EventType.RESPONSE_READY,
+                    {
+                        "signal_id": signal.id,
+                        "user_id": user_model.user_id if user_model else "",
+                        "channel_id": channel_id,
+                        "platform": channel_type_name.lower(),
+                        "content": filtered_response[:200],
+                        "confidence": fast_result.confidence,
+                    },
+                    source="gateway",
+                )
+            except Exception:
+                pass
+            return filtered_response
 
         # 4. PERCEPTION: Intent classification (only for non-trivial messages)
         intent_result = await self._classifier.classify(signal)
 
         # 5. MEMORY: Retrieve context (skipped for fast-path messages above)
         memory_ctx = await self._retriever.retrieve(content)
+        await self._bus.publish(
+            EventType.CONTEXT_ENRICHED,
+            {
+                "signal_id": signal.id,
+                "user_id": user_model.user_id if user_model else "",
+                "channel_id": channel_id,
+                "platform": channel_type_name.lower(),
+                "memory_hits": len(memory_ctx.episodes) + len(memory_ctx.facts),
+            },
+            source="gateway",
+        )
 
         # 6. REASONING: Check for procedural memory match (if enabled)
         procedures = await self._procedural.find_matching(content) if self._procedural else []
@@ -630,6 +1060,26 @@ class NeuralClawGateway:
 
         # Add calibrator persona modifiers
         persona_mods = self._calibrator.preferences.to_persona_modifiers() if self._calibrator else ""
+        if persona_mods:
+            extra_system_sections.append(f"## User Style Guidance\n{persona_mods}")
+
+        # Inject active tool awareness
+        if tools:
+            tool_names = [t.name for t in tools]
+            extra_system_sections.append(
+                f"## Active Tools (this session)\n"
+                f"You have {len(tool_names)} tools available: {', '.join(tool_names)}.\n"
+                f"Use them proactively when the user's request matches a tool's capability."
+            )
+            # Extra desktop hint when desktop tools are active
+            if any(n.startswith("desktop_") for n in tool_names):
+                extra_system_sections.append(
+                    "## Desktop Control\n"
+                    "The desktop_* tools control the PHYSICAL COMPUTER this agent runs on. "
+                    "When the user says 'take a screenshot', 'show my screen', 'click on X', "
+                    "'open app Y', or anything about their computer — ALWAYS use the desktop tools. "
+                    "The user may be on a phone/remote device, but the tools act on THIS machine."
+                )
 
         use_reflective = (
             self._config.features.reflective_reasoning
@@ -641,6 +1091,7 @@ class NeuralClawGateway:
                 memory_ctx=memory_ctx,
                 tools=tools,
                 conversation_history=history[-20:],
+                extra_system_sections=extra_system_sections,
             )
         else:
             envelope = await self._deliberate.reason(
@@ -648,24 +1099,29 @@ class NeuralClawGateway:
                 memory_ctx=memory_ctx,
                 tools=tools,
                 conversation_history=history[-20:],
+                extra_system_sections=extra_system_sections,
             )
+        envelope.response = await self._filter_response(envelope.response, signal)
 
         # 8. RESPONSE: Store in memory and return
-        await self._store_interaction(content, envelope.response, author_name)
+        await self._store_interaction(
+            content,
+            envelope.response,
+            author_name,
+            user_id=user_model.user_id if user_model else "",
+            channel_id=channel_id,
+        )
 
-        # Update conversation history
-        if channel_id not in self._history:
-            self._history[channel_id] = []
-        self._history[channel_id].append({"role": "user", "content": content})
-        self._history[channel_id].append({"role": "assistant", "content": envelope.response})
-
-        # Trim history to 20 (matches what's passed to LLM — no point storing more)
-        if len(self._history[channel_id]) > 20:
-            self._history[channel_id] = self._history[channel_id][-20:]
+        self._append_history(channel_id, content, envelope.response)
 
         # Post-process (metabolism, distiller, calibrator) — never block response
         try:
-            await self._post_process(content, envelope.response, author_name)
+            await self._post_process(
+                content,
+                envelope.response,
+                author_name,
+                user_id=user_model.user_id if user_model else "",
+            )
         except Exception as e:
             print(f"[Gateway] Post-process error (non-fatal): {e}")
 
@@ -673,28 +1129,88 @@ class NeuralClawGateway:
         try:
             await self._bus.publish(
                 EventType.RESPONSE_READY,
-                {"content": envelope.response[:200], "confidence": envelope.confidence},
+                {
+                    "signal_id": signal.id,
+                    "user_id": user_model.user_id if user_model else "",
+                    "channel_id": channel_id,
+                    "platform": channel_type_name.lower(),
+                    "content": envelope.response[:200],
+                    "confidence": envelope.confidence,
+                },
                 source="gateway",
             )
         except Exception:
             pass
 
+        # Stash media for the caller to pick up (e.g. screenshots to send as photos)
+        if envelope.media:
+            if not hasattr(self, "_pending_media"):
+                self._pending_media = {}
+            self._pending_media[channel_id] = envelope.media
+
         return envelope.response
 
-    async def _store_interaction(self, user_msg: str, agent_msg: str, author: str) -> None:
-        """Store the interaction in episodic memory."""
+    def _score_importance(self, text: str) -> float:
+        """Heuristic importance scoring for memory storage."""
+        score = 0.5
+        lower = text.lower()
+        # Personal facts are high importance
+        personal_markers = ("my name", "i am", "i work", "i live", "i like", "i prefer",
+                           "my job", "my project", "remember that", "don't forget",
+                           "important:", "note:", "my email", "my phone", "my address")
+        for marker in personal_markers:
+            if marker in lower:
+                score = max(score, 0.85)
+                break
+        # Questions about past context
+        if any(w in lower for w in ("remember when", "last time", "we discussed", "you said", "earlier")):
+            score = max(score, 0.7)
+        # Instructions / preferences
+        if any(w in lower for w in ("always", "never", "please don't", "from now on", "going forward")):
+            score = max(score, 0.75)
+        # Code/technical content slightly higher
+        if any(w in lower for w in ("def ", "class ", "function", "import ", "```", "error", "bug", "fix")):
+            score = max(score, 0.6)
+        # Very short messages (greetings) are low importance
+        if len(text.split()) <= 3:
+            score = min(score, 0.3)
+        return round(score, 2)
+
+    async def _store_interaction(
+        self,
+        user_msg: str,
+        agent_msg: str,
+        author: str,
+        user_id: str = "",
+        channel_id: str = "",
+    ) -> None:
+        """Store the interaction in episodic memory with smart importance scoring."""
         try:
+            user_importance = self._score_importance(user_msg)
+            # Agent replies inherit slightly less importance than the user message
+            agent_importance = max(0.3, user_importance - 0.1)
+
+            user_tags = [tag for tag in (
+                f"user_id:{user_id}" if user_id else "",
+                f"channel:{channel_id}" if channel_id else "",
+            ) if tag]
+
             await self._episodic.store(
                 content=f"{author}: {user_msg}",
                 source="conversation",
                 author=author,
-                importance=0.5,
+                importance=user_importance,
+                tags=user_tags,
             )
             await self._episodic.store(
                 content=f"NeuralClaw: {agent_msg}",
                 source="conversation",
                 author="NeuralClaw",
-                importance=0.4,
+                importance=agent_importance,
+                tags=[tag for tag in (
+                    f"reply_to_user:{user_id}" if user_id else "",
+                    f"channel:{channel_id}" if channel_id else "",
+                ) if tag],
             )
         except Exception as e:
             await self._bus.publish(
@@ -775,7 +1291,361 @@ class NeuralClawGateway:
             kwargs["thread_ts"] = thread_ts
         return kwargs
 
-    async def _post_process(self, user_msg: str, agent_msg: str, author: str) -> None:
+    def _register_desktop_tools(self) -> None:
+        if not self._desktop:
+            return
+        self._skills.register_tool(
+            name="desktop_screenshot",
+            description=(
+                "Take a screenshot of the computer this agent is running on. "
+                "Use this whenever the user asks to see their screen, what's on their desktop, "
+                "or asks you to look at something on their computer. "
+                "Returns the screenshot as a base64 PNG image."
+            ),
+            function=self._desktop.screenshot,
+            parameters={
+                "monitor": {
+                    "type": "integer",
+                    "description": "Monitor index (0 = primary). Default 0.",
+                },
+            },
+        )
+        self._skills.register_tool(
+            name="desktop_click",
+            description=(
+                "Click the mouse at specific pixel coordinates on the host computer's screen. "
+                "Use after taking a screenshot to interact with UI elements."
+            ),
+            function=self._desktop.click,
+            parameters={
+                "x": {"type": "integer", "description": "Horizontal pixel coordinate."},
+                "y": {"type": "integer", "description": "Vertical pixel coordinate."},
+                "button": {
+                    "type": "string",
+                    "description": "Mouse button: left, right, or middle.",
+                    "enum": ["left", "right", "middle"],
+                },
+                "clicks": {"type": "integer", "description": "Number of clicks (1=single, 2=double)."},
+            },
+        )
+        self._skills.register_tool(
+            name="desktop_type",
+            description=(
+                "Type text using the keyboard on the host computer. "
+                "Use after clicking on a text field to enter text."
+            ),
+            function=self._desktop.type_text,
+            parameters={
+                "text": {"type": "string", "description": "Text to type."},
+                "interval": {
+                    "type": "number",
+                    "description": "Delay between keystrokes in seconds. Default 0.05.",
+                },
+            },
+        )
+        self._skills.register_tool(
+            name="desktop_hotkey",
+            description=(
+                "Press a keyboard shortcut on the host computer. "
+                "Examples: ['ctrl', 'c'] for copy, ['ctrl', 'v'] for paste, "
+                "['alt', 'tab'] to switch windows, ['ctrl', 's'] to save."
+            ),
+            function=self._desktop_hotkey_tool,
+            parameters={
+                "keys": {
+                    "type": "array",
+                    "description": "Keys to press together, e.g. ['ctrl', 'c'].",
+                    "items": {"type": "string"},
+                },
+            },
+        )
+        self._skills.register_tool(
+            name="desktop_get_clipboard",
+            description="Read the current clipboard text from the host computer.",
+            function=self._desktop.get_clipboard,
+        )
+        self._skills.register_tool(
+            name="desktop_set_clipboard",
+            description="Write text to the host computer's clipboard.",
+            function=self._desktop.set_clipboard,
+            parameters={
+                "text": {"type": "string", "description": "Text to put on the clipboard."},
+            },
+        )
+        self._skills.register_tool(
+            name="desktop_run_app",
+            description=(
+                "Launch an application on the host computer. "
+                "Use to open Notepad, Calculator, browser, etc."
+            ),
+            function=self._desktop.run_app,
+            parameters={
+                "app": {"type": "string", "description": "Application name or path (e.g. 'notepad', 'calc', 'mspaint')."},
+                "args": {
+                    "type": "array",
+                    "description": "Optional command-line arguments.",
+                    "items": {"type": "string"},
+                },
+            },
+        )
+
+    async def _desktop_hotkey_tool(self, keys: list[str]) -> dict[str, Any]:
+        if not self._desktop:
+            return {"error": "Desktop control is not available."}
+        return await self._desktop.hotkey(*keys)
+
+    def _register_browser_tools(self) -> None:
+        if not self._browser:
+            return
+        self._skills.register_tool(
+            name="browser_navigate",
+            description="Navigate the browser to a URL.",
+            function=self._browser.navigate,
+            parameters={"url": {"type": "string", "description": "Target URL."}},
+        )
+        self._skills.register_tool(
+            name="browser_screenshot",
+            description="Capture the current browser viewport and page snapshot.",
+            function=self._browser.screenshot,
+            parameters={},
+        )
+        self._skills.register_tool(
+            name="browser_click",
+            description="Click an element by CSS/XPath selector or natural-language description.",
+            function=self._browser.click,
+            parameters={"selector": {"type": "string", "description": "Element selector or description."}},
+        )
+        self._skills.register_tool(
+            name="browser_type",
+            description="Type text into a field by selector or natural-language description.",
+            function=self._browser.type_text,
+            parameters={
+                "selector": {"type": "string", "description": "Field selector or description."},
+                "text": {"type": "string", "description": "Text to type."},
+            },
+        )
+        self._skills.register_tool(
+            name="browser_scroll",
+            description="Scroll the current page up or down.",
+            function=self._browser.scroll,
+            parameters={
+                "direction": {"type": "string", "description": "Scroll direction.", "enum": ["up", "down"]},
+                "amount": {"type": "integer", "description": "Relative scroll amount."},
+            },
+        )
+        self._skills.register_tool(
+            name="browser_extract",
+            description="Extract information from the current page.",
+            function=self._browser.extract,
+            parameters={"query": {"type": "string", "description": "What to extract from the page."}},
+        )
+        self._skills.register_tool(
+            name="browser_execute_js",
+            description="Execute JavaScript in the active page when enabled by config.",
+            function=self._browser.execute_js,
+            parameters={"code": {"type": "string", "description": "JavaScript expression or function body."}},
+        )
+        self._skills.register_tool(
+            name="browser_wait_for",
+            description="Wait for a selector or loading condition in the current page.",
+            function=self._browser.wait_for,
+            parameters={
+                "condition": {"type": "string", "description": "Selector or wait condition."},
+                "timeout": {"type": "integer", "description": "Timeout in seconds."},
+            },
+        )
+        self._skills.register_tool(
+            name="browser_act",
+            description="Run a bounded browser task against the active session.",
+            function=self._browser.act,
+            parameters={
+                "task": {"type": "string", "description": "Natural-language browser task."},
+                "url": {"type": "string", "description": "Optional starting URL."},
+                "max_steps": {"type": "integer", "description": "Maximum number of steps."},
+            },
+        )
+        self._skills.register_tool(
+            name="chrome_summarize",
+            description="Use Chrome AI summarization when enabled.",
+            function=self._browser.chrome_summarize,
+            parameters={"selector": {"type": "string", "description": "Selector to summarize."}},
+        )
+        self._skills.register_tool(
+            name="chrome_translate",
+            description="Use Chrome AI translation when enabled.",
+            function=self._browser.chrome_translate,
+            parameters={
+                "text": {"type": "string", "description": "Text to translate."},
+                "target_lang": {"type": "string", "description": "Target language code."},
+            },
+        )
+        self._skills.register_tool(
+            name="chrome_prompt",
+            description="Use Chrome AI prompt APIs when enabled.",
+            function=self._browser.chrome_prompt,
+            parameters={
+                "prompt": {"type": "string", "description": "Prompt to send."},
+                "context_selector": {"type": "string", "description": "Optional selector for extra page context."},
+            },
+        )
+
+    def _default_system_prompt_fragments(self) -> list[str]:
+        fragments = [self._config.persona]
+
+        # Dynamic self-awareness: build capabilities section from what's actually enabled
+        feat = self._config.features
+        caps: list[str] = []
+        caps.append("You have persistent memory — you remember past conversations, learn user preferences, and build a knowledge graph of facts over time.")
+        if feat.vector_memory:
+            caps.append("You have semantic similarity search across all past interactions.")
+        if feat.identity:
+            caps.append("You track per-user identity, expertise domains, communication style, and active projects.")
+        if feat.vision:
+            caps.append("You can analyze images/photos sent to you.")
+        if feat.evolution:
+            caps.append("You self-evolve: after every ~50 interactions you distill patterns into permanent knowledge and refine your behavior.")
+        if self._config.security.allow_shell_execution:
+            caps.append("You can execute Python code in a sandbox, clone GitHub repos, install dependencies, and run scripts/tests.")
+        else:
+            caps.append("Code execution is available but currently disabled by the admin. You can explain code and help with programming, but cannot run it.")
+        if getattr(self, "_browser", None):
+            caps.append("You can browse web pages, extract content, and execute JavaScript.")
+        if getattr(self, "_desktop", None):
+            caps.append(
+                "You are running on the user's local computer. You can control THIS machine's "
+                "screen, mouse, keyboard, and clipboard using the desktop_* tools. When users ask "
+                "to see their screen, take a screenshot, click something, type something, or "
+                "interact with their computer in any way, use the desktop tools — they control "
+                "the physical machine you're running on, even if the user is messaging from a "
+                "remote device like a phone via Telegram."
+            )
+        if self._config.google_workspace.enabled:
+            caps.append("You have Google Workspace access (Gmail, Calendar, Drive, Docs, Sheets).")
+        if self._config.microsoft365.enabled:
+            caps.append("You have Microsoft 365 access (Outlook, Calendar, Teams, OneDrive).")
+        if self._config.tts.enabled:
+            caps.append("You can generate voice/speech audio responses.")
+        if feat.reflective_reasoning:
+            caps.append("For complex multi-step problems, you use reflective reasoning (think step-by-step, critique, and refine).")
+
+        capabilities_section = (
+            f"## About You\n"
+            f"You are {self._config.name}, a self-evolving cognitive AI agent.\n\n"
+            f"## Your Active Capabilities\n"
+            + "\n".join(f"- {c}" for c in caps)
+            + "\n"
+        )
+        fragments.append(capabilities_section)
+
+        fragments.append(
+            "## Guidelines\n"
+            "- ALWAYS use your tools when the user's request matches a tool's purpose. "
+            "NEVER say 'I can't' or 'I'm unable to' when you have a tool that can do it.\n"
+            "- If past memory/conversation shows you previously said you couldn't do something, "
+            "IGNORE that — your capabilities may have changed. Always check your current tool list.\n"
+            "- Reference your memory when relevant to the conversation.\n"
+            "- If uncertain, say so. If a tool can verify, use it first.\n"
+            "- Be concise but thorough. Adapt your style to the user.\n"
+        )
+        return fragments
+
+    def _apply_prompt_armor_context(
+        self,
+        signal: Signal,
+        extra_system_sections: list[str],
+    ) -> None:
+        if not hasattr(signal, "context") or getattr(signal, "context") is None:
+            signal.context = {}
+        signal.context["system_prompt_fragments"] = self._default_system_prompt_fragments()
+        if self._canary_token:
+            signal.context["canary_token"] = self._canary_token
+            extra_system_sections.append(f"<!-- {self._canary_token} -->")
+
+    async def _apply_visual_context(self, signal: Signal, user_query: str) -> None:
+        if not self._vision or not signal.media:
+            return
+
+        contexts: list[str] = []
+        for media_item in signal.media:
+            try:
+                visual_context = await self._vision.process_media(media_item, user_query)
+            except Exception as exc:
+                await self._bus.publish(
+                    EventType.ERROR,
+                    {
+                        "component": "gateway_visual_context",
+                        "operation": "process_media",
+                        "error": str(exc),
+                    },
+                    source="gateway",
+                )
+                continue
+            if visual_context:
+                contexts.append(visual_context)
+
+        if not contexts:
+            return
+
+        visual_section = "## Visual Context\n" + "\n\n".join(contexts)
+        signal.content = f"{visual_section}\n\n## User Message\n{signal.content}".strip()
+        if not hasattr(signal, "context") or getattr(signal, "context") is None:
+            signal.context = {}
+        signal.context["visual_context"] = contexts
+
+    async def _maybe_send_voice_response(self, source_channel: str | None, channel_id: str, response: str) -> None:
+        if not source_channel or source_channel != "discord":
+            return
+        if not self._config.features.voice or not self._config.tts.enabled:
+            return
+
+        discord_cfg = next((ch for ch in self._config.channels if ch.name == "discord"), None)
+        if not discord_cfg:
+            return
+        if not (discord_cfg.extra.get("voice_responses") or self._config.tts.auto_speak):
+            return
+
+        adapter = self._channels.get("discord")
+        if not adapter or not hasattr(adapter, "speak"):
+            return
+
+        try:
+            from neuralclaw.skills.builtins import tts as _tts
+
+            result = await _tts.speak(response)
+            if result.get("error"):
+                return
+            await adapter.speak(
+                result["audio_path"],
+                channel_id=discord_cfg.extra.get("voice_channel_id") or channel_id,
+            )
+        except Exception as exc:
+            await self._bus.publish(
+                EventType.ERROR,
+                {"component": "gateway_voice", "error": str(exc)},
+                source="gateway",
+            )
+
+    async def _filter_response(self, response: str, signal: Signal) -> str:
+        if not self._output_filter:
+            return response
+        result = await self._output_filter.screen(response, signal)
+        return result.response
+
+    def _append_history(self, channel_id: str, user_content: str, assistant_content: str) -> None:
+        if channel_id not in self._history:
+            self._history[channel_id] = []
+        self._history[channel_id].append({"role": "user", "content": user_content})
+        self._history[channel_id].append({"role": "assistant", "content": assistant_content})
+        if len(self._history[channel_id]) > 20:
+            self._history[channel_id] = self._history[channel_id][-20:]
+
+    async def _post_process(
+        self,
+        user_msg: str,
+        agent_msg: str,
+        author: str,
+        user_id: str = "",
+    ) -> None:
         """Post-processing: tick metabolism/distiller, run calibration."""
         if self._metabolism:
             self._metabolism.tick()
@@ -787,6 +1657,24 @@ class NeuralClawGateway:
                 user_msg_length=len(user_msg),
                 agent_msg_length=len(agent_msg),
             )
+            if self._identity and user_id:
+                prefs = self._calibrator.preferences
+                await self._identity.update(
+                    user_id,
+                    {
+                        "communication_style": {
+                            "formality": prefs.formality,
+                            "verbosity": prefs.verbosity,
+                            "proactiveness": prefs.proactiveness,
+                            "emoji_usage": prefs.emoji_usage,
+                        },
+                        "preferences": {
+                            "custom_rules": prefs.custom_rules,
+                            "code_style": prefs.code_style,
+                        },
+                        "timezone": prefs.timezone,
+                    },
+                )
 
         # Run metabolism cycle if due
         if self._metabolism and self._metabolism.should_run:
@@ -803,6 +1691,8 @@ class NeuralClawGateway:
         if self._distiller and self._distiller.should_distill:
             try:
                 await self._distiller.distill()
+                if self._identity and user_id:
+                    await self._identity.synthesize_model(user_id)
             except Exception as e:
                 await self._bus.publish(
                     EventType.ERROR,
@@ -886,10 +1776,19 @@ class NeuralClawGateway:
         await self._bus.stop()
         await self._episodic.close()
         await self._semantic.close()
+        if self._identity:
+            await self._identity.close()
+        if self._traceline:
+            await self._traceline.close()
+        if self._vector_memory:
+            await self._vector_memory.close()
+        if self._browser:
+            await self._browser.stop()
         if self._procedural:
             await self._procedural.close()
         if self._calibrator:
             await self._calibrator.close()
+        await self._audit.close()
         await self._idempotency.close()
         print("\n🧠 NeuralClaw Gateway stopped.")
 
@@ -1016,6 +1915,28 @@ class NeuralClawGateway:
             channel_id=f"federation:{from_name}",
             channel_type_name="CLI",
         )
+
+    def _get_a2a_skills(self) -> list[dict[str, Any]]:
+        """Return JSON-safe skill metadata for the A2A agent card."""
+        skills: list[dict[str, Any]] = []
+        for manifest in self._skills.list_skills():
+            skills.append(
+                {
+                    "name": manifest.name,
+                    "description": manifest.description,
+                    "version": manifest.version,
+                    "capabilities": [cap.name for cap in manifest.capabilities],
+                    "tools": [
+                        {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.to_json_schema(),
+                        }
+                        for tool in manifest.tools
+                    ],
+                }
+            )
+        return skills
 
     async def _dashboard_message_peer(self, node_name: str, content: str) -> dict[str, Any]:
         """Send a message to a federation peer and return the response."""

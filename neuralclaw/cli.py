@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 import click
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
 from rich.text import Text
 from rich.markdown import Markdown
 from rich.table import Table
@@ -89,6 +90,72 @@ def main() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Config command — interactive configurator
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.argument("section", required=False, default=None)
+def config(section: str | None) -> None:
+    """Interactive configuration — change any setting without editing files.
+
+    \b
+    Quick shortcuts:
+        neuralclaw config               Full interactive menu
+        neuralclaw config provider       Switch AI provider
+        neuralclaw config channels       Set up messaging channels
+        neuralclaw config features       Toggle features on/off
+        neuralclaw config security       Security settings
+        neuralclaw config voice          TTS / voice settings
+        neuralclaw config browser        Browser automation
+        neuralclaw config integrations   Google / Microsoft 365
+        neuralclaw config advanced       Federation, policy, persona
+    """
+    console.print(BANNER)
+
+    from neuralclaw.configurator import (
+        run_configurator,
+        _configure_provider,
+        _configure_channels,
+        _configure_features,
+        _configure_memory,
+        _configure_security,
+        _configure_voice,
+        _configure_browser,
+        _configure_integrations,
+        _configure_advanced,
+        _show_status,
+    )
+
+    shortcuts = {
+        "provider": _configure_provider,
+        "channels": _configure_channels,
+        "features": _configure_features,
+        "memory": _configure_memory,
+        "security": _configure_security,
+        "voice": _configure_voice,
+        "browser": _configure_browser,
+        "integrations": _configure_integrations,
+        "advanced": _configure_advanced,
+        "status": _show_status,
+    }
+
+    if section:
+        key = section.lower().strip()
+        if key in shortcuts:
+            shortcuts[key]()
+        else:
+            # Fuzzy match
+            for k, fn in shortcuts.items():
+                if key in k:
+                    fn()
+                    return
+            console.print(f"[red]Unknown section '{section}'[/red]")
+            console.print(f"[dim]Available: {', '.join(shortcuts.keys())}[/dim]")
+    else:
+        run_configurator()
+
+
+# ---------------------------------------------------------------------------
 # Init command
 # ---------------------------------------------------------------------------
 
@@ -146,15 +213,20 @@ def init() -> None:
 
     console.print(Panel(
         "[green]Setup complete![/green]\n\n"
-        "  [cyan]neuralclaw session setup chatgpt[/cyan] Configure ChatGPT browser session\n"
-        "  [cyan]neuralclaw session setup claude[/cyan]  Configure Claude browser session\n"
-        "  [cyan]neuralclaw channels setup[/cyan]  Configure messaging channels\n"
-        "  [cyan]neuralclaw chat[/cyan]            Start interactive chat\n"
-        "  [cyan]neuralclaw gateway[/cyan]         Start with all channels\n"
-        "  [cyan]neuralclaw status[/cyan]          View configuration",
+        "  [cyan]neuralclaw config[/cyan]           Configure everything (interactive menu)\n"
+        "  [cyan]neuralclaw config provider[/cyan]  Switch AI provider\n"
+        "  [cyan]neuralclaw config channels[/cyan]  Set up messaging channels\n"
+        "  [cyan]neuralclaw chat[/cyan]             Start interactive chat\n"
+        "  [cyan]neuralclaw run[/cyan]              Start gateway (auto-restarts)\n"
+        "  [cyan]neuralclaw doctor[/cyan]           Check system health",
         title="What's Next",
         style="bold",
     ))
+
+    # Offer to jump into configurator
+    if Confirm.ask("\nConfigure more settings now?", default=True):
+        from neuralclaw.configurator import run_configurator
+        run_configurator()
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +404,20 @@ async def _fetch_ollama_models(tags_url: str) -> list[str]:
 
     models = [item.get("name", "") for item in data.get("models", []) if item.get("name")]
     return sorted(models)
+
+
+def _parse_since_value(value: str | None) -> float | None:
+    """Parse durations like 7d, 12h, or 30m into a unix timestamp cutoff."""
+    if not value:
+        return None
+    raw = value.strip().lower()
+    if raw.endswith("d"):
+        return time.time() - (float(raw[:-1]) * 86400)
+    if raw.endswith("h"):
+        return time.time() - (float(raw[:-1]) * 3600)
+    if raw.endswith("m"):
+        return time.time() - (float(raw[:-1]) * 60)
+    return float(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -1012,7 +1098,7 @@ def _print_session_health(provider_name: str, health) -> None:
 
 
 @session.command("auth")
-@click.argument("provider_name", type=click.Choice(["chatgpt", "claude"]))
+@click.argument("provider_name", type=click.Choice(["chatgpt", "claude", "google", "microsoft"]))
 @click.option("--stealth", is_flag=True, help="Use stealth mode (URL pasting) instead of opening a local browser.")
 def session_auth(provider_name: str, stealth: bool) -> None:
     """Set up token-based authentication (managed cookie or session key)."""
@@ -1030,6 +1116,37 @@ async def _session_auth(provider_name: str, stealth: bool = False) -> None:
 
     console.print(BANNER)
     config = load_config()
+
+    if provider_name in {"google", "microsoft"}:
+        from neuralclaw.config import _set_secret
+
+        is_google = provider_name == "google"
+        title = "Google Workspace" if is_google else "Microsoft 365"
+        console.print(Panel(
+            f"[bold]{title} Token Setup[/bold]\n\n"
+            "Paste an OAuth access token or refresh token from your existing auth flow.\n"
+            "NeuralClaw stores it in the local keychain and enables the matching skill config.",
+            style="bold cyan",
+        ))
+        access_token = Prompt.ask("  Access token (Enter to skip)", default="", show_default=False).strip()
+        refresh_token = Prompt.ask("  Refresh token (Enter to skip)", default="", show_default=False).strip()
+        if not access_token and not refresh_token:
+            console.print("  [dim]No credential provided.[/dim]")
+            return
+        if is_google:
+            if access_token:
+                _set_secret("google_oauth_access", access_token)
+            if refresh_token:
+                _set_secret("google_oauth_refresh", refresh_token)
+            update_config({"google_workspace": {"enabled": True}})
+        else:
+            if access_token:
+                _set_secret("microsoft365_oauth_access", access_token)
+            if refresh_token:
+                _set_secret("microsoft_oauth_refresh", refresh_token)
+            update_config({"microsoft365": {"enabled": True}})
+        console.print(f"  [green]✓[/green] Stored {title} credentials")
+        return
 
     if provider_name == "chatgpt":
         provider_cfg = config._raw.get("providers", {}).get("chatgpt_token", {})
@@ -1393,16 +1510,77 @@ def repair(dry_run: bool, backup: bool) -> None:
 @click.option("--web-port", default=None, type=int, help="Override web chat port.")
 @click.option("--name", default=None, help="Override node name.")
 @click.option("--seed", default=None, help="Seed node to join (e.g. http://localhost:8100).")
-def gateway(federation_port, dashboard_port, web_port, name, seed) -> None:
-    """Start the full agent with all configured channels."""
+@click.option("--watchdog", is_flag=True, default=False, help="Auto-restart on crash (keeps gateway alive forever).")
+@click.option("--max-restarts", default=0, type=int, help="Max restarts before giving up (0=unlimited, default=0).")
+@click.option("--restart-delay", default=5, type=int, help="Seconds to wait before restart (default=5).")
+def gateway(federation_port, dashboard_port, web_port, name, seed, watchdog, max_restarts, restart_delay) -> None:
+    """Start the full agent with all configured channels.
+
+    Use --watchdog to keep the gateway running forever with automatic crash recovery.
+    """
     console.print(BANNER)
-    asyncio.run(_run_gateway(
-        federation_port=federation_port,
-        dashboard_port=dashboard_port,
-        web_port=web_port,
-        node_name=name,
-        seed_node=seed,
+
+    if watchdog:
+        _run_watchdog(
+            federation_port=federation_port,
+            dashboard_port=dashboard_port,
+            web_port=web_port,
+            node_name=name,
+            seed_node=seed,
+            max_restarts=max_restarts,
+            restart_delay=restart_delay,
+        )
+    else:
+        asyncio.run(_run_gateway(
+            federation_port=federation_port,
+            dashboard_port=dashboard_port,
+            web_port=web_port,
+            node_name=name,
+            seed_node=seed,
+        ))
+
+
+def _run_watchdog(
+    federation_port: int | None = None,
+    dashboard_port: int | None = None,
+    web_port: int | None = None,
+    node_name: str | None = None,
+    seed_node: str | None = None,
+    max_restarts: int = 0,
+    restart_delay: int = 5,
+) -> None:
+    """Watchdog loop — delegates to service.run_gateway_blocking() for a single
+    implementation of the crash-recovery loop.  CLI overrides are applied by
+    wrapping _run_gateway() so the shared loop still picks them up."""
+    from neuralclaw.service import run_gateway_blocking
+
+    console.print(Panel(
+        f"[bold green]Watchdog mode active[/bold green]\n"
+        f"Max restarts: {'unlimited' if max_restarts == 0 else max_restarts}  |  "
+        f"Restart delay: {restart_delay}s",
+        title="Gateway Watchdog",
+        style="green",
     ))
+
+    # Monkey-patch the gateway builder so CLI overrides (ports, name, seed) are
+    # honoured by the shared watchdog in service.py.
+    import neuralclaw.service as _svc
+    _original = _svc._run_gateway_async
+
+    async def _patched() -> None:
+        await _run_gateway(
+            federation_port=federation_port,
+            dashboard_port=dashboard_port,
+            web_port=web_port,
+            node_name=node_name,
+            seed_node=seed_node,
+        )
+
+    _svc._run_gateway_async = _patched  # type: ignore[assignment]
+    try:
+        run_gateway_blocking(watchdog=True, max_restarts=max_restarts)
+    finally:
+        _svc._run_gateway_async = _original  # type: ignore[assignment]
 
 
 async def _run_gateway(
@@ -1435,6 +1613,58 @@ async def _run_gateway(
         await gw.run_forever()
     except KeyboardInterrupt:
         await gw.stop()
+
+
+# ---------------------------------------------------------------------------
+# Run command — one-step "just launch it"
+# ---------------------------------------------------------------------------
+
+@main.command()
+@click.option("--web-port", default=None, type=int, help="Override web chat port.")
+@click.option("--no-watchdog", is_flag=True, default=False, help="Disable auto-restart.")
+def run(web_port, no_watchdog) -> None:
+    """One-step launch — init if needed, then start gateway with watchdog.
+
+    This is the simplest way to start NeuralClaw:
+
+        neuralclaw run
+
+    It will create a config if none exists, then start the gateway
+    with automatic crash recovery (watchdog) enabled by default.
+    """
+    console.print(BANNER)
+
+    # Auto-init if no config
+    try:
+        load_config()
+        console.print("[green]Config found.[/green]")
+    except Exception:
+        console.print("[yellow]No config found — running first-time setup...[/yellow]\n")
+        ensure_dirs()
+        save_default_config()
+        console.print("[green]Default config created. Edit ~/.neuralclaw/config.toml to customize.[/green]\n")
+
+    # Doctor quick-check
+    try:
+        from neuralclaw.health import HealthChecker
+        config = load_config()
+        checker = HealthChecker(config)
+        report = checker.run_all()
+        if report.healthy:
+            console.print("[green]Health check: all OK[/green]\n")
+        else:
+            console.print(f"[yellow]Health check: {report.fail_count} issue(s) — run 'neuralclaw doctor' for details[/yellow]\n")
+    except Exception:
+        pass
+
+    if no_watchdog:
+        asyncio.run(_run_gateway(web_port=web_port))
+    else:
+        _run_watchdog(
+            web_port=web_port,
+            max_restarts=0,
+            restart_delay=5,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1484,6 +1714,164 @@ def status() -> None:
 
     console.print(table)
     console.print()
+
+
+# ---------------------------------------------------------------------------
+# Audit command group
+# ---------------------------------------------------------------------------
+
+@main.group(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
+)
+def audit() -> None:
+    """Inspect tool audit logs and forensic replay data."""
+    pass
+
+
+@audit.command("list")
+@click.option("--tool", default=None, help="Filter by tool name.")
+@click.option("--user", "user_id", default=None, help="Filter by canonical user id.")
+@click.option("--since", default=None, help="Only include records newer than e.g. 7d, 12h, 30m.")
+@click.option("--denied", is_flag=True, help="Show denied actions only.")
+@click.option("--limit", default=20, type=int, show_default=True, help="Maximum records to show.")
+def audit_list(tool: str | None, user_id: str | None, since: str | None, denied: bool, limit: int) -> None:
+    """List recent audit records."""
+    asyncio.run(_audit_list(tool=tool, user_id=user_id, since=since, denied=denied, limit=limit))
+
+
+async def _audit_list(tool: str | None, user_id: str | None, since: str | None, denied: bool, limit: int) -> None:
+    from neuralclaw.cortex.action.audit import AuditLogger
+
+    config = load_config()
+    logger = AuditLogger(config=config.audit)
+    await logger.initialize()
+    records = await logger.search(
+        tool=tool,
+        user_id=user_id,
+        since=_parse_since_value(since),
+        denied_only=denied,
+        limit=limit,
+    )
+
+    table = Table(title="Audit Records", style="cyan")
+    table.add_column("Time", style="bold")
+    table.add_column("Request")
+    table.add_column("Tool")
+    table.add_column("User")
+    table.add_column("Decision")
+    table.add_column("Preview")
+
+    for record in records:
+        decision = "[green]allow[/green]" if record.allowed else "[red]deny[/red]"
+        preview = record.denied_reason or record.result_preview or record.args_preview
+        table.add_row(
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(record.timestamp)),
+            record.request_id or "—",
+            record.skill_name or "—",
+            record.user_id or "—",
+            decision,
+            preview[:80],
+        )
+
+    if records:
+        console.print(table)
+    else:
+        console.print("[dim]No audit records matched the filters.[/dim]")
+
+
+@audit.command("show")
+@click.argument("request_id")
+def audit_show(request_id: str) -> None:
+    """Show the full action sequence for a request id."""
+    asyncio.run(_audit_show(request_id))
+
+
+async def _audit_show(request_id: str) -> None:
+    from neuralclaw.cortex.action.audit import AuditLogger
+
+    config = load_config()
+    logger = AuditLogger(config=config.audit)
+    await logger.initialize()
+    records = await logger.get_trace_actions(request_id)
+
+    if not records:
+        console.print(f"[dim]No audit records found for request {request_id}.[/dim]")
+        return
+
+    table = Table(title=f"Audit Trace {request_id}", style="cyan")
+    table.add_column("Time", style="bold")
+    table.add_column("Tool")
+    table.add_column("Decision")
+    table.add_column("Args")
+    table.add_column("Result")
+
+    for record in records:
+        table.add_row(
+            time.strftime("%H:%M:%S", time.localtime(record.timestamp)),
+            record.skill_name or "—",
+            "allow" if record.allowed else f"deny: {record.denied_reason}",
+            record.args_preview[:60] or "—",
+            record.result_preview[:60] or "—",
+        )
+
+    console.print(table)
+
+
+@audit.command("export")
+@click.option(
+    "--format",
+    "export_format",
+    default="jsonl",
+    type=click.Choice(["jsonl", "csv", "cef"], case_sensitive=False),
+    show_default=True,
+    help="Export format.",
+)
+@click.option("--since", default=None, help="Only include records newer than e.g. 7d, 12h, 30m.")
+@click.option("--output", default=None, help="Destination file. Defaults to audit-export.<format>.")
+def audit_export(export_format: str, since: str | None, output: str | None) -> None:
+    """Export audit records for offline review or SIEM ingestion."""
+    asyncio.run(_audit_export(export_format=export_format, since=since, output=output))
+
+
+async def _audit_export(export_format: str, since: str | None, output: str | None) -> None:
+    from neuralclaw.cortex.action.audit import AuditLogger
+
+    config = load_config()
+    logger = AuditLogger(config=config.audit)
+    await logger.initialize()
+    out = Path(output) if output else Path.cwd() / f"audit-export.{export_format.lower()}"
+    count = await logger.export(
+        str(out),
+        format=export_format,
+        since=_parse_since_value(since),
+    )
+    console.print(f"[green]Exported[/green] {count} audit records to [cyan]{out}[/cyan]")
+
+
+@audit.command("stats")
+def audit_stats() -> None:
+    """Show audit denial and usage statistics."""
+    asyncio.run(_audit_stats())
+
+
+async def _audit_stats() -> None:
+    from neuralclaw.cortex.action.audit import AuditLogger
+
+    config = load_config()
+    logger = AuditLogger(config=config.audit)
+    await logger.initialize()
+    stats = await logger.stats()
+
+    table = Table(title="Audit Stats", style="cyan")
+    table.add_column("Metric", style="bold")
+    table.add_column("Value")
+    table.add_row("Total records", str(stats["total_records"]))
+    table.add_row("Denied records", str(stats["denied_records"]))
+    table.add_row("Denial rate", f"{stats['denial_rate']:.1%}")
+    table.add_row("Top tools", ", ".join(f"{name} ({count})" for name, count in stats["top_tools"]) or "—")
+    table.add_row("Top users", ", ".join(f"{name} ({count})" for name, count in stats["top_users"]) or "—")
+    console.print(table)
 
 
 # ---------------------------------------------------------------------------
@@ -1793,6 +2181,335 @@ def federation(port: int) -> None:
         info_table.add_row("Status:", "/federation/status")
         console.print(info_table)
     console.print()
+
+
+# ---------------------------------------------------------------------------
+# Test command
+# ---------------------------------------------------------------------------
+
+@main.command(name="test")
+@click.argument("feature", required=False, default=None)
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Verbose output.")
+@click.option("--coverage", is_flag=True, default=False, help="Run with coverage report.")
+def run_tests(feature: str | None, verbose: bool, coverage: bool) -> None:
+    """Run tests — all or by feature name.
+
+    \b
+    Examples:
+        neuralclaw test                  Run all tests
+        neuralclaw test vector           Run vector memory tests
+        neuralclaw test browser          Run browser cortex tests
+        neuralclaw test identity         Run identity store tests
+        neuralclaw test --coverage       Run all with coverage
+
+    \b
+    Available features:
+        vector, identity, browser, vision, tts, google, microsoft,
+        parallel, streaming, structured, a2a, traceline, output_filter,
+        audit, desktop, perception, memory, config, sandbox, ssrf,
+        auth, health, federation, gateway, proxy, token
+    """
+    import subprocess
+
+    console.print(BANNER)
+
+    # Resolve project root (where tests/ lives)
+    project_root = Path(__file__).resolve().parent.parent
+    tests_dir = project_root / "tests"
+
+    if not tests_dir.exists():
+        console.print("[red]Tests directory not found.[/red]")
+        console.print(f"[dim]Expected at: {tests_dir}[/dim]")
+        return
+
+    # Map friendly names to test files
+    FEATURE_MAP = {
+        "vector": "test_vector_memory.py",
+        "identity": "test_identity.py",
+        "browser": "test_browser.py",
+        "vision": "test_vision.py",
+        "tts": "test_tts.py",
+        "google": "test_google_workspace.py",
+        "microsoft": "test_microsoft365.py",
+        "parallel": "test_parallel_tools.py",
+        "streaming": "test_streaming.py",
+        "structured": "test_structured.py",
+        "a2a": "test_a2a.py",
+        "traceline": "test_traceline.py",
+        "output_filter": "test_output_filter.py",
+        "audit": "test_audit_replay.py",
+        "desktop": "test_desktop.py",
+        "perception": "test_perception.py",
+        "memory": "test_memory.py",
+        "config": "test_config_validation.py",
+        "sandbox": "test_sandbox_policy.py",
+        "ssrf": "test_ssrf.py",
+        "auth": "test_auth.py",
+        "health": "test_health.py",
+        "federation": "test_federation_spawn.py",
+        "gateway": "test_session_and_gateway.py",
+        "proxy": "test_proxy_provider.py",
+        "token": "test_token_providers.py",
+    }
+
+    cmd = [sys.executable, "-m", "pytest"]
+
+    if feature:
+        # Fuzzy match
+        feature_lower = feature.lower().strip()
+        if feature_lower in FEATURE_MAP:
+            test_file = tests_dir / FEATURE_MAP[feature_lower]
+            cmd.append(str(test_file))
+            console.print(f"Running: [cyan]{FEATURE_MAP[feature_lower]}[/cyan]\n")
+        else:
+            # Try direct file match
+            direct = tests_dir / f"test_{feature_lower}.py"
+            if direct.exists():
+                cmd.append(str(direct))
+                console.print(f"Running: [cyan]test_{feature_lower}.py[/cyan]\n")
+            else:
+                console.print(f"[red]Unknown feature '{feature}'[/red]")
+                console.print(f"[dim]Available: {', '.join(sorted(FEATURE_MAP.keys()))}[/dim]")
+                return
+    else:
+        cmd.append(str(tests_dir))
+        console.print("Running: [cyan]all tests[/cyan]\n")
+
+    if verbose:
+        cmd.append("-v")
+    else:
+        cmd.append("-v")  # always verbose for nice output
+
+    if coverage:
+        cmd.extend(["--cov=neuralclaw", "--cov-report=term-missing"])
+
+    try:
+        result = subprocess.run(cmd, cwd=str(project_root))
+        sys.exit(result.returncode)
+    except FileNotFoundError:
+        console.print("[red]pytest not found. Install dev dependencies:[/red]")
+        console.print("[cyan]  pip install -e '.[dev]'[/cyan]")
+
+
+# ---------------------------------------------------------------------------
+# Service management
+# ---------------------------------------------------------------------------
+
+@main.group(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
+)
+def service() -> None:
+    """Manage NeuralClaw Windows service (requires admin)."""
+    pass
+
+
+@service.command(name="install")
+def service_install() -> None:
+    """Install NeuralClaw as a Windows service (auto-starts on boot)."""
+    console.print(BANNER)
+    from neuralclaw.service import install_windows_service
+    if install_windows_service():
+        console.print("\n[green]Service installed. It will auto-start on boot.[/green]")
+    else:
+        console.print("\n[yellow]Tip: Try 'neuralclaw startup install' instead (no admin needed).[/yellow]")
+
+
+@service.command(name="uninstall")
+def service_uninstall() -> None:
+    """Remove the Windows service."""
+    from neuralclaw.service import uninstall_windows_service
+    uninstall_windows_service()
+
+
+@service.command(name="start")
+def service_start() -> None:
+    """Start the Windows service."""
+    from neuralclaw.service import start_windows_service
+    start_windows_service()
+
+
+@service.command(name="stop")
+def service_stop() -> None:
+    """Stop the Windows service."""
+    from neuralclaw.service import stop_windows_service
+    stop_windows_service()
+
+
+@service.command(name="status")
+def service_status_cmd() -> None:
+    """Check the Windows service status."""
+    from neuralclaw.service import service_status
+    s = service_status()
+    style = {"running": "green", "stopped": "red", "not_installed": "yellow"}.get(s, "dim")
+    console.print(f"Service: [{style}]{s}[/{style}]")
+
+
+# ---------------------------------------------------------------------------
+# Startup (Task Scheduler — no admin needed)
+# ---------------------------------------------------------------------------
+
+@main.group(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
+)
+def startup() -> None:
+    """Auto-start NeuralClaw on login (no admin needed)."""
+    pass
+
+
+@startup.command(name="install")
+def startup_install() -> None:
+    """Add NeuralClaw to Windows startup (runs on every login)."""
+    console.print(BANNER)
+    from neuralclaw.service import install_startup
+    install_startup()
+
+
+@startup.command(name="uninstall")
+def startup_uninstall() -> None:
+    """Remove NeuralClaw from startup."""
+    from neuralclaw.service import uninstall_startup
+    uninstall_startup()
+
+
+# ---------------------------------------------------------------------------
+# Daemon (background process — cross-platform)
+# ---------------------------------------------------------------------------
+
+@main.command()
+def daemon() -> None:
+    """Run gateway as a background process (cross-platform).
+
+    \b
+    Starts the gateway detached from the terminal.
+    It keeps running after you close the terminal.
+    Use 'neuralclaw stop' to stop it.
+    """
+    console.print(BANNER)
+    from neuralclaw.service import start_daemon, _is_running, _read_pid
+
+    existing = _read_pid()
+    if existing and _is_running(existing):
+        console.print(f"[yellow]Gateway already running (PID {existing})[/yellow]")
+        console.print("[dim]Use 'neuralclaw stop' to stop, or 'neuralclaw restart' to restart.[/dim]")
+        return
+
+    console.print("[dim]Starting gateway in background...[/dim]")
+    pid = start_daemon()
+    time.sleep(2)
+
+    if _is_running(pid):
+        console.print(f"\n[bold green]Gateway running in background (PID {pid})[/bold green]")
+        console.print("[dim]It will keep running after you close this terminal.[/dim]")
+        console.print()
+        console.print("  [cyan]neuralclaw stop[/cyan]      Stop the gateway")
+        console.print("  [cyan]neuralclaw restart[/cyan]   Restart the gateway")
+        console.print("  [cyan]neuralclaw logs[/cyan]      View gateway logs")
+        console.print("  [cyan]neuralclaw alive[/cyan]     Check if running")
+    else:
+        console.print("[red]Gateway failed to start. Check logs:[/red]")
+        console.print(f"[dim]  {Path.home() / '.neuralclaw' / 'gateway.log'}[/dim]")
+
+
+@main.command(name="stop")
+def stop_cmd() -> None:
+    """Stop the background gateway."""
+    from neuralclaw.service import stop_daemon, _is_running, _read_pid
+
+    pid = _read_pid()
+    if not pid or not _is_running(pid):
+        console.print("[dim]Gateway is not running.[/dim]")
+        return
+
+    console.print(f"[dim]Stopping gateway (PID {pid})...[/dim]")
+    stop_daemon()
+    console.print("[green]Gateway stopped.[/green]")
+
+
+@main.command()
+def restart() -> None:
+    """Restart the background gateway."""
+    from neuralclaw.service import stop_daemon, start_daemon, _is_running
+
+    console.print("[dim]Restarting gateway...[/dim]")
+    stop_daemon()
+    time.sleep(2)
+    pid = start_daemon()
+    time.sleep(2)
+
+    if _is_running(pid):
+        console.print(f"[bold green]Gateway restarted (PID {pid})[/bold green]")
+    else:
+        console.print("[red]Gateway failed to restart. Check logs.[/red]")
+
+
+@main.command()
+def alive() -> None:
+    """Check if the gateway is running."""
+    from neuralclaw.service import _read_pid, _is_running, _read_status
+
+    pid = _read_pid()
+    status = _read_status()
+    running = pid and _is_running(pid)
+
+    if running:
+        console.print(f"[bold green]Gateway is running[/bold green] (PID {pid})")
+        restarts = status.get("restarts", "0")
+        if restarts != "0":
+            console.print(f"[dim]Restarts: {restarts}[/dim]")
+    else:
+        console.print("[red]Gateway is not running.[/red]")
+        if status.get("status") == "crashed":
+            console.print(f"[dim]Last error: {status.get('error', 'unknown')}[/dim]")
+        console.print("[dim]Start with: neuralclaw daemon[/dim]")
+
+
+@main.command()
+@click.option("--lines", "-n", default=50, help="Number of lines to show.")
+@click.option("--follow", "-f", is_flag=True, help="Follow log output (like tail -f).")
+def logs(lines: int, follow: bool) -> None:
+    """View gateway logs."""
+    log_file = Path.home() / ".neuralclaw" / "gateway.log"
+
+    if not log_file.exists():
+        console.print("[dim]No logs yet. Start the gateway first.[/dim]")
+        return
+
+    if follow and sys.platform != "win32":
+        os.execvp("tail", ["tail", "-f", "-n", str(lines), str(log_file)])
+    else:
+        # Read last N lines
+        all_lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        for line in all_lines[-lines:]:
+            # Colorize log levels
+            if "[ERROR]" in line:
+                console.print(f"[red]{line}[/red]")
+            elif "[WARNING]" in line:
+                console.print(f"[yellow]{line}[/yellow]")
+            elif "[INFO]" in line:
+                console.print(line)
+            else:
+                console.print(f"[dim]{line}[/dim]")
+
+        if follow:
+            console.print(f"\n[dim]--follow not supported on Windows. Showing last {lines} lines.[/dim]")
+
+
+@main.command()
+def tray() -> None:
+    """Launch system tray icon (starts gateway automatically).
+
+    \b
+    Right-click the tray icon to:
+      - Start / Stop / Restart the gateway
+      - View status and logs
+      - Quit
+    """
+    console.print(BANNER)
+    console.print("[dim]Launching system tray...[/dim]")
+    from neuralclaw.service import run_tray
+    run_tray()
 
 
 # ---------------------------------------------------------------------------

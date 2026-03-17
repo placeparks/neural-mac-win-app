@@ -2,6 +2,141 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
+## [0.8.0] - 2026-03-18
+
+### Added — Computer Use & Desktop Control
+- **End-to-end desktop screenshot delivery**: Screenshots captured via
+  `desktop_screenshot` are now sent as actual Telegram photos (not just
+  described in text). Added `send_photo()` to the Telegram adapter.
+- **Vision-powered screen analysis**: Screenshot tool results are sent to
+  the LLM as multimodal vision content (`image_url` with base64), enabling
+  the model to describe what's on screen, identify UI elements, and guide
+  click coordinates for computer use workflows.
+- **Desktop app launcher (Windows)**: `desktop_run_app` now works on Windows
+  with `shell=True` for PATH resolution. Case-insensitive allowlist matching
+  (e.g., "notepad", "Notepad", and "notepad.exe" all match).
+- **Default app allowlist**: Pre-configured `desktop_allowed_apps` with 25+
+  common Windows applications (Notepad, Calculator, VS Code, Chrome, Edge,
+  PowerShell, Terminal, Python, Git, etc.).
+- **Media pipeline in reasoning**: `ConfidenceEnvelope` now carries a `media`
+  field so tool-generated images flow from the reasoning cortex through the
+  gateway to the channel adapter.
+
+### Added — Dynamic Self-Awareness
+- **Capability-aware system prompt**: The gateway now injects a dynamic
+  `## Your Active Capabilities` section into the LLM system prompt, built
+  from actually-enabled features (memory, identity, vision, evolution, shell,
+  browser, desktop, workspace integrations, TTS, etc.).
+- **Tool awareness injection**: Every request includes an `## Active Tools`
+  section listing all registered tool names, plus a `## Desktop Control`
+  section when desktop tools are active — explicitly instructing the LLM to
+  use desktop tools for screen/computer requests even from remote users.
+- **Anti-refusal guidelines**: System prompt now includes "NEVER say 'I can't'
+  when you have a tool that can do it" and instructs the LLM to ignore past
+  memory showing it previously refused (memory poisoning defense).
+
+### Added — Provider Model Updates (March 2026)
+- **OpenAI GPT-5 API compatibility**: `max_completion_tokens` replaces
+  `max_tokens` and `temperature` parameter removed for GPT-5/GPT-4.1/o-series
+  models. New `_is_new_api_model()` check covers `gpt-5*`, `gpt-4.1*`, `o1*`,
+  `o3*`, `o4*` prefixes.
+- **Updated default models**: OpenAI → `gpt-5.4` / `gpt-5.4-mini`, Anthropic →
+  `claude-sonnet-4-6`, OpenRouter → `anthropic/claude-sonnet-4-6`, Local →
+  `qwen3:8b`.
+- **Configurator model lists refreshed**: All provider model dropdowns now
+  include March 2026 releases (GPT-5.4 family, Claude Opus/Sonnet 4.6,
+  o4-mini, Gemini 2.5 Pro/Flash, Llama 4 Scout/Maverick, DeepSeek R1/V3,
+  Qwen3 235B).
+
+### Added — Memory & Reasoning Hardening
+- **Smart importance scoring**: New `_score_importance()` heuristic ranks
+  personal facts (0.85), instructions (0.75), past references (0.70),
+  code (0.60), and casual greetings (0.30) for episodic memory storage.
+- **FTS5 query sanitization**: Special characters are stripped, tokens are
+  quoted, and empty/short queries return early instead of crashing SQLite.
+- **Entity extraction improvements**: Regex-based extraction of proper nouns,
+  quoted strings, multi-word capitalized phrases, with stop-word filtering.
+- **Distiller fix**: Evolution distiller no longer accesses private `_db` on
+  episodic memory — uses public `get_recent()` API instead.
+
+### Added — Infrastructure
+- **Vector memory**: `cortex/memory/vector.py` with similarity retrieval
+  integrated into episodic storage, retrieval merging, and metabolism pruning.
+- **Persistent identity memory**: `cortex/memory/identity.py` with canonical
+  user IDs, cross-channel aliases, and prompt injection of user context.
+- **Vision perception**: Multimodal media processing and visual-context
+  injection with `cortex/perception/vision.py`.
+- **Browser cortex**: `cortex/action/browser.py` with low-level browser tools
+  plus a multi-step planner for `browser_act`.
+- **Streaming responses**: Adapter-level `send_stream()` support and gateway
+  orchestration for streamed responses.
+- **Structured output enforcement**: `cortex/reasoning/structured.py` wired
+  into reflective reasoning and evolution paths.
+- **Traceline observability**: `cortex/observability/traceline.py` with
+  SQLite-backed reasoning and tool trace persistence.
+- **Prompt Armor v2**: Output-side response screening for canary leaks,
+  prompt disclosure, PII leakage, hallucinated tool payloads, and jailbreak
+  confirmation patterns.
+- **Audit replay**: Extended `cortex/action/audit.py` with indexed replay,
+  request-scoped exports, and audit CLI commands.
+- **TTS and Discord voice**: Builtin TTS skill, gateway voice-response
+  orchestration, and Discord voice playback support.
+- **Google Workspace skill**: Gmail, Calendar, Drive, Docs, Sheets, and Meet
+  integrations with config-gated allowlisting.
+- **Microsoft 365 skill**: Outlook, Calendar, Teams, OneDrive, and SharePoint
+  integrations with config-gated allowlisting.
+- **A2A federation**: Agent cards, `/a2a` JSON-RPC, task lookup/cancel APIs,
+  and skill metadata exposure.
+
+### Changed
+- **Configuration surface**: Expanded `config.py` with feature flags and config
+  sections for identity, traceline, audit, TTS, browser, desktop, Google
+  Workspace, Microsoft 365, and A2A federation.
+- **Capability model**: Extended built-in capability grants for browser,
+  desktop, TTS, Google Workspace, and Microsoft 365 integrations.
+- **Policy behavior**: `parallel_tool_execution` support, automatic
+  allowlisting, and `desktop_allowed_apps` configuration.
+- **Gateway orchestration**: Dynamic self-awareness prompt, tool awareness
+  injection, media pipeline, and capability fragment propagation to the
+  deliberative reasoner.
+
+### Fixed
+- **Desktop tools not invoked**: LLM refused to use desktop tools because
+  capability descriptions were generic ("local desktop") and never reached
+  the system prompt. Fixed with explicit "THIS machine" language, capability
+  fragment injection into `extra_system_sections`, and anti-memory-poisoning
+  guidelines.
+- **Screenshot not delivered**: Tool returned base64 PNG but it was serialized
+  as JSON text in the tool result — user only got "Here's the screenshot"
+  without the image. Fixed with media pipeline through ConfidenceEnvelope.
+- **OpenAI GPT-5 400 errors**: `max_tokens` and `temperature` parameters
+  rejected by GPT-5/GPT-4.1/o-series. Fixed with `_is_new_api_model()` gate.
+- **Tool-use loop cop-out**: After 10 failed iterations the bot said "could
+  you rephrase?" — now makes a final tool-free call summarizing what was
+  tried, with consecutive error tracking (bail after 3 rounds).
+- **Memory poisoning**: Past "I can't capture your screen" responses were
+  retrieved and reinforced refusal behavior. Deleted poisoned entries and
+  added anti-poisoning system prompt directive.
+- **FTS5 crash on special characters**: Unquoted punctuation in search
+  queries caused SQLite FTS5 syntax errors.
+- **Distiller private DB access**: `_db` attribute access on episodic memory
+  replaced with public API.
+- **Google/Microsoft config refresh**: Workspace modules now refresh
+  module-global service instances when gateway config changes.
+- **Workspace SSRF gap**: Google and Microsoft outbound requests now pass
+  through URL validation.
+- **Federation A2A integration**: Gateway federation initialization now
+  forwards persona, skill metadata, and bearer token settings.
+- **Discord voice behavior**: Auto-disconnect driven by channel config
+  instead of hard-wired.
+
+### Testing
+- Added targeted tests for TTS, Google Workspace, Microsoft 365, and A2A.
+- Extended config validation coverage for new feature flags and sections.
+- Verified desktop screenshot → Telegram photo pipeline end-to-end.
+- Verified desktop app launch on Windows with allowlist.
+- Verified GPT-5 API parameter compatibility.
+
 ## [0.7.7] - 2026-03-12
 
 ### Added

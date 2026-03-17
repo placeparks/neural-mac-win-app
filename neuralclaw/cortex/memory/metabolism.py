@@ -19,6 +19,7 @@ from typing import Any
 from neuralclaw.bus.neural_bus import EventType, NeuralBus
 from neuralclaw.cortex.memory.episodic import EpisodicMemory
 from neuralclaw.cortex.memory.semantic import SemanticMemory
+from neuralclaw.cortex.memory.vector import VectorMemory
 
 
 # ---------------------------------------------------------------------------
@@ -52,8 +53,9 @@ class MemoryMetabolism:
     def __init__(
         self,
         episodic: EpisodicMemory,
-        semantic: SemanticMemory,
+        semantic: SemanticMemory | None,
         bus: NeuralBus | None = None,
+        vector_memory: VectorMemory | None = None,
         decay_rate: float = 0.02,
         consolidation_threshold: int = 3,
         prune_threshold: float = 0.05,
@@ -62,6 +64,7 @@ class MemoryMetabolism:
         self._episodic = episodic
         self._semantic = semantic
         self._bus = bus
+        self._vector_memory = vector_memory
         self._decay_rate = decay_rate
         self._consolidation_threshold = consolidation_threshold
         self._prune_threshold = prune_threshold
@@ -123,6 +126,9 @@ class MemoryMetabolism:
         Consolidation: Extract entities from high-frequency episodic memories
         and store them as semantic knowledge.
         """
+        if not self._semantic:
+            return 0
+
         assert self._episodic._db is not None
         consolidated = 0
 
@@ -257,12 +263,12 @@ class MemoryMetabolism:
         """
         assert self._episodic._db is not None
 
-        cursor = await self._episodic._db.execute(
-            "SELECT COUNT(*) FROM episodes WHERE importance < ?",
+        rows = await self._episodic._db.execute_fetchall(
+            "SELECT id FROM episodes WHERE importance < ?",
             (self._prune_threshold,),
         )
-        row = await cursor.fetchone()
-        count = row[0] if row else 0
+        episode_ids = [row[0] for row in rows]
+        count = len(episode_ids)
 
         if count > 0:
             await self._episodic._db.execute(
@@ -270,5 +276,8 @@ class MemoryMetabolism:
                 (self._prune_threshold,),
             )
             await self._episodic._db.commit()
+            if self._vector_memory:
+                for episode_id in episode_ids:
+                    await self._vector_memory.delete_by_ref(episode_id)
 
         return count

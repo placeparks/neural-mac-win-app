@@ -20,12 +20,20 @@ class OpenAIProvider(LLMProvider):
     def __init__(
         self,
         api_key: str,
-        model: str = "gpt-4o",
+        model: str = "gpt-5.4",
         base_url: str = "https://api.openai.com/v1",
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._base_url = base_url.rstrip("/")
+
+    # Models that use the new API: max_completion_tokens, no custom temperature
+    _NEW_API_PREFIX = ("gpt-5", "gpt-4.1", "o1", "o3", "o4")
+
+    def _is_new_api_model(self) -> bool:
+        """GPT-5+, GPT-4.1+, and all o-series use new API parameters."""
+        model = self._model.lower()
+        return any(model.startswith(p) for p in self._NEW_API_PREFIX)
 
     async def complete(
         self,
@@ -37,9 +45,15 @@ class OpenAIProvider(LLMProvider):
         payload: dict[str, Any] = {
             "model": self._model,
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
         }
+
+        # GPT-5+, GPT-4.1+, o-series: max_completion_tokens, no temperature
+        if self._is_new_api_model():
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload["max_tokens"] = max_tokens
+            payload["temperature"] = temperature
+
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"

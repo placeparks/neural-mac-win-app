@@ -19,6 +19,7 @@ from typing import Any
 from neuralclaw.bus.neural_bus import EventType, NeuralBus
 from neuralclaw.cortex.memory.episodic import EpisodicMemory, Episode, EpisodeSearchResult
 from neuralclaw.cortex.memory.semantic import SemanticMemory, Entity, KnowledgeTriple
+from neuralclaw.cortex.memory.vector import VectorMemory
 
 logger = logging.getLogger(__name__)
 
@@ -127,16 +128,20 @@ class MemoryRetriever:
         episodic: EpisodicMemory,
         semantic: SemanticMemory,
         bus: NeuralBus,
+        vector_memory: VectorMemory | None = None,
         max_episodes: int = 10,
         max_facts: int = 10,
         max_memory_chars: int = 4000,
+        vector_top_k: int = 10,
     ) -> None:
         self._episodic = episodic
         self._semantic = semantic
         self._bus = bus
+        self._vector_memory = vector_memory
         self._max_episodes = max_episodes
         self._max_facts = max_facts
         self._max_memory_chars = max_memory_chars
+        self._vector_top_k = vector_top_k
 
     async def retrieve(
         self,
@@ -162,6 +167,25 @@ class MemoryRetriever:
             ctx.episodes = [r.episode for r in search_results]
         except Exception:
             pass  # FTS may fail on very short queries
+
+        # 1b. Vector similarity search
+        if self._vector_memory:
+            try:
+                vector_results = await self._vector_memory.similarity_search(
+                    query,
+                    top_k=self._vector_top_k,
+                    source_filter="episodic",
+                )
+                existing_ids = {e.id for e in ctx.episodes}
+                for result in vector_results:
+                    if result.ref_id in existing_ids:
+                        continue
+                    episode = await self._episodic.get_by_id(result.ref_id)
+                    if episode:
+                        ctx.episodes.append(episode)
+                        existing_ids.add(episode.id)
+            except Exception:
+                pass
 
         # 2. Include recent episodes (for conversational continuity)
         if include_recent:
@@ -239,15 +263,46 @@ class MemoryRetriever:
         """
         Extract potential entity names from text.
 
-        Simple heuristic: split on whitespace, keep words that are
-        capitalized or longer than 3 chars. For Phase 2, this will
-        use NER from the LLM.
+        Uses heuristics:
+        - Capitalized words (proper nouns)
+        - Multi-word capitalized sequences (e.g. "New York")
+        - Quoted strings
+        - Words longer than 3 chars as fallback
         """
-        words = text.split()
+        import re
         candidates: list[str] = []
+
+        # 1. Quoted strings (highest signal)
+        quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', text)
+        for q in quoted:
+            val = q[0] or q[1]
+            if val.strip():
+                candidates.append(val.strip())
+
+        # 2. Capitalized word sequences (proper nouns / names)
+        # Match 1-3 consecutive capitalized words
+        cap_phrases = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})\b', text)
+        for phrase in cap_phrases:
+            if phrase not in ("I", "The", "This", "That", "What", "How", "When", "Where", "Why"):
+                candidates.append(phrase)
+
+        # 3. Fallback: significant words (>3 chars, not stop words)
+        stop = {"what", "that", "this", "with", "from", "have", "been", "will",
+                "your", "about", "would", "could", "should", "there", "their",
+                "which", "where", "when", "they", "them", "than", "some",
+                "also", "just", "very", "much", "more", "most", "only"}
+        words = text.split()
         for word in words:
-            # Strip punctuation
             clean = word.strip(".,!?;:\"'()[]{}»«")
-            if len(clean) > 2:
+            if len(clean) > 3 and clean.lower() not in stop:
                 candidates.append(clean)
-        return candidates[:10]
+
+        # Deduplicate while preserving order
+        seen: set[str] = set()
+        unique: list[str] = []
+        for c in candidates:
+            key = c.lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(c)
+        return unique[:12]

@@ -15,7 +15,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any
+from typing import Any, Callable
 
 from neuralclaw import __version__
 from neuralclaw.bus.neural_bus import NeuralBus, EventType
@@ -90,6 +90,30 @@ class FederationMessage:
             content=content,
             payload=payload or {},
         )
+
+
+@dataclass
+class A2APart:
+    kind: str
+    text: str = ""
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class A2AChatMessage:
+    message_id: str
+    role: str
+    parts: list[A2APart]
+    context_id: str = ""
+    task_id: str = ""
+
+
+@dataclass
+class A2AEnvelope:
+    jsonrpc: str = "2.0"
+    id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    method: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +284,11 @@ class FederationProtocol:
         bus: NeuralBus | None = None,
         port: int = 8100,
         bind_host: str = "127.0.0.1",
+        description: str = "",
+        skills_provider: Callable[[], list[dict[str, Any]]] | None = None,
+        a2a_enabled: bool = False,
+        a2a_auth_required: bool = True,
+        a2a_token: str = "",
     ) -> None:
         self._node_name = node_name
         self._bus = bus
@@ -273,6 +302,12 @@ class FederationProtocol:
         self._running = False
         self._app = None
         self._runner = None
+        self._description = description
+        self._skills_provider = skills_provider
+        self._a2a_enabled = a2a_enabled
+        self._a2a_auth_required = a2a_auth_required
+        self._a2a_token = a2a_token
+        self._a2a_tasks: dict[str, dict[str, Any]] = {}
 
     @property
     def registry(self) -> FederationRegistry:
@@ -295,6 +330,21 @@ class FederationProtocol:
             "version": __version__,
         }
 
+    def get_agent_card(self) -> dict[str, Any]:
+        """Get the A2A agent card served from .well-known/agent.json."""
+        return {
+            "name": self._node_name,
+            "description": self._description or f"Federated NeuralClaw node {self._node_name}",
+            "url": f"http://{self._bind_host}:{self._port}",
+            "version": __version__,
+            "capabilities": {
+                "streaming": True,
+                "pushNotifications": False,
+                "stateTransitionHistory": True,
+            },
+            "skills": self._skills_provider() if self._skills_provider else [],
+        }
+
     async def start(self) -> None:
         """Start the federation HTTP server."""
         try:
@@ -306,6 +356,10 @@ class FederationProtocol:
             self._app.router.add_post("/federation/message", self._handle_message)
             self._app.router.add_post("/federation/heartbeat", self._handle_heartbeat)
             self._app.router.add_get("/federation/status", self._handle_status)
+            if self._a2a_enabled:
+                self._app.router.add_get("/.well-known/agent.json", self._handle_agent_card)
+                self._app.router.add_post("/a2a", self._handle_a2a)
+                self._app.router.add_get("/a2a/tasks/{task_id}", self._handle_a2a_task)
 
             self._runner = web.AppRunner(self._app)
             await self._runner.setup()
@@ -566,6 +620,103 @@ class FederationProtocol:
         """Return federation status."""
         from aiohttp import web
         return web.json_response(self._registry.get_status())
+
+    async def _handle_agent_card(self, request: Any) -> Any:
+        from aiohttp import web
+        return web.json_response(self.get_agent_card())
+
+    async def _handle_a2a(self, request: Any) -> Any:
+        from aiohttp import web
+        if self._a2a_auth_required and self._a2a_token:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header != f"Bearer {self._a2a_token}":
+                return web.json_response(
+                    {"jsonrpc": "2.0", "error": {"code": 401, "message": "Unauthorized"}},
+                    status=401,
+                )
+        try:
+            payload = await request.json()
+            response = await self.handle_a2a_payload(payload)
+            return web.json_response(response)
+        except Exception as exc:
+            return web.json_response(
+                {"jsonrpc": "2.0", "error": {"code": 400, "message": str(exc)}},
+                status=400,
+            )
+
+    async def _handle_a2a_task(self, request: Any) -> Any:
+        from aiohttp import web
+        task_id = request.match_info.get("task_id", "")
+        task = self._a2a_tasks.get(task_id)
+        if not task:
+            return web.json_response({"error": "Task not found"}, status=404)
+        return web.json_response(task)
+
+    async def handle_a2a_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        envelope = A2AEnvelope(
+            jsonrpc=payload.get("jsonrpc", "2.0"),
+            id=payload.get("id", uuid.uuid4().hex),
+            method=payload.get("method", ""),
+            params=payload.get("params", {}) or {},
+        )
+
+        if envelope.method == "agent/authenticatedExtendedCard":
+            return {"jsonrpc": "2.0", "id": envelope.id, "result": self.get_agent_card()}
+
+        if envelope.method == "tasks/get":
+            task_id = str(envelope.params.get("task_id", ""))
+            task = self._a2a_tasks.get(task_id)
+            if not task:
+                return {"jsonrpc": "2.0", "id": envelope.id, "error": {"code": 404, "message": "Task not found"}}
+            return {"jsonrpc": "2.0", "id": envelope.id, "result": task}
+
+        if envelope.method == "tasks/cancel":
+            task_id = str(envelope.params.get("task_id", ""))
+            task = self._a2a_tasks.get(task_id)
+            if not task:
+                return {"jsonrpc": "2.0", "id": envelope.id, "error": {"code": 404, "message": "Task not found"}}
+            task["status"] = "cancelled"
+            task["updated_at"] = time.time()
+            return {"jsonrpc": "2.0", "id": envelope.id, "result": task}
+
+        if envelope.method not in {"message/send", "message/stream"}:
+            return {"jsonrpc": "2.0", "id": envelope.id, "error": {"code": 404, "message": f"Unknown method: {envelope.method}"}}
+
+        message = envelope.params.get("message", {}) or {}
+        ttl = int(envelope.params.get("ttl", message.get("ttl", 3)))
+        if ttl <= 0:
+            return {"jsonrpc": "2.0", "id": envelope.id, "error": {"code": 400, "message": "TTL expired"}}
+
+        parts = message.get("parts", [])
+        content = "\n".join(
+            part.get("text", "")
+            for part in parts
+            if isinstance(part, dict) and part.get("kind", "text") == "text"
+        ).strip()
+        role = message.get("role", "user")
+        task_id = message.get("task_id") or uuid.uuid4().hex[:16]
+
+        response_text = f"A2A message received by {self._node_name}"
+        handler = getattr(self, "_message_handler", None)
+        if handler and role == "user":
+            from_name = str(envelope.params.get("from", "a2a-peer"))
+            response_text = await handler(content, from_name)
+
+        response_message = {
+            "message_id": uuid.uuid4().hex[:16],
+            "role": "agent",
+            "parts": [{"kind": "text", "text": response_text}],
+            "task_id": task_id,
+            "context_id": message.get("context_id", ""),
+        }
+        task_record = {
+            "task_id": task_id,
+            "status": "completed",
+            "history": [message, response_message],
+            "updated_at": time.time(),
+        }
+        self._a2a_tasks[task_id] = task_record
+        return {"jsonrpc": "2.0", "id": envelope.id, "result": {"task": task_record, "message": response_message}}
 
     def get_message_log(self, limit: int = 50) -> list[dict[str, Any]]:
         """Get recent federation messages."""

@@ -35,6 +35,21 @@ class Capability(Enum):
     MEMORY_WRITE = auto()
     GITHUB_CLONE = auto()     # Permission to clone git repositories
     API_CLIENT = auto()       # Permission to make authenticated API requests
+    AUDIO_OUTPUT = auto()     # Permission to synthesize audio output
+    VOICE_CHANNEL = auto()    # Permission to join and speak in voice channels
+    DESKTOP_CONTROL = auto()  # Permission to control the local desktop
+    BROWSER_CONTROL = auto()  # Permission to control a browser session
+    BROWSER_JS = auto()       # Permission to execute JavaScript in a browser
+    GOOGLE_GMAIL = auto()
+    GOOGLE_CALENDAR = auto()
+    GOOGLE_DRIVE = auto()
+    GOOGLE_DOCS = auto()
+    GOOGLE_SHEETS = auto()
+    MS_OUTLOOK = auto()
+    MS_CALENDAR = auto()
+    MS_TEAMS = auto()
+    MS_ONEDRIVE = auto()
+    MS_SHAREPOINT = auto()
 
 
 @dataclass
@@ -115,6 +130,33 @@ class CapabilityVerifier:
             "api_client": [
                 CapabilityGrant(Capability.API_CLIENT, scope="*"),
                 CapabilityGrant(Capability.NETWORK_HTTP, scope="*"),
+            ],
+            "tts": [
+                CapabilityGrant(Capability.AUDIO_OUTPUT, scope="*"),
+                CapabilityGrant(Capability.VOICE_CHANNEL, scope="discord"),
+            ],
+            "google_workspace": [
+                CapabilityGrant(Capability.GOOGLE_GMAIL, scope="*"),
+                CapabilityGrant(Capability.GOOGLE_CALENDAR, scope="*"),
+                CapabilityGrant(Capability.GOOGLE_DRIVE, scope="*"),
+                CapabilityGrant(Capability.GOOGLE_DOCS, scope="*"),
+                CapabilityGrant(Capability.GOOGLE_SHEETS, scope="*"),
+                CapabilityGrant(Capability.NETWORK_HTTP, scope="googleapis.com"),
+            ],
+            "microsoft365": [
+                CapabilityGrant(Capability.MS_OUTLOOK, scope="*"),
+                CapabilityGrant(Capability.MS_CALENDAR, scope="*"),
+                CapabilityGrant(Capability.MS_TEAMS, scope="*"),
+                CapabilityGrant(Capability.MS_ONEDRIVE, scope="*"),
+                CapabilityGrant(Capability.MS_SHAREPOINT, scope="*"),
+                CapabilityGrant(Capability.NETWORK_HTTP, scope="graph.microsoft.com"),
+            ],
+            "desktop": [
+                CapabilityGrant(Capability.DESKTOP_CONTROL, scope="*"),
+            ],
+            "browser": [
+                CapabilityGrant(Capability.BROWSER_CONTROL, scope="*"),
+                CapabilityGrant(Capability.BROWSER_JS, scope="*"),
             ],
         }
 

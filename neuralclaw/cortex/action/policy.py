@@ -41,6 +41,9 @@ class PolicyResult:
 class RequestContext:
     """Tracks per-request state for budget enforcement."""
     request_id: str = ""
+    user_id: str = ""
+    channel_id: str = ""
+    platform: str = ""
     start_time: float = 0.0
     tool_calls: int = 0
     tool_denials: int = 0

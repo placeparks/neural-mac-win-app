@@ -20,7 +20,7 @@ class AnthropicProvider(LLMProvider):
     def __init__(
         self,
         api_key: str,
-        model: str = "claude-sonnet-4-20250514",
+        model: str = "claude-sonnet-4-6",
         base_url: str = "https://api.anthropic.com",
     ) -> None:
         self._api_key = api_key

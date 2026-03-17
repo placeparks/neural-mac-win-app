@@ -179,6 +179,8 @@ class PerceptionIntake:
                 "signal_id": signal.id,
                 "source": channel_type.name.lower(),
                 "author": author_name,
+                "author_id": author_id,
+                "channel_id": channel_id,
                 "content": sanitized[:200],  # Truncate for telemetry
                 "source_type": source_type,
                 "was_truncated": was_truncated,

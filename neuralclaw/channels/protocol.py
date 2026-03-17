@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Coroutine
+from typing import Any, AsyncIterator, Callable, Coroutine
 
 
 # ---------------------------------------------------------------------------
@@ -94,6 +94,18 @@ class ChannelAdapter(ABC):
     async def send(self, channel_id: str, content: str, **kwargs: Any) -> None:
         """Send a message to a specific channel."""
         ...
+
+    async def send_stream(
+        self,
+        channel_id: str,
+        token_iterator: AsyncIterator[str],
+        **kwargs: Any,
+    ) -> None:
+        """Default streaming implementation: buffer then send once."""
+        parts: list[str] = []
+        async for token in token_iterator:
+            parts.append(token)
+        await self.send(channel_id, "".join(parts), **kwargs)
 
     async def test_connection(self) -> tuple[bool, str]:
         """Test if the channel credentials are valid and the service is reachable.

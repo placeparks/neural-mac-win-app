@@ -91,9 +91,11 @@ _INJECTION_PATTERNS: list[tuple[re.Pattern[str], float, str]] = [
     # Multi-turn injection ("from now on", "for all future responses")
     (re.compile(r"from\s+now\s+on", re.I), 0.50, "persistent_override"),
     (re.compile(r"for\s+all\s+future\s+(responses|messages|replies)", re.I), 0.65, "persistent_override"),
+    (re.compile(r"(as\s+we\s+(discussed|agreed|established))[^\n]{0,50}(ignore|bypass|override)", re.I), 0.80, "multi_turn_escalation"),
 
     # Tool/function abuse ("call the function", "use the tool")
     (re.compile(r"(call|invoke|use|run)\s+(the\s+)?(function|tool|skill)\s+\w+\s+with", re.I), 0.55, "tool_injection"),
+    (re.compile(r"(base64|decode|eval|exec)\s*[\(\[{]", re.I), 0.75, "obfuscated_instruction"),
 ]
 
 
@@ -171,10 +173,15 @@ class ThreatScreener:
         self._borderline_low = borderline_low
         self._borderline_high = borderline_high
         self._verifier = verifier  # Optional cheap model for borderline classification
+        self._canary_token = ""
 
     def set_verifier(self, provider: LLMProvider) -> None:
         """Set the LLM provider used for borderline verification."""
         self._verifier = provider
+
+    def set_canary_token(self, token: str) -> None:
+        """Register a prompt canary token for echo detection."""
+        self._canary_token = token.strip()
 
     async def screen(self, signal_or_text: Signal | str) -> ThreatScore:
         """Screen a signal or raw text for threats."""
@@ -193,6 +200,9 @@ class ThreatScreener:
             if pattern.search(text):
                 max_pattern_score = max(max_pattern_score, score)
                 reasons.append(reason)
+        if self._canary_token and self._canary_token in text:
+            max_pattern_score = max(max_pattern_score, 0.99)
+            reasons.append("canary_echo")
 
         # 2. Anomaly scoring
         char_density = _special_char_density(text)

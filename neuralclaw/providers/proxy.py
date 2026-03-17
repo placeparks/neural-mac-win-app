@@ -30,7 +30,7 @@ class ProxyProvider(OpenAIProvider):
     def __init__(
         self,
         base_url: str,
-        model: str = "gpt-4",
+        model: str = "gpt-5.4",
         api_key: str = "",
     ) -> None:
         super().__init__(

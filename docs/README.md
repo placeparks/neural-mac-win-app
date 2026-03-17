@@ -1,27 +1,43 @@
 # NeuralClaw Documentation
 
-Version: `0.7.7`
+Version: `0.8.0`
 
-Core docs for the current repository state:
+This doc set reflects the current repo state after the full `AGENT.md`
+roadmap implementation.
+
+## Recommended Reading Order
 
 | Guide | Description |
 |---|---|
-| [getting-started.md](getting-started.md) | install, session setup, first chat |
-| [configuration.md](configuration.md) | config layout, providers, trust modes |
-| [channels.md](channels.md) | channel adapters and route trust model |
-| [security.md](security.md) | threat screening, policy, sandbox, audit |
-| [architecture.md](architecture.md) | gateway, cortices, bus, runtime structure |
-| [reasoning.md](reasoning.md) | fast path, deliberative, reflective, meta |
-| [memory.md](memory.md) | episodic, semantic, procedural, metabolism |
-| [skills.md](skills.md) | built-in skills and marketplace model |
+| [getting-started.md](getting-started.md) | install, bootstrap, first-run flow |
+| [configuration.md](configuration.md) | config sections, feature flags, auth, extras |
+| [architecture.md](architecture.md) | gateway, cortices, bus, runtime wiring |
+| [memory.md](memory.md) | episodic, semantic, procedural, vector, identity |
+| [reasoning.md](reasoning.md) | fast-path, deliberative, reflective, structured |
+| [skills.md](skills.md) | built-ins, manifests, capability model |
+| [channels.md](channels.md) | adapters, trust, streaming, Discord voice |
+| [security.md](security.md) | threat screening, output filtering, audit, policy |
 | [swarm.md](swarm.md) | delegation, consensus, mesh |
-| [federation.md](federation.md) | federation protocol and peers |
+| [federation.md](federation.md) | native federation and A2A endpoints |
 | [api-reference.md](api-reference.md) | Python-facing API overview |
-| [troubleshooting.md](troubleshooting.md) | install, session, channel, build issues |
+| [troubleshooting.md](troubleshooting.md) | install, auth, provider, and channel issues |
 
-Current highlights:
+## Current Highlights
 
-- direct browser-session providers: `chatgpt_app`, `claude_app`
-- API-backed providers: `openai`, `anthropic`, `openrouter`, `proxy`, `local`
-- channel trust modes: `open`, `pair`, `bound`
-- CLI session commands: `setup`, `status`, `login`, `open`, `diagnose`, `auth`, `refresh`, `repair`
+- **computer use**: screenshot → vision analysis → click/type/hotkey with
+  remote control via Telegram (images sent as photos)
+- **dynamic self-awareness**: capability-driven system prompt, tool awareness
+  injection, anti-refusal directives
+- **GPT-5 / Claude 4.6 support**: updated provider defaults and API compat
+- vector memory, persistent user identity, and smart importance scoring
+- vision perception and browser multi-step planning
+- streaming responses and structured output enforcement
+- Google Workspace and Microsoft 365 builtin skills
+- traceline observability, Prompt Armor v2, and audit replay
+- A2A-compatible federation agent cards and task APIs
+
+## Repo-local Handoff
+
+Implementation state and verification history are tracked in:
+
+- [agent-implementation-notes.md](agent-implementation-notes.md)

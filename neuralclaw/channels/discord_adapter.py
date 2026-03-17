@@ -5,7 +5,7 @@ Discord Channel Adapter — Discord bot integration using discord.py.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, AsyncIterator
 
 from neuralclaw.channels.protocol import ChannelAdapter, ChannelMessage
 
@@ -20,11 +20,14 @@ class DiscordAdapter(ChannelAdapter):
 
     name = "discord"
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, auto_disconnect_empty_vc: bool = True) -> None:
         super().__init__()
         self._token = token
         self._client: Any = None
         self._task: asyncio.Task[None] | None = None
+        self._voice_client: Any = None
+        self._current_voice_channel: str | None = None
+        self._auto_disconnect_empty_vc = auto_disconnect_empty_vc
 
     async def start(self) -> None:
         """Start the Discord bot."""
@@ -79,6 +82,16 @@ class DiscordAdapter(ChannelAdapter):
             )
             await adapter._dispatch(msg)
 
+        @self._client.event
+        async def on_voice_state_update(member: Any, before: Any, after: Any) -> None:
+            if not self._auto_disconnect_empty_vc or member != self._client.user or not self._voice_client:
+                return
+            channel = getattr(self._voice_client, "channel", None)
+            if not channel:
+                return
+            if len([m for m in getattr(channel, "members", []) if not getattr(m, "bot", False)]) == 0:
+                await adapter.leave_voice()
+
         # Run the client in a background task
         self._task = asyncio.create_task(self._client.start(self._token))
 
@@ -118,3 +131,77 @@ class DiscordAdapter(ChannelAdapter):
                 channel = await self._client.fetch_channel(int(channel_id))
             if channel:
                 await channel.send(content)
+
+    async def send_stream(
+        self,
+        channel_id: str,
+        token_iterator: AsyncIterator[str],
+        **kwargs: Any,
+    ) -> None:
+        """Stream by editing a placeholder Discord message."""
+        if not self._client:
+            await super().send_stream(channel_id, token_iterator, **kwargs)
+            return
+
+        channel = self._client.get_channel(int(channel_id))
+        if channel is None:
+            channel = await self._client.fetch_channel(int(channel_id))
+        if channel is None:
+            await super().send_stream(channel_id, token_iterator, **kwargs)
+            return
+
+        message = await channel.send("▌")
+        buffer: list[str] = []
+        edit_interval = max(1, int(kwargs.get("edit_interval", 20)))
+
+        async for token in token_iterator:
+            buffer.append(token)
+            if len(buffer) % edit_interval == 0:
+                await message.edit(content=("".join(buffer) + "▌")[:2000])
+
+        final = "".join(buffer) or " "
+        await message.edit(content=final[:2000])
+
+    async def join_voice(self, channel_id: str) -> bool:
+        if not self._client:
+            return False
+        channel = self._client.get_channel(int(channel_id))
+        if channel is None:
+            channel = await self._client.fetch_channel(int(channel_id))
+        if channel is None or not hasattr(channel, "connect"):
+            return False
+        if self._voice_client and getattr(self._voice_client, "is_connected", lambda: False)():
+            if str(getattr(getattr(self._voice_client, "channel", None), "id", "")) == str(channel_id):
+                self._current_voice_channel = channel_id
+                return True
+            await self.leave_voice()
+        self._voice_client = await channel.connect()
+        self._current_voice_channel = str(channel_id)
+        return True
+
+    async def leave_voice(self) -> None:
+        if self._voice_client and hasattr(self._voice_client, "disconnect"):
+            await self._voice_client.disconnect()
+        self._voice_client = None
+        self._current_voice_channel = None
+
+    async def speak(self, audio_path: str, channel_id: str | None = None) -> None:
+        if channel_id and (not self._voice_client or self._current_voice_channel != str(channel_id)):
+            joined = await self.join_voice(channel_id)
+            if not joined:
+                raise RuntimeError(f"Could not join Discord voice channel {channel_id}")
+        if not self._voice_client:
+            raise RuntimeError("Discord voice client is not connected")
+        try:
+            import discord
+        except ImportError as exc:
+            raise RuntimeError("discord.py voice support is not installed") from exc
+        source = discord.FFmpegPCMAudio(audio_path)
+        self._voice_client.play(source)
+
+    async def is_in_voice(self) -> bool:
+        return bool(self._voice_client and getattr(self._voice_client, "is_connected", lambda: False)())
+
+    @property
+    def current_voice_channel(self) -> str | None:
+        return self._current_voice_channel

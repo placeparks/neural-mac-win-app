@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from neuralclaw.config import NeuralClawConfig, ProviderConfig
+from neuralclaw.cortex.reasoning.deliberate import ConfidenceEnvelope
+from neuralclaw.cortex.memory.retrieval import MemoryContext
 from neuralclaw.gateway import NeuralClawGateway
 from neuralclaw.providers.app_session import AppSessionProvider
 from neuralclaw.session.runtime import ManagedBrowserSession, SessionRuntimeConfig
@@ -194,3 +196,226 @@ async def test_gateway_routes_slack_reply_with_thread_ts(monkeypatch):
     await gateway._on_channel_message(msg)
 
     assert adapter.calls == [("C123", "paired response", {"thread_ts": "12345.67"})]
+
+
+@pytest.mark.asyncio
+async def test_gateway_injects_identity_prompt_section(monkeypatch):
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
+    )
+    gateway = NeuralClawGateway(config)
+
+    class FakeIdentity:
+        async def get_or_create(self, platform, platform_user_id, display_name):
+            return SimpleNamespace(user_id="user-123", display_name=display_name)
+
+        async def to_prompt_section(self, user_id):
+            return "## Who I'm Talking To\n- Name: User"
+
+        async def update(self, user_id, updates):
+            return None
+
+        async def synthesize_model(self, user_id):
+            return None
+
+    captured = {}
+
+    async def fake_intake(**kwargs):
+        return SimpleNamespace(
+            id="sig-1",
+            content=kwargs["content"],
+            author_id=kwargs["author_id"],
+            author_name=kwargs["author_name"],
+            channel_type=None,
+            channel_id=kwargs["channel_id"],
+        )
+
+    async def fake_screen(signal):
+        return SimpleNamespace(blocked=False)
+
+    async def fake_fast_path(signal, memory_ctx=None):
+        return None
+
+    async def fake_classify(signal):
+        return SimpleNamespace(intent="chat")
+
+    async def fake_reason(signal, memory_ctx, tools=None, conversation_history=None, extra_system_sections=None):
+        captured["sections"] = extra_system_sections or []
+        return ConfidenceEnvelope(response="ok", confidence=0.9, source="llm")
+
+    async def fake_retrieve(content):
+        return MemoryContext()
+
+    async def fake_store_interaction(*args, **kwargs):
+        return None
+
+    async def fake_post_process(*args, **kwargs):
+        return None
+
+    gateway._identity = FakeIdentity()
+    gateway._procedural = None
+    monkeypatch.setattr(gateway._intake, "process", fake_intake)
+    monkeypatch.setattr(gateway._threat_screener, "screen", fake_screen)
+    monkeypatch.setattr(gateway._fast_path, "try_fast_path", fake_fast_path)
+    monkeypatch.setattr(gateway._classifier, "classify", fake_classify)
+    monkeypatch.setattr(gateway._retriever, "retrieve", fake_retrieve)
+    monkeypatch.setattr(gateway._deliberate, "reason", fake_reason)
+    monkeypatch.setattr(gateway, "_store_interaction", fake_store_interaction)
+    monkeypatch.setattr(gateway, "_post_process", fake_post_process)
+    gateway._procedural = None
+
+    response = await gateway.process_message(
+        content="hello",
+        author_id="u1",
+        author_name="User",
+        channel_id="cli",
+        channel_type_name="CLI",
+        message_metadata=None,
+    )
+
+    assert response == "ok"
+    assert any("Who I'm Talking To" in section for section in captured["sections"])
+
+
+@pytest.mark.asyncio
+async def test_gateway_sanitizes_canary_leak_response(monkeypatch):
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
+    )
+    gateway = NeuralClawGateway(config)
+
+    captured = {}
+
+    async def fake_intake(**kwargs):
+        return SimpleNamespace(
+            id="sig-2",
+            content=kwargs["content"],
+            author_id=kwargs["author_id"],
+            author_name=kwargs["author_name"],
+            channel_type=None,
+            channel_id=kwargs["channel_id"],
+            context={},
+            threat_score=0.0,
+        )
+
+    async def fake_screen(signal):
+        return SimpleNamespace(blocked=False)
+
+    async def fake_fast_path(signal, memory_ctx=None):
+        return None
+
+    async def fake_classify(signal):
+        return SimpleNamespace(intent="chat")
+
+    async def fake_retrieve(content):
+        return MemoryContext()
+
+    async def fake_reason(signal, memory_ctx, tools=None, conversation_history=None, extra_system_sections=None):
+        captured["sections"] = extra_system_sections or []
+        return ConfidenceEnvelope(
+            response=f"Leaked marker {gateway._canary_token}",
+            confidence=0.9,
+            source="llm",
+        )
+
+    async def fake_store_interaction(*args, **kwargs):
+        return None
+
+    async def fake_post_process(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(gateway._intake, "process", fake_intake)
+    monkeypatch.setattr(gateway._threat_screener, "screen", fake_screen)
+    monkeypatch.setattr(gateway._fast_path, "try_fast_path", fake_fast_path)
+    monkeypatch.setattr(gateway._classifier, "classify", fake_classify)
+    monkeypatch.setattr(gateway._retriever, "retrieve", fake_retrieve)
+    monkeypatch.setattr(gateway._deliberate, "reason", fake_reason)
+    monkeypatch.setattr(gateway, "_store_interaction", fake_store_interaction)
+    monkeypatch.setattr(gateway, "_post_process", fake_post_process)
+    gateway._procedural = None
+
+    response = await gateway.process_message(
+        content="hello",
+        author_id="u1",
+        author_name="User",
+        channel_id="cli",
+        channel_type_name="CLI",
+        message_metadata=None,
+    )
+
+    assert "internal instructions" in response.lower()
+    assert any(gateway._canary_token in section for section in captured["sections"])
+
+
+@pytest.mark.asyncio
+async def test_gateway_prepends_visual_context_to_reasoning(monkeypatch):
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
+    )
+    config.features.vision = True
+    gateway = NeuralClawGateway(config)
+
+    captured = {}
+
+    async def fake_intake(**kwargs):
+        return SimpleNamespace(
+            id="sig-vision",
+            content=kwargs["content"],
+            author_id=kwargs["author_id"],
+            author_name=kwargs["author_name"],
+            channel_type=SimpleNamespace(name="CLI"),
+            channel_id=kwargs["channel_id"],
+            media=kwargs.get("media", []),
+            context={},
+        )
+
+    async def fake_screen(signal):
+        return SimpleNamespace(blocked=False)
+
+    async def fake_fast_path(signal, memory_ctx=None):
+        return None
+
+    async def fake_classify(signal):
+        return SimpleNamespace(intent="chat")
+
+    async def fake_retrieve(content):
+        return MemoryContext()
+
+    async def fake_reason(signal, memory_ctx, tools=None, conversation_history=None, extra_system_sections=None):
+        captured["content"] = signal.content
+        return ConfidenceEnvelope(response="ok", confidence=0.9, source="llm")
+
+    async def fake_store_interaction(*args, **kwargs):
+        return None
+
+    async def fake_post_process(*args, **kwargs):
+        return None
+
+    class FakeVision:
+        async def process_media(self, media_item, user_query):
+            return "Image summary:\nA login form is visible."
+
+    gateway._vision = FakeVision()
+    monkeypatch.setattr(gateway._intake, "process", fake_intake)
+    monkeypatch.setattr(gateway._threat_screener, "screen", fake_screen)
+    monkeypatch.setattr(gateway._fast_path, "try_fast_path", fake_fast_path)
+    monkeypatch.setattr(gateway._classifier, "classify", fake_classify)
+    monkeypatch.setattr(gateway._retriever, "retrieve", fake_retrieve)
+    monkeypatch.setattr(gateway._deliberate, "reason", fake_reason)
+    monkeypatch.setattr(gateway, "_store_interaction", fake_store_interaction)
+    monkeypatch.setattr(gateway, "_post_process", fake_post_process)
+    gateway._procedural = None
+    gateway._identity = None
+
+    response = await gateway.process_message(
+        content="what is on this screen?",
+        author_id="u1",
+        author_name="User",
+        channel_id="cli",
+        channel_type_name="CLI",
+        media=[{"data": "ZmFrZQ==", "mime_type": "image/png"}],
+    )
+
+    assert response == "ok"
+    assert captured["content"].startswith("## Visual Context")
+    assert "A login form is visible." in captured["content"]

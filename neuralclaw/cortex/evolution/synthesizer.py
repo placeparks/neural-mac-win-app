@@ -19,6 +19,9 @@ from typing import Any
 
 from neuralclaw.bus.neural_bus import EventType, NeuralBus
 from neuralclaw.cortex.action.sandbox import Sandbox
+from neuralclaw.cortex.memory.retrieval import MemoryContext
+from neuralclaw.cortex.perception.intake import Signal
+from neuralclaw.cortex.reasoning.structured import GeneratedSkill, StructuredReasoner
 from neuralclaw.skills.manifest import Capability, SkillManifest, ToolDefinition, ToolParameter
 
 
@@ -62,9 +65,11 @@ class SkillSynthesizer:
         self,
         bus: NeuralBus | None = None,
         sandbox: Sandbox | None = None,
+        structured: StructuredReasoner | None = None,
     ) -> None:
         self._bus = bus
         self._sandbox = sandbox or Sandbox(timeout_seconds=15)
+        self._structured = structured
         self._failed_tasks: list[FailedTask] = []
         self._synthesized: list[SynthesisResult] = []
         self._provider: Any = None
@@ -72,6 +77,10 @@ class SkillSynthesizer:
     def set_provider(self, provider: Any) -> None:
         """Set the LLM provider for code generation."""
         self._provider = provider
+
+    def set_structured(self, structured: StructuredReasoner | None) -> None:
+        """Inject the shared structured reasoner."""
+        self._structured = structured
 
     def record_failure(self, query: str, error: str, category: str = "unknown") -> None:
         """Record a failed task for later analysis."""
@@ -119,7 +128,7 @@ class SkillSynthesizer:
         Asks the LLM to write Python code for the skill,
         tests it in the sandbox, and returns the result.
         """
-        if not self._provider:
+        if not self._provider and not self._structured:
             return SynthesisResult(
                 success=False,
                 skill_name=name,
@@ -127,28 +136,54 @@ class SkillSynthesizer:
                 error="No LLM provider configured for synthesis",
             )
 
-        # Generate skill code with LLM
         prompt = self._build_synthesis_prompt(name, description, example_inputs, expected_outputs)
+        generated: GeneratedSkill | None = None
 
-        try:
-            response = await self._provider.complete(
-                messages=[
-                    {"role": "system", "content": "You are a Python skill code generator. Write clean, async Python functions."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.3,
-            )
-        except Exception as e:
-            return SynthesisResult(
-                success=False, skill_name=name, description=description,
-                error=f"LLM generation failed: {e}",
-            )
+        if self._structured:
+            try:
+                generated = await self._structured.reason_structured(
+                    signal=Signal(
+                        content=prompt,
+                        author_id="system",
+                        author_name="SkillSynthesizer",
+                    ),
+                    schema=GeneratedSkill,
+                    memory_ctx=MemoryContext(),
+                    extra_system_sections=[
+                        "## Skill Generation Rules\n"
+                        f"- The function name must be exactly `{name}`\n"
+                        "- The `code` field must contain runnable Python only\n"
+                        "- Keep the implementation async and return a dict\n"
+                        "- Do not include markdown fences inside the code field"
+                    ],
+                )
+            except Exception:
+                generated = None
 
-        code = self._extract_code(response.content or "")
+        final_description = description
+        if generated:
+            code = self._materialize_generated_code(generated)
+            final_description = generated.description or description
+        else:
+            try:
+                response = await self._provider.complete(
+                    messages=[
+                        {"role": "system", "content": "You are a Python skill code generator. Write clean, async Python functions."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.3,
+                )
+            except Exception as e:
+                return SynthesisResult(
+                    success=False, skill_name=name, description=description,
+                    error=f"LLM generation failed: {e}",
+                )
+
+            code = self._extract_code(response.content or "")
         if not code:
             return SynthesisResult(
                 success=False, skill_name=name, description=description,
-                error="Could not extract valid Python code from LLM response",
+                error="Could not extract valid Python code from model output",
             )
 
         # Test in sandbox
@@ -170,7 +205,7 @@ asyncio.run(test())
         result = SynthesisResult(
             success=sandbox_result.success,
             skill_name=name,
-            description=description,
+            description=final_description,
             code=code,
             test_output=sandbox_result.output,
             error=sandbox_result.error,
@@ -234,6 +269,18 @@ asyncio.run(test())
 
         # Assume the whole response is code
         return response.strip()
+
+    def _materialize_generated_code(self, generated: GeneratedSkill) -> str:
+        lines: list[str] = []
+        for item in generated.required_imports:
+            cleaned = item.strip()
+            if cleaned:
+                lines.append(cleaned)
+        if lines and generated.code.strip():
+            lines.append("")
+        if generated.code.strip():
+            lines.append(generated.code.strip())
+        return "\n".join(lines).strip()
 
     @property
     def failure_count(self) -> int:
