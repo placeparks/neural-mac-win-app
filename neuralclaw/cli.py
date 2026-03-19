@@ -1419,7 +1419,7 @@ def _build_session_runtime(provider_key: str):
 def doctor(json_output: bool, fix: bool) -> None:
     """Diagnose all subsystems — config, providers, channels, memory, bus."""
     console.print(BANNER)
-    console.print(Panel("NeuralClaw Doctor v0.8.0", style="bold cyan"))
+    console.print(Panel(f"NeuralClaw Doctor v{__version__}", style="bold cyan"))
 
     import platform as _platform
     import shutil as _shutil

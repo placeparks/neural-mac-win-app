@@ -1,6 +1,6 @@
 # NeuralClaw Commands
 
-Version target: `0.8.0`
+Version target: `1.0.0`
 
 ## Install
 

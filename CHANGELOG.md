@@ -2,6 +2,45 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
+## [1.0.0] - 2026-03-19
+
+### Production Stable Release
+
+NeuralClaw reaches 1.0 — every feature in both `AGENT.md` and `AGENT_PROD.md`
+is fully implemented, tested, and production-hardened.
+
+### Added — Production Test Suite
+- **Adversarial test expansion**: 14 injection payloads (up from 5) covering
+  Cyrillic homoglyphs, base64 encoding, markdown code blocks, fake system
+  overrides, multi-turn escalation, and semantic disguise.
+- **PII output detection tests**: Parametrized test cases for SSN, email, and
+  phone number leakage in LLM output.
+- **SSRF URL validation tests**: 8 parametrized cases covering cloud metadata,
+  localhost, IPv6 loopback, octal/hex IP encodings.
+- **Jailbreak confirmation tests**: 4 parametrized cases detecting LLM
+  responses that confirm a jailbreak.
+- **Rate limiter flood test**: Validates SlidingWindowUserLimiter blocks the
+  6th request when limit is 5/minute.
+- **Circuit breaker open/recover tests**: Verifies CLOSED → OPEN transition
+  after 3 failures, HALF_OPEN recovery after timeout, and full CLOSED recovery.
+- **Chaos engineering harness**: `provider_outage()`, `slow_provider()`, and
+  `burst_messages()` async context managers plus `TestChaosProviderDown` and
+  `TestChaosBurstLoad` test classes.
+- **Load test expansion**: `test_concurrent_requests_db_no_deadlock` (10
+  concurrent requests), `test_memory_retrieval_under_large_db` (10k episodes,
+  <200ms), `test_traceline_write_throughput` (100 traces/sec).
+- **Integration matrix**: `test_evolution_synthesizer_produces_valid_skill`
+  added.
+
+### Changed — Production Hardening
+- **Dockerfile**: Multi-stage build (builder + runtime), non-root user
+  (`neuralclaw:1000`), `HEALTHCHECK` directive, Playwright browser install,
+  `VOLUME` for persistent state.
+- **Development status**: Upgraded from `Beta` to `Production/Stable` in
+  PyPI classifiers.
+- **pytest markers**: Added `slow` and `chaos` markers to `pyproject.toml`.
+- **Dependencies**: Added `watchfiles>=0.22` to core dependencies.
+
 ## [0.8.0] - 2026-03-18
 
 ### Added — Computer Use & Desktop Control

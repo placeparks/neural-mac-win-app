@@ -5,7 +5,7 @@ NeuralClaw. Read it fully before touching any code. It describes every planned f
 the exact file locations, the architecture contracts each piece must honour, and the
 comprehensive configuration system that ties everything together.
 
-NeuralClaw is at **v0.8.0**. The five-cortex architecture (Perception → Memory →
+NeuralClaw is at **v1.0.0**. The five-cortex architecture (Perception → Memory →
 Reasoning → Action → Evolution) is proven and stable. Everything in this document
 extends it without rewrites.
 
