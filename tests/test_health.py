@@ -10,6 +10,8 @@ from neuralclaw.health import (
     CheckStatus,
     DiagnosticReport,
     HealthChecker,
+    ReadinessProbe,
+    ReadinessState,
     RepairEngine,
 )
 from neuralclaw.config import (
@@ -121,6 +123,36 @@ class TestHealthChecker:
         report = checker.run_all()
         skip_checks = [c for c in report.checks if c.status == CheckStatus.SKIP]
         assert len(skip_checks) > 0  # Config validation should be SKIP
+
+    @pytest.mark.asyncio
+    async def test_readiness_required_probe_failure_is_unhealthy(self):
+        checker = HealthChecker(None)
+        checker.register_probe(ReadinessProbe(name="required", required=True, check=lambda: _false_async()))
+        checker.register_probe(ReadinessProbe(name="optional", required=False, check=lambda: _true_async()))
+
+        state = await checker.run_readiness_check()
+
+        assert state == ReadinessState.UNHEALTHY
+        assert not checker.is_ready
+
+    @pytest.mark.asyncio
+    async def test_readiness_optional_probe_failure_is_degraded(self):
+        checker = HealthChecker(None)
+        checker.register_probe(ReadinessProbe(name="required", required=True, check=lambda: _true_async()))
+        checker.register_probe(ReadinessProbe(name="optional", required=False, check=lambda: _false_async()))
+
+        state = await checker.run_readiness_check()
+
+        assert state == ReadinessState.DEGRADED
+        assert checker.is_ready
+
+
+async def _true_async() -> bool:
+    return True
+
+
+async def _false_async() -> bool:
+    return False
 
 
 # ---------------------------------------------------------------------------

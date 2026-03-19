@@ -35,7 +35,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "name": "NeuralClaw",
         "persona": "You are NeuralClaw, a self-evolving cognitive AI agent with persistent memory and tool use capabilities.",
         "log_level": "INFO",
+        "log_file": str(LOG_DIR / "neuralclaw.log"),
+        "log_stdout": True,
+        "log_max_bytes": 10485760,
+        "log_backups": 5,
         "telemetry_stdout": True,
+        "dev_mode": False,
     },
     # Feature flags — disable to run in lite mode (lower RAM, faster boot)
     "features": {
@@ -258,6 +263,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "deny_private_networks": True,
         "deny_shell_execution": True,
         "parallel_tool_execution": True,
+        "user_requests_per_minute": 20,
+        "user_requests_per_hour": 200,
+        "channel_sends_per_second": 1.0,
+        "channel_sends_per_minute": 20,
+        "max_concurrent_requests": 10,
+        "security_block_cooldown_seconds": 300,
     },
     "federation": {
         "enabled": True,
@@ -545,6 +556,12 @@ class PolicyConfig:
     deny_private_networks: bool = True
     deny_shell_execution: bool = True
     parallel_tool_execution: bool = True
+    user_requests_per_minute: int = 20
+    user_requests_per_hour: int = 200
+    channel_sends_per_second: float = 1.0
+    channel_sends_per_minute: int = 20
+    max_concurrent_requests: int = 10
+    security_block_cooldown_seconds: int = 300
     desktop_allowed_apps: list[str] = field(default_factory=list)
     desktop_blocked_regions: list[str] = field(default_factory=list)
 
@@ -632,7 +649,12 @@ class NeuralClawConfig:
     name: str = "NeuralClaw"
     persona: str = ""  # Set from DEFAULT_CONFIG on load
     log_level: str = "INFO"
+    log_file: str = str(LOG_DIR / "neuralclaw.log")
+    log_stdout: bool = True
+    log_max_bytes: int = 10485760
+    log_backups: int = 5
     telemetry_stdout: bool = True
+    dev_mode: bool = False
 
     primary_provider: ProviderConfig | None = None
     fallback_providers: list[ProviderConfig] = field(default_factory=list)
@@ -770,7 +792,12 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
         name=general.get("name", "NeuralClaw"),
         persona=general.get("persona", DEFAULT_CONFIG["general"]["persona"]),
         log_level=general.get("log_level", "INFO"),
+        log_file=str(general.get("log_file", str(LOG_DIR / "neuralclaw.log")) or ""),
+        log_stdout=bool(general.get("log_stdout", general.get("telemetry_stdout", True))),
+        log_max_bytes=int(general.get("log_max_bytes", 10485760) or 10485760),
+        log_backups=int(general.get("log_backups", 5) or 5),
         telemetry_stdout=general.get("telemetry_stdout", True),
+        dev_mode=bool(general.get("dev_mode", False)),
         primary_provider=primary,
         fallback_providers=fallbacks,
         memory=MemoryConfig(**_filter_fields(MemoryConfig, mem_section)),
@@ -950,6 +977,15 @@ def validate_config(config: NeuralClawConfig) -> ConfigValidationResult:
     errors: list[str] = []
     warnings: list[str] = []
 
+    if str(config.log_level).upper() not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        errors.append(
+            f"log_level must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL; got {config.log_level}"
+        )
+    if config.log_max_bytes <= 0:
+        errors.append(f"log_max_bytes must be > 0, got {config.log_max_bytes}")
+    if config.log_backups < 0:
+        errors.append(f"log_backups must be >= 0, got {config.log_backups}")
+
     # Provider checks
     keyless = {"local", "proxy", "chatgpt_app", "claude_app", "chatgpt_token", "claude_token"}
     if config.primary_provider:
@@ -1032,6 +1068,31 @@ def validate_config(config: NeuralClawConfig) -> ConfigValidationResult:
         errors.append(
             "google_workspace.response_body_limit must be > 0, "
             f"got {config.google_workspace.response_body_limit}"
+        )
+    if config.policy.user_requests_per_minute <= 0:
+        errors.append(
+            "policy.user_requests_per_minute must be > 0, "
+            f"got {config.policy.user_requests_per_minute}"
+        )
+    if config.policy.user_requests_per_hour <= 0:
+        errors.append(
+            "policy.user_requests_per_hour must be > 0, "
+            f"got {config.policy.user_requests_per_hour}"
+        )
+    if config.policy.channel_sends_per_second <= 0:
+        errors.append(
+            "policy.channel_sends_per_second must be > 0, "
+            f"got {config.policy.channel_sends_per_second}"
+        )
+    if config.policy.max_concurrent_requests <= 0:
+        errors.append(
+            "policy.max_concurrent_requests must be > 0, "
+            f"got {config.policy.max_concurrent_requests}"
+        )
+    if config.policy.security_block_cooldown_seconds < 0:
+        errors.append(
+            "policy.security_block_cooldown_seconds must be >= 0, "
+            f"got {config.policy.security_block_cooldown_seconds}"
         )
     if config.google_workspace.max_email_results <= 0:
         errors.append(

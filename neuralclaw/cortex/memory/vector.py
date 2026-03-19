@@ -207,6 +207,13 @@ class VectorMemory:
             await self._db.close()
             self._db = None
 
+    async def ping(self) -> bool:
+        """Cheap readiness check."""
+        if not self._db:
+            return False
+        rows = await self._db.execute_fetchall("SELECT 1")
+        return bool(rows and rows[0][0] == 1)
+
     async def _generate_embedding(self, text: str) -> list[float]:
         provider = (self._embedding_provider or "local").strip().lower()
         text = text or ""

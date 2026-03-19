@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 import aiosqlite
 
 from neuralclaw.bus.neural_bus import EventType, NeuralBus
+from neuralclaw.cortex.memory.db import DBPool
 
 if TYPE_CHECKING:
     from neuralclaw.cortex.memory.vector import VectorMemory
@@ -71,17 +72,24 @@ class EpisodicMemory:
         db_path: str = ":memory:",
         vector_memory: VectorMemory | None = None,
         bus: NeuralBus | None = None,
+        db_pool: DBPool | None = None,
     ) -> None:
         self._db_path = db_path
-        self._db: aiosqlite.Connection | None = None
+        self._db: aiosqlite.Connection | DBPool | None = None
+        self._db_pool = db_pool
+        self._owns_db = db_pool is None
         self._vector_memory = vector_memory
         self._bus = bus
 
     async def initialize(self) -> None:
         """Initialize the database and create tables."""
-        self._db = await aiosqlite.connect(self._db_path)
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA foreign_keys=ON")
+        if self._db_pool:
+            await self._db_pool.initialize()
+            self._db = self._db_pool
+        else:
+            self._db = await aiosqlite.connect(self._db_path)
+            await self._db.execute("PRAGMA journal_mode=WAL")
+            await self._db.execute("PRAGMA foreign_keys=ON")
 
         await self._db.executescript("""
             CREATE TABLE IF NOT EXISTS episodes (
@@ -347,11 +355,32 @@ class EpisodicMemory:
         await self._db.commit()
         return count
 
+    async def prune(self, keep_days: int = 30) -> int:
+        """Delete episodes older than the retention window."""
+        assert self._db is not None
+        cutoff = time.time() - (keep_days * 86400)
+        row = await self._db.execute_fetchall(
+            "SELECT COUNT(*) FROM episodes WHERE timestamp < ?",
+            (cutoff,),
+        )
+        count = row[0][0] if row else 0
+        await self._db.execute("DELETE FROM episodes WHERE timestamp < ?", (cutoff,))
+        await self._db.execute("INSERT INTO episodes_fts(episodes_fts) VALUES('rebuild')")
+        await self._db.commit()
+        return count
+
     async def close(self) -> None:
         """Close the database connection."""
-        if self._db:
+        if self._db and self._owns_db:
             await self._db.close()
-            self._db = None
+        self._db = None
+
+    async def ping(self) -> bool:
+        """Cheap readiness check."""
+        if not self._db:
+            return False
+        rows = await self._db.execute_fetchall("SELECT 1")
+        return bool(rows and rows[0][0] == 1)
 
     # -- Internal -----------------------------------------------------------
 

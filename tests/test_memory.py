@@ -1,4 +1,6 @@
 """Tests for Memory Cortex."""
+import time
+
 import pytest
 from neuralclaw.cortex.memory.episodic import EpisodicMemory, Episode
 from neuralclaw.cortex.memory.semantic import SemanticMemory
@@ -78,6 +80,25 @@ class TestEpisodicMemory:
             await self.mem.store(f"Event {i}", source="test")
         count = await self.mem.count()
         assert count >= 3
+
+    @pytest.mark.asyncio
+    async def test_prune_old_episodes(self):
+        old = await self.mem.store("Old event", source="test")
+        await self.mem.store("Fresh event", source="test")
+        assert self.mem._db is not None
+        await self.mem._db.execute(
+            "UPDATE episodes SET timestamp = ? WHERE id = ?",
+            (time.time() - 40 * 86400, old.id),
+        )
+        await self.mem._db.commit()
+
+        deleted = await self.mem.prune(keep_days=30)
+        deleted_episode = await self.mem.get_by_id(old.id)
+        count = await self.mem.count()
+
+        assert deleted == 1
+        assert deleted_episode is None
+        assert count == 1
 
 
 class TestSemanticMemory:

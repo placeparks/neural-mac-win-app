@@ -10,9 +10,12 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import time
+import asyncio
+import logging
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from neuralclaw.config import (
     CONFIG_DIR,
@@ -73,6 +76,28 @@ class DiagnosticReport:
         return self.fail_count == 0
 
 
+class ReadinessState(Enum):
+    STARTING = "starting"
+    READY = "ready"
+    DEGRADED = "degraded"
+    UNHEALTHY = "unhealthy"
+
+
+@dataclass
+class ReadinessProbe:
+    name: str
+    required: bool
+    check: Callable[[], Awaitable[bool]]
+
+
+@dataclass
+class ReadinessResult:
+    name: str
+    required: bool
+    ok: bool
+    detail: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Health checker
 # ---------------------------------------------------------------------------
@@ -82,6 +107,10 @@ class HealthChecker:
 
     def __init__(self, config: NeuralClawConfig | None = None) -> None:
         self._config = config
+        self._logger = logging.getLogger("neuralclaw.health")
+        self._probes: list[ReadinessProbe] = []
+        self._state = ReadinessState.STARTING
+        self._last_readiness: list[ReadinessResult] = []
 
     def run_all(self) -> DiagnosticReport:
         report = DiagnosticReport()
@@ -93,6 +122,69 @@ class HealthChecker:
         report.checks.extend(self._check_databases())
         report.checks.append(self._check_log_dir())
         return report
+
+    def register_probe(self, probe: ReadinessProbe) -> None:
+        self._probes.append(probe)
+
+    async def run_readiness_check(self) -> ReadinessState:
+        if not self._probes:
+            self._state = ReadinessState.READY
+            self._last_readiness = []
+            return self._state
+
+        results = await asyncio.gather(
+            *[probe.check() for probe in self._probes],
+            return_exceptions=True,
+        )
+
+        required_ok = True
+        optional_failed = False
+        readiness_results: list[ReadinessResult] = []
+        for probe, result in zip(self._probes, results):
+            ok = result is True
+            detail = ""
+            if isinstance(result, Exception):
+                ok = False
+                detail = str(result)
+            elif result not in (True, False):
+                ok = bool(result)
+                detail = str(result)
+
+            readiness_results.append(
+                ReadinessResult(
+                    name=probe.name,
+                    required=probe.required,
+                    ok=ok,
+                    detail=detail,
+                )
+            )
+
+            if not ok and probe.required:
+                required_ok = False
+                self._logger.error("Required probe failed: %s %s", probe.name, detail)
+            elif not ok:
+                optional_failed = True
+                self._logger.warning("Optional probe failed: %s %s", probe.name, detail)
+
+        self._last_readiness = readiness_results
+        if not required_ok:
+            self._state = ReadinessState.UNHEALTHY
+        elif optional_failed:
+            self._state = ReadinessState.DEGRADED
+        else:
+            self._state = ReadinessState.READY
+        return self._state
+
+    @property
+    def is_ready(self) -> bool:
+        return self._state in (ReadinessState.READY, ReadinessState.DEGRADED)
+
+    @property
+    def readiness_state(self) -> ReadinessState:
+        return self._state
+
+    def get_readiness_results(self) -> list[ReadinessResult]:
+        return list(self._last_readiness)
 
     # -- Individual checks --------------------------------------------------
 
@@ -224,6 +316,7 @@ class HealthChecker:
             ))
             return results
 
+        conn = None
         try:
             conn = sqlite3.connect(str(db_path))
             integrity = conn.execute("PRAGMA integrity_check").fetchone()
@@ -246,6 +339,11 @@ class HealthChecker:
             else:
                 results.append(CheckResult("Memory DB", CheckStatus.OK, f"Integrity OK, {len(tables)} tables"))
         except Exception as e:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             results.append(CheckResult(
                 "Memory DB", CheckStatus.FAIL,
                 f"Corrupt or inaccessible: {e}",
@@ -336,7 +434,14 @@ class RepairEngine:
             backup = db_path.with_suffix(f".db.bak.{int(time.time())}")
             shutil.copy2(db_path, backup)
             fixed.append(f"Backed up corrupt DB to {backup}")
-            db_path.unlink()
+            for _ in range(3):
+                try:
+                    db_path.unlink()
+                    break
+                except PermissionError:
+                    time.sleep(0.1)
+            else:
+                db_path.unlink()
             fixed.append("Removed corrupt DB (will be re-created on next run)")
         return fixed
 

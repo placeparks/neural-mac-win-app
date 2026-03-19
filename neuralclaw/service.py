@@ -18,6 +18,7 @@ For non-Windows or non-admin:
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 import json
 import logging
 import os
@@ -38,10 +39,86 @@ DATA_DIR = Path.home() / ".neuralclaw"
 PID_FILE = DATA_DIR / "gateway.pid"
 LOG_FILE = DATA_DIR / "gateway.log"
 STATUS_FILE = DATA_DIR / "gateway.status"
+SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
+SYSTEMD_UNIT_FILE = SYSTEMD_USER_DIR / "neuralclaw.service"
+PM2_ECOSYSTEM_FILE = DATA_DIR / "ecosystem.config.js"
 
 
 def _ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _systemctl_available() -> bool:
+    if sys.platform == "win32":
+        return False
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+class SupervisedGateway:
+    """
+    Async gateway supervisor with bounded restart bursts.
+
+    The existing daemon watchdog loop remains for backward compatibility, while
+    this class powers systemd/PM2-style managed startup.
+    """
+
+    MAX_RESTARTS = 5
+    RESTART_WINDOW = 60.0
+
+    def __init__(self, config_path: str | None = None, dev_mode: bool = False) -> None:
+        self._config_path = config_path
+        self._dev_mode = dev_mode
+        self._restart_times: deque[float] = deque()
+
+    async def run(self) -> None:
+        from neuralclaw.config import load_config
+        from neuralclaw.gateway import NeuralClawGateway
+
+        while True:
+            gateway = None
+            try:
+                config = load_config()
+                gateway = NeuralClawGateway(
+                    config,
+                    dev_mode=self._dev_mode,
+                    config_path=self._config_path,
+                )
+                gateway.build_channels(web_port=config._raw.get("web", {}).get("port", 8081))
+                await gateway.run_forever()
+                return
+            except SystemExit:
+                return
+            except KeyboardInterrupt:
+                if gateway:
+                    await gateway.stop()
+                return
+            except Exception as exc:
+                now = time.monotonic()
+                self._restart_times.append(now)
+                while self._restart_times and now - self._restart_times[0] > self.RESTART_WINDOW:
+                    self._restart_times.popleft()
+
+                if len(self._restart_times) > self.MAX_RESTARTS:
+                    logging.critical(
+                        "Gateway crashed %s times in %.0fs; giving up. Last error: %s",
+                        self.MAX_RESTARTS,
+                        self.RESTART_WINDOW,
+                        exc,
+                    )
+                    raise
+
+                wait = min(2 ** len(self._restart_times), 30)
+                logging.error("Gateway crashed: %s. Restarting in %ss...", exc, wait)
+                await asyncio.sleep(wait)
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +352,127 @@ def stop_daemon() -> bool:
     return True
 
 
+def render_systemd_unit() -> str:
+    python = sys.executable
+    return f"""[Unit]
+Description=NeuralClaw Agent Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={python} -m neuralclaw.service --supervised
+WorkingDirectory=%h/.neuralclaw
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=neuralclaw
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def render_pm2_ecosystem() -> str:
+    python = sys.executable.replace("\\", "\\\\")
+    home = str(Path.home()).replace("\\", "\\\\")
+    return (
+        "module.exports = {\n"
+        "  apps: [{\n"
+        '    name: "neuralclaw",\n'
+        f'    script: "{python}",\n'
+        '    args: "-m neuralclaw.service --supervised",\n'
+        f'    cwd: "{home}\\\\.neuralclaw",\n'
+        '    interpreter: "none",\n'
+        "    autorestart: true,\n"
+        "    max_restarts: 10,\n"
+        '    min_uptime: "10s",\n'
+        "    exp_backoff_restart_delay: 100,\n"
+        f'    error_file: "{home}\\\\.neuralclaw\\\\logs\\\\pm2-error.log",\n'
+        f'    out_file: "{home}\\\\.neuralclaw\\\\logs\\\\pm2-out.log"\n'
+        "  }]\n"
+        "};\n"
+    )
+
+
+def install_service() -> tuple[bool, str]:
+    if sys.platform == "win32":
+        ok = install_windows_service()
+        return ok, "Windows service installed." if ok else "Windows service install failed."
+
+    SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+    SYSTEMD_UNIT_FILE.write_text(render_systemd_unit(), encoding="utf-8")
+    if _systemctl_available():
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True)
+        subprocess.run(["systemctl", "--user", "enable", "--now", "neuralclaw"], capture_output=True, text=True)
+        return True, f"Installed user unit at {SYSTEMD_UNIT_FILE} and enabled it."
+    return True, f"Wrote user unit to {SYSTEMD_UNIT_FILE}. Enable it with systemctl --user enable --now neuralclaw."
+
+
+def uninstall_service() -> tuple[bool, str]:
+    if sys.platform == "win32":
+        ok = uninstall_windows_service()
+        return ok, "Windows service removed." if ok else "Windows service uninstall failed."
+
+    if _systemctl_available():
+        subprocess.run(["systemctl", "--user", "disable", "--now", "neuralclaw"], capture_output=True, text=True)
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True, text=True)
+    SYSTEMD_UNIT_FILE.unlink(missing_ok=True)
+    return True, f"Removed {SYSTEMD_UNIT_FILE}."
+
+
+def start_service() -> tuple[bool, str]:
+    if sys.platform == "win32":
+        ok = start_windows_service()
+        return ok, "Service started." if ok else "Service start failed."
+    if _systemctl_available():
+        result = subprocess.run(["systemctl", "--user", "start", "neuralclaw"], capture_output=True, text=True)
+        return result.returncode == 0, result.stderr.strip() or result.stdout.strip() or "Started user service."
+    pid = start_daemon()
+    return True, f"Started daemon (PID {pid})."
+
+
+def stop_service() -> tuple[bool, str]:
+    if sys.platform == "win32":
+        ok = stop_windows_service()
+        return ok, "Service stopped." if ok else "Service stop failed."
+    if _systemctl_available():
+        result = subprocess.run(["systemctl", "--user", "stop", "neuralclaw"], capture_output=True, text=True)
+        return result.returncode == 0, result.stderr.strip() or result.stdout.strip() or "Stopped user service."
+    return stop_daemon(), "Stopped daemon."
+
+
+def restart_service() -> tuple[bool, str]:
+    if sys.platform == "win32":
+        stopped = stop_windows_service()
+        started = start_windows_service()
+        return stopped and started, "Service restarted." if stopped and started else "Service restart failed."
+    if _systemctl_available():
+        result = subprocess.run(["systemctl", "--user", "restart", "neuralclaw"], capture_output=True, text=True)
+        return result.returncode == 0, result.stderr.strip() or result.stdout.strip() or "Restarted user service."
+    stop_daemon()
+    pid = start_daemon()
+    return True, f"Restarted daemon (PID {pid})."
+
+
+def write_pm2_config() -> Path:
+    _ensure_data_dir()
+    PM2_ECOSYSTEM_FILE.write_text(render_pm2_ecosystem(), encoding="utf-8")
+    return PM2_ECOSYSTEM_FILE
+
+
+def service_logs(lines: int = 100, follow: bool = False) -> subprocess.CompletedProcess[str] | None:
+    if sys.platform != "win32" and _systemctl_available():
+        cmd = ["journalctl", "--user", "-u", "neuralclaw", "-n", str(lines)]
+        if follow:
+            cmd.append("-f")
+        return subprocess.run(cmd, text=True)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # System tray (Windows + Linux with pystray fallback)
 # ---------------------------------------------------------------------------
@@ -486,14 +684,35 @@ def stop_windows_service() -> bool:
 
 
 def service_status() -> str:
-    result = subprocess.run(["sc", "query", "NeuralClaw"], capture_output=True, text=True)
-    if "RUNNING" in result.stdout:
-        return "running"
-    elif "STOPPED" in result.stdout:
-        return "stopped"
-    elif result.returncode != 0:
+    if sys.platform == "win32":
+        result = subprocess.run(["sc", "query", "NeuralClaw"], capture_output=True, text=True)
+        if "RUNNING" in result.stdout:
+            return "running"
+        if "STOPPED" in result.stdout:
+            return "stopped"
+        if result.returncode != 0:
+            return "not_installed"
+        return "unknown"
+
+    if _systemctl_available():
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", "neuralclaw"],
+            capture_output=True,
+            text=True,
+        )
+        status = result.stdout.strip()
+        if status == "active":
+            return "running"
+        if status in {"inactive", "failed"}:
+            return "stopped"
+        if SYSTEMD_UNIT_FILE.exists():
+            return "installed"
         return "not_installed"
-    return "unknown"
+
+    pid = _read_pid()
+    if pid and _is_running(pid):
+        return "running"
+    return "stopped" if PID_FILE.exists() else "not_installed"
 
 
 def _find_nssm() -> str | None:
@@ -630,9 +849,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="NeuralClaw Service/Daemon")
     parser.add_argument("--daemon", action="store_true", help="Run as background daemon")
     parser.add_argument("--service", action="store_true", help="Run as Windows service")
+    parser.add_argument("--supervised", action="store_true", help="Run under the async crash supervisor")
     args = parser.parse_args()
 
-    if args.daemon or args.service:
+    if args.daemon or args.service or args.supervised:
         # Set up file logging
         _ensure_data_dir()
         logging.basicConfig(
@@ -641,6 +861,9 @@ if __name__ == "__main__":
             format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         )
         log.info("NeuralClaw daemon starting (PID %d)", os.getpid())
-        run_gateway_blocking(watchdog=True)
+        if args.supervised:
+            asyncio.run(SupervisedGateway().run())
+        else:
+            run_gateway_blocking(watchdog=True)
     else:
         print("Use 'neuralclaw tray' or 'neuralclaw daemon' instead.")

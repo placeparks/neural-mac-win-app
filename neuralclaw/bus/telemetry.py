@@ -16,7 +16,9 @@ Cost metrics tracked per session:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import logging.handlers
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -145,30 +147,42 @@ class Telemetry:
         log_to_file: bool = True,
         log_to_stdout: bool = True,
         log_dir: Path | None = None,
+        log_file: str | None = None,
+        log_level: str = "INFO",
+        log_max_bytes: int = 10 * 1024 * 1024,
+        log_backups: int = 5,
+        dev_mode: bool = False,
     ) -> None:
         self._log_to_stdout = log_to_stdout
+        self._dev_mode = dev_mode
+        self._log_level = str(log_level).upper()
         self._metrics = CostMetrics()
         self._console: Console | None = None  # lazy-loaded
         self._Text: type | None = None  # lazy-loaded Rich Text class
 
         # Lazy-load Rich only when stdout logging is enabled
-        if log_to_stdout:
+        if log_to_stdout and dev_mode:
             try:
                 from rich.console import Console as _Console
                 self._console = _Console(stderr=True)
             except ImportError:
-                self._log_to_stdout = False
+                self._console = None
 
         # File logger
         self._file_logger: logging.Logger | None = None
         if log_to_file:
-            log_path = (log_dir or LOG_DIR)
-            log_path.mkdir(parents=True, exist_ok=True)
-            log_file = log_path / "reasoning_traces.log"
+            target = Path(log_file).expanduser() if log_file else (log_dir or LOG_DIR) / "reasoning_traces.log"
+            target.parent.mkdir(parents=True, exist_ok=True)
 
             self._file_logger = logging.getLogger("neuralclaw.telemetry")
-            self._file_logger.setLevel(logging.DEBUG)
-            handler = logging.FileHandler(log_file, encoding="utf-8")
+            self._file_logger.handlers.clear()
+            self._file_logger.setLevel(getattr(logging, self._log_level, logging.INFO))
+            handler = logging.handlers.RotatingFileHandler(
+                target,
+                maxBytes=max(log_max_bytes, 1024),
+                backupCount=max(log_backups, 0),
+                encoding="utf-8",
+            )
             handler.setFormatter(logging.Formatter("%(message)s"))
             self._file_logger.addHandler(handler)
             self._file_logger.propagate = False
@@ -242,17 +256,29 @@ class Telemetry:
         # Build detail string from event data
         details = self._format_details(event)
         line = f"[{ts}] {cortex}: {details}"
+        payload = {
+            "ts": event.timestamp,
+            "level": "ERROR" if event.type == EventType.ERROR else self._log_level,
+            "logger": "neuralclaw.telemetry",
+            "event_type": event.type.name,
+            "cortex": cortex,
+            "source": event.source,
+            "correlation_id": event.correlation_id or "",
+            "message": details,
+            "line": line,
+        }
+        rendered_json = json.dumps(payload, ensure_ascii=False)
 
         # File output — push to async queue (non-blocking), fallback to sync
         if self._file_logger:
             try:
-                self._queue.put_nowait(line)
+                self._queue.put_nowait(rendered_json)
             except asyncio.QueueFull:
                 # Queue full (very high throughput) — write sync as fallback
-                self._file_logger.info(line)
+                self._file_logger.info(rendered_json)
 
         # Rich stdout output
-        if self._console and self._log_to_stdout:
+        if self._console and self._log_to_stdout and self._dev_mode:
             if self._Text is None:
                 from rich.text import Text
                 self._Text = Text
@@ -262,6 +288,8 @@ class Telemetry:
             cortex_text = Text(f"{cortex}: ", style=f"bold {color}")
             detail_text = Text(details, style=color)
             self._console.print(ts_text + cortex_text + detail_text, highlight=False)
+        elif self._log_to_stdout:
+            print(rendered_json)
 
     def _update_metrics(self, event: Event) -> None:
         """Update cost metrics based on event data."""

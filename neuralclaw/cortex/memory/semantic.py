@@ -21,6 +21,8 @@ from typing import Any
 
 import aiosqlite
 
+from neuralclaw.cortex.memory.db import DBPool
+
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -73,15 +75,21 @@ class SemanticMemory:
     - Graph traversal queries
     """
 
-    def __init__(self, db_path: str = ":memory:") -> None:
+    def __init__(self, db_path: str = ":memory:", db_pool: DBPool | None = None) -> None:
         self._db_path = db_path
-        self._db: aiosqlite.Connection | None = None
+        self._db: aiosqlite.Connection | DBPool | None = None
+        self._db_pool = db_pool
+        self._owns_db = db_pool is None
 
     async def initialize(self) -> None:
         """Initialize database and create tables."""
-        self._db = await aiosqlite.connect(self._db_path)
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA foreign_keys=ON")
+        if self._db_pool:
+            await self._db_pool.initialize()
+            self._db = self._db_pool
+        else:
+            self._db = await aiosqlite.connect(self._db_path)
+            await self._db.execute("PRAGMA journal_mode=WAL")
+            await self._db.execute("PRAGMA foreign_keys=ON")
 
         await self._db.executescript("""
             CREATE TABLE IF NOT EXISTS entities (
@@ -332,9 +340,16 @@ class SemanticMemory:
         return count
 
     async def close(self) -> None:
-        if self._db:
+        if self._db and self._owns_db:
             await self._db.close()
-            self._db = None
+        self._db = None
+
+    async def ping(self) -> bool:
+        """Cheap readiness check."""
+        if not self._db:
+            return False
+        rows = await self._db.execute_fetchall("SELECT 1")
+        return bool(rows and rows[0][0] == 1)
 
     # -- Internal -----------------------------------------------------------
 

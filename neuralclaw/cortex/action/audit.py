@@ -8,6 +8,7 @@ import io
 import json
 import time
 from collections import Counter
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -174,7 +175,7 @@ class AuditLogger:
         self._config = config or AuditConfig()
         self._bus = bus
         self._log_file = Path(self._config.jsonl_path or AUDIT_LOG)
-        self._entries: list[AuditRecord] = []
+        self._entries: deque[AuditRecord] = deque(maxlen=max(1, self._config.max_memory_entries))
         self._index = AuditSearchIndex()
         self._lock = asyncio.Lock()
 
@@ -196,7 +197,10 @@ class AuditLogger:
         loaded_records = await self._load_records()
         records = list(loaded_records)
         records = self._apply_retention(records)
-        self._entries = records[-self._config.max_memory_entries:]
+        self._entries = deque(
+            records[-self._config.max_memory_entries:],
+            maxlen=max(1, self._config.max_memory_entries),
+        )
         self._index.rebuild(records)
         if len(records) != len(loaded_records):
             await self._rewrite_records(records)
@@ -249,8 +253,6 @@ class AuditLogger:
         async with self._lock:
             self._index.add(record)
             self._entries.append(record)
-            if len(self._entries) > self._config.max_memory_entries:
-                self._entries = self._entries[-self._config.max_memory_entries:]
             try:
                 await asyncio.to_thread(self._append_record, record)
             except OSError as exc:
@@ -259,7 +261,7 @@ class AuditLogger:
         return record
 
     def get_recent(self, limit: int = 50) -> list[AuditRecord]:
-        return self._entries[-limit:]
+        return list(self._entries)[-limit:]
 
     async def search(
         self,

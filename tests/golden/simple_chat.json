@@ -1,0 +1,9 @@
+{
+  "input": {
+    "content": "hello",
+    "author_id": "golden-user",
+    "author_name": "Golden",
+    "channel_id": "golden"
+  },
+  "expected_response": "golden-response"
+}

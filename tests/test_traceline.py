@@ -157,9 +157,11 @@ class TestTraceline:
         await asyncio.sleep(0.1)
         exported = await self.traceline.export_jsonl(self.out_path)
         metrics = await self.traceline.get_metrics()
+        prometheus = await self.traceline.export_prometheus()
 
         assert exported >= 1
         with open(self.out_path, "r", encoding="utf-8") as fh:
             lines = [json.loads(line) for line in fh if line.strip()]
         assert any(line["request_id"] == request_id for line in lines)
         assert metrics["total_traces"] >= 1
+        assert "neuralclaw_requests_total" in prometheus

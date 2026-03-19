@@ -24,6 +24,8 @@ from typing import Any, Callable, Coroutine
 class EventType(Enum):
     """All event types that flow through the neural bus."""
 
+    INFO = auto()
+
     # Perception cortex events
     SIGNAL_RECEIVED = auto()
     THREAT_SCREENED = auto()
@@ -154,6 +156,12 @@ class NeuralBus:
             self._subscribers[event_type] = [
                 h for h in self._subscribers[event_type] if h is not handler
             ]
+
+    def unsubscribe_all(self, handler: Handler) -> None:
+        """Remove a handler from both global and type-specific subscriptions."""
+        self._global_subscribers = [h for h in self._global_subscribers if h is not handler]
+        for event_type, handlers in list(self._subscribers.items()):
+            self._subscribers[event_type] = [h for h in handlers if h is not handler]
 
     # -- Publishing ---------------------------------------------------------
 

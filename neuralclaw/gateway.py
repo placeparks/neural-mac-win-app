@@ -12,14 +12,22 @@ This is the brain of NeuralClaw.
 from __future__ import annotations
 
 import asyncio
+import gc
+import logging
 import secrets
 import signal
 import sys
+import time
 from typing import Any
 
 from neuralclaw.bus.neural_bus import EventType, NeuralBus
 from neuralclaw.bus.telemetry import Telemetry
 from neuralclaw.channels.protocol import ChannelAdapter, ChannelMessage
+from neuralclaw.channels.rate_limiter import (
+    RateLimitConfig,
+    SlidingWindowUserLimiter,
+    TokenBucketRateLimiter,
+)
 from neuralclaw.channels.trust import ChannelTrustController
 from neuralclaw.config import (
     NeuralClawConfig,
@@ -33,6 +41,7 @@ from neuralclaw.cortex.action.audit import AuditLogger
 from neuralclaw.cortex.action.capabilities import CapabilityVerifier
 from neuralclaw.cortex.action.idempotency import IdempotencyStore
 from neuralclaw.cortex.action.policy import PolicyEngine
+from neuralclaw.cortex.memory.db import DBPool
 from neuralclaw.cortex.memory.episodic import EpisodicMemory
 from neuralclaw.cortex.memory.identity import UserIdentityStore
 from neuralclaw.cortex.memory.metabolism import MemoryMetabolism
@@ -54,6 +63,8 @@ from neuralclaw.cortex.observability.traceline import Traceline
 from neuralclaw.cortex.evolution.calibrator import BehavioralCalibrator
 from neuralclaw.cortex.evolution.distiller import ExperienceDistiller
 from neuralclaw.cortex.evolution.synthesizer import SkillSynthesizer
+from neuralclaw.errors import ChannelError, ConfigurationError, ProviderError, SecurityError
+from neuralclaw.health import HealthChecker, ReadinessProbe, ReadinessState
 from neuralclaw.providers.router import LLMProvider, ProviderRouter
 from neuralclaw.skills.registry import SkillRegistry
 from neuralclaw.swarm.delegation import DelegationChain, DelegationPolicy
@@ -75,15 +86,60 @@ class NeuralClawGateway:
     cohesive cognitive pipeline.
     """
 
-    def __init__(self, config: NeuralClawConfig | None = None, provider_override: str | None = None) -> None:
+    def __init__(
+        self,
+        config: NeuralClawConfig | None = None,
+        provider_override: str | None = None,
+        dev_mode: bool | None = None,
+        config_path: str | None = None,
+    ) -> None:
         self._config = config or load_config()
         self._running = False
         self._provider_override = provider_override
+        self._config_path = config_path
+        self._dev_mode = self._config.dev_mode if dev_mode is None else dev_mode
+        self._logger = logging.getLogger("neuralclaw.gateway")
+        if not logging.getLogger().handlers:
+            logging.basicConfig(
+                level=getattr(logging, str(self._config.log_level).upper(), logging.INFO),
+                format="%(asctime)s %(levelname)s %(name)s %(message)s",
+            )
+        self._shutdown_task: asyncio.Task[None] | None = None
+        self._gc_task: asyncio.Task[None] | None = None
+        self._config_watch_task: asyncio.Task[None] | None = None
+        self._rate_limit_config = RateLimitConfig(
+            user_requests_per_minute=self._config.policy.user_requests_per_minute,
+            user_requests_per_hour=self._config.policy.user_requests_per_hour,
+            channel_sends_per_second=self._config.policy.channel_sends_per_second,
+            channel_sends_per_minute=self._config.policy.channel_sends_per_minute,
+            max_concurrent_requests=self._config.policy.max_concurrent_requests,
+            security_block_cooldown_seconds=self._config.policy.security_block_cooldown_seconds,
+        )
+        self._rate_limiter = SlidingWindowUserLimiter(self._rate_limit_config)
+        self._send_limiters: dict[str, TokenBucketRateLimiter] = {}
+        self._request_semaphore = asyncio.Semaphore(
+            self._rate_limit_config.max_concurrent_requests
+        )
+        self._security_cooldowns: dict[str, float] = {}
+        self._health = HealthChecker(self._config)
+        self._startup_readiness = ReadinessState.STARTING
+        self._ready_at: float | None = None
+
+        if self._dev_mode:
+            self._config.dev_mode = True
+            self._config.security.threat_threshold = 0.95
+            self._config.policy.security_block_cooldown_seconds = 0
 
         # Neural bus
         self._bus = NeuralBus()
         self._telemetry = Telemetry(
-            log_to_stdout=self._config.telemetry_stdout,
+            log_to_file=bool(self._config.log_file),
+            log_to_stdout=bool(self._config.log_stdout),
+            log_file=self._config.log_file,
+            log_level=self._config.log_level,
+            log_max_bytes=self._config.log_max_bytes,
+            log_backups=self._config.log_backups,
+            dev_mode=self._dev_mode,
         )
         self._bus.subscribe_all(self._telemetry.handle_event)
         feat = self._config.features
@@ -117,6 +173,8 @@ class NeuralClawGateway:
         self._vision: VisionPerception | None = None
 
         # Memory cortex
+        self._memory_db_pool = DBPool(self._config.memory.db_path)
+        self._trace_db_pool = DBPool(self._config.traceline.db_path)
         self._vector_memory = VectorMemory(
             self._config.memory.db_path,
             embedding_provider=self._config.memory.embedding_provider,
@@ -128,13 +186,18 @@ class NeuralClawGateway:
             self._config.memory.db_path,
             vector_memory=self._vector_memory,
             bus=self._bus,
+            db_pool=self._memory_db_pool,
         )
-        self._semantic = SemanticMemory(self._config.memory.db_path)
+        self._semantic = SemanticMemory(
+            self._config.memory.db_path,
+            db_pool=self._memory_db_pool,
+        )
         self._identity = UserIdentityStore(
             self._config.memory.db_path,
             bus=self._bus,
             episodic=self._episodic,
             semantic=self._semantic,
+            db_pool=self._memory_db_pool,
         ) if feat.identity and self._config.identity.enabled else None
         self._retriever = MemoryRetriever(
             self._episodic, self._semantic, self._bus,
@@ -177,7 +240,11 @@ class NeuralClawGateway:
             )
 
         # Phase 2: Procedural memory + metabolism
-        self._procedural = ProceduralMemory(self._config.memory.db_path, self._bus) if feat.procedural_memory else None
+        self._procedural = ProceduralMemory(
+            self._config.memory.db_path,
+            self._bus,
+            db_pool=self._memory_db_pool,
+        ) if feat.procedural_memory else None
         self._metabolism = MemoryMetabolism(
             self._episodic, self._semantic if feat.semantic_memory else None, self._bus,
             vector_memory=self._vector_memory,
@@ -197,6 +264,7 @@ class NeuralClawGateway:
             self._config.traceline.db_path,
             self._bus,
             config=self._config.traceline,
+            db_pool=self._trace_db_pool,
         ) if feat.traceline and self._config.traceline.enabled else None
 
         if self._identity and self._calibrator:
@@ -249,10 +317,41 @@ class NeuralClawGateway:
 
         # Provider
         self._provider: ProviderRouter | None = None
+        self._health.register_probe(
+            ReadinessProbe(
+                name="memory_db",
+                required=True,
+                check=self._ping_memory_db,
+            )
+        )
+        self._health.register_probe(
+            ReadinessProbe(
+                name="primary_provider",
+                required=True,
+                check=self._ping_primary_provider,
+            )
+        )
+        self._health.register_probe(
+            ReadinessProbe(
+                name="vector_memory",
+                required=False,
+                check=self._ping_vector_memory,
+            )
+        )
+        self._health.register_probe(
+            ReadinessProbe(
+                name="federation",
+                required=False,
+                check=self._ping_federation,
+            )
+        )
 
     async def initialize(self) -> None:
         """Initialize all subsystems."""
         ensure_dirs()
+        await self._memory_db_pool.initialize()
+        if self._traceline:
+            await self._trace_db_pool.initialize()
 
         # Initialize memory databases
         if self._vector_memory:
@@ -345,6 +444,16 @@ class NeuralClawGateway:
             if self._synthesizer:
                 self._synthesizer.set_structured(self._structured)
                 self._synthesizer.set_provider(self._provider)
+        else:
+            configured = self._config.primary_provider.name if self._config.primary_provider else "none"
+            raise ProviderError(
+                f"Failed to initialize LLM provider '{configured}'.\n\n"
+                f"  Common causes:\n"
+                f"  1. Missing or invalid API key - run: neuralclaw init\n"
+                f"  2. No internet connectivity for hosted providers\n"
+                f"  3. Using 'local' provider but Ollama is not running - run: ollama serve\n\n"
+                f"  Run neuralclaw doctor for a full diagnostic."
+            )
         if self._config.features.browser and self._config.browser.enabled:
             from neuralclaw.cortex.action.browser import BrowserCortex
 
@@ -364,6 +473,18 @@ class NeuralClawGateway:
             self._dashboard.set_federation_provider(self._get_dashboard_federation)
             self._dashboard.set_memory_provider(self._get_dashboard_memory)
             self._dashboard.set_bus_provider(self._get_dashboard_bus)
+            self._dashboard.set_health_provider(self._get_health_payload)
+            self._dashboard.set_ready_provider(self._get_ready_payload)
+            self._dashboard.set_metrics_provider(self._get_metrics_payload)
+            self._dashboard.set_metrics_json_provider(self._get_dashboard_metrics)
+            self._dashboard.set_trace_providers(
+                self._get_dashboard_traces,
+                self._get_dashboard_trace,
+            )
+            self._dashboard.set_config_provider(self._get_dashboard_config)
+            self._dashboard.set_skills_provider(self._get_dashboard_skills)
+            self._dashboard.set_swarm_provider(self._get_dashboard_agents)
+            self._dashboard.set_provider_reset_action(self._dashboard_reset_provider_circuit)
             # Action callables
             if self._spawner:
                 self._dashboard.set_spawn_action(self._dashboard_spawn)
@@ -454,7 +575,7 @@ class NeuralClawGateway:
         if not primary:
             return None
 
-        return ProviderRouter(primary=primary, fallbacks=providers)
+        return ProviderRouter(primary=primary, fallbacks=providers, bus=self._bus)
 
     def _build_openai(self, cfg: Any) -> LLMProvider | None:
         key = get_api_key("openai")
@@ -617,10 +738,49 @@ class NeuralClawGateway:
         from neuralclaw.channels.signal_adapter import SignalAdapter
         return SignalAdapter(cfg.token)
 
+    async def _ping_memory_db(self) -> bool:
+        return await self._episodic.ping()
+
+    async def _ping_primary_provider(self) -> bool:
+        return bool(self._provider and await self._provider.ping_primary())
+
+    async def _ping_vector_memory(self) -> bool:
+        if not self._vector_memory:
+            return True
+        return await self._vector_memory.ping()
+
+    async def _ping_federation(self) -> bool:
+        if not self._federation:
+            return True
+        return await self._federation.ping()
+
+    def _get_send_limiter(self, platform: str) -> TokenBucketRateLimiter:
+        limiter = self._send_limiters.get(platform)
+        if limiter is None:
+            limiter = TokenBucketRateLimiter(
+                rate_per_second=self._rate_limit_config.channel_sends_per_second,
+                burst=max(1, int(self._rate_limit_config.channel_sends_per_minute // 4) or 1),
+            )
+            self._send_limiters[platform] = limiter
+        return limiter
+
+    async def _send_with_rate_limit(
+        self,
+        platform: str,
+        adapter: ChannelAdapter,
+        channel_id: str,
+        response: str,
+        **kwargs: Any,
+    ) -> None:
+        if not self._dev_mode:
+            await self._get_send_limiter(platform).acquire()
+        await adapter.send(channel_id, response, **kwargs)
+
     def add_channel(self, adapter: ChannelAdapter) -> None:
         """Register a channel adapter."""
         adapter.on_message(self._on_channel_message)
         self._channels[adapter.name] = adapter
+        self._get_send_limiter(adapter.name)
         try:
             from neuralclaw.skills.builtins import tts as _tts
 
@@ -650,65 +810,69 @@ class NeuralClawGateway:
     async def _on_channel_message(self, msg: ChannelMessage) -> None:
         """Handle an incoming message from any channel."""
         try:
-            media = getattr(msg, "media", []) or []
-            if await self._try_stream_channel_message(msg):
-                return
+            async with self._request_semaphore:
+                media = getattr(msg, "media", []) or []
+                if await self._try_stream_channel_message(msg):
+                    return
 
-            response = await self.process_message(
-                content=msg.content,
-                author_id=msg.author_id,
-                author_name=msg.author_name,
-                channel_id=msg.channel_id,
-                channel_type_name=self._get_channel_type(msg),
-                media=media,
-                message_metadata=msg.metadata,
-                raw_message=msg.raw,
-            )
+                response = await self.process_message(
+                    content=msg.content,
+                    author_id=msg.author_id,
+                    author_name=msg.author_name,
+                    channel_id=msg.channel_id,
+                    channel_type_name=self._get_channel_type(msg),
+                    media=media,
+                    message_metadata=msg.metadata,
+                    raw_message=msg.raw,
+                )
 
-            if not response:
-                return
+                if not response:
+                    return
 
-            # Collect any pending media (e.g. screenshots) before sending
-            pending_media = []
-            if hasattr(self, "_pending_media") and msg.channel_id in self._pending_media:
-                pending_media = self._pending_media.pop(msg.channel_id, [])
+                # Collect any pending media (e.g. screenshots) before sending
+                pending_media = []
+                if hasattr(self, "_pending_media") and msg.channel_id in self._pending_media:
+                    pending_media = self._pending_media.pop(msg.channel_id, [])
 
-            # Route response back to the correct adapter
-            source_channel = self._get_source_adapter(msg)
-            if source_channel and source_channel in self._channels:
-                adapter = self._channels[source_channel]
-                try:
-                    await adapter.send(
-                        msg.channel_id,
-                        response,
-                        **self._build_reply_kwargs(msg),
-                    )
-                    # Send any captured media (screenshots, etc.) as images
-                    for media_item in pending_media:
-                        if media_item.get("type") == "image" and hasattr(adapter, "send_photo"):
-                            await adapter.send_photo(
-                                msg.channel_id,
-                                media_item["data"],
-                                caption="",
-                            )
-                    await self._maybe_send_voice_response(source_channel, msg.channel_id, response)
-                except Exception as e:
-                    print(f"[Gateway] Failed to send via {source_channel}: {e}")
-            else:
-                # Fallback: try all channels
-                for name, adapter in self._channels.items():
+                # Route response back to the correct adapter
+                source_channel = self._get_source_adapter(msg)
+                if source_channel and source_channel in self._channels:
+                    adapter = self._channels[source_channel]
                     try:
-                        await adapter.send(msg.channel_id, response, **self._build_reply_kwargs(msg))
+                        await self._send_with_rate_limit(
+                            source_channel,
+                            adapter,
+                            msg.channel_id,
+                            response,
+                            **self._build_reply_kwargs(msg),
+                        )
                         for media_item in pending_media:
                             if media_item.get("type") == "image" and hasattr(adapter, "send_photo"):
                                 await adapter.send_photo(msg.channel_id, media_item["data"], caption="")
-                        await self._maybe_send_voice_response(name, msg.channel_id, response)
-                        break
-                    except Exception:
-                        continue
+                        await self._maybe_send_voice_response(source_channel, msg.channel_id, response)
+                    except Exception as e:
+                        self._logger.error("Failed to send via %s: %s", source_channel, e)
+                else:
+                    # Fallback: try all channels
+                    for name, adapter in self._channels.items():
+                        try:
+                            await self._send_with_rate_limit(
+                                name,
+                                adapter,
+                                msg.channel_id,
+                                response,
+                                **self._build_reply_kwargs(msg),
+                            )
+                            for media_item in pending_media:
+                                if media_item.get("type") == "image" and hasattr(adapter, "send_photo"):
+                                    await adapter.send_photo(msg.channel_id, media_item["data"], caption="")
+                            await self._maybe_send_voice_response(name, msg.channel_id, response)
+                            break
+                        except Exception:
+                            continue
 
         except Exception as e:
-            print(f"[Gateway] Error processing message: {e}")
+            self._logger.error("Error processing message: %s", e)
 
     async def _try_stream_channel_message(self, msg: ChannelMessage) -> bool:
         """Attempt streaming delivery; return True if handled."""
@@ -956,6 +1120,20 @@ class NeuralClawGateway:
             if decision.status in {"unpaired", "paired"}:
                 return decision.response or ""
 
+        if not self._dev_mode:
+            cooldown_until = self._security_cooldowns.get(author_id, 0.0)
+            now = time.monotonic()
+            if cooldown_until > now:
+                retry_after = cooldown_until - now
+                return f"Access temporarily blocked for safety. Retry in {retry_after:.0f}s."
+
+            allowed, retry_after = self._rate_limiter.check(author_id)
+            if not allowed:
+                return (
+                    "You're sending messages too quickly. "
+                    f"Please wait {retry_after:.0f}s and try again."
+                )
+
         # 1. PERCEPTION: Intake
         channel_type = ChannelType[channel_type_name.upper()] if channel_type_name.upper() in ChannelType.__members__ else ChannelType.CLI
         signal = await self._intake.process(
@@ -995,6 +1173,19 @@ class NeuralClawGateway:
         # 2. PERCEPTION: Threat screening
         threat = await self._threat_screener.screen(signal)
         if threat.blocked:
+            if not self._dev_mode and self._rate_limit_config.security_block_cooldown_seconds > 0:
+                self._security_cooldowns[author_id] = (
+                    time.monotonic() + self._rate_limit_config.security_block_cooldown_seconds
+                )
+            await self._bus.publish(
+                EventType.INFO,
+                {
+                    "event": "threat_blocked",
+                    "reason": "policy",
+                    "signal_id": signal.id,
+                },
+                source="gateway",
+            )
             return "⚠️ I've detected a potentially harmful request and blocked it for safety. If this was a mistake, try rephrasing."
 
         # 3. REASONING: Try fast path before any DB/memory ops (zero-cost early exit)
@@ -1729,6 +1920,20 @@ class NeuralClawGateway:
         """Start the gateway (all channels + bus)."""
         self._running = True
         await self.initialize()
+        self._setup_signal_handlers()
+        self._gc_task = asyncio.create_task(self._gc_loop())
+
+        # Start dashboard early so health endpoints are available during startup.
+        if self._dashboard:
+            try:
+                await self._dashboard.start()
+            except Exception as e:
+                self._logger.error("Dashboard failed to start: %s", e)
+
+        if self._dev_mode and self._config_path:
+            self._config_watch_task = asyncio.create_task(self._watch_config())
+
+        await self._run_startup_readiness()
         await self._start_channels()
 
         print(f"\n🧠 {self._config.name} Gateway is running (Phase 3: Swarm)")
@@ -1747,18 +1952,23 @@ class NeuralClawGateway:
             print(f"   Federation: disabled")
         if self._spawner:
             print(f"   Spawner: {self._spawner.count} agents")
-
-        # Start dashboard in background
-        if self._dashboard:
-            try:
-                await self._dashboard.start()
-            except Exception as e:
-                print(f"   Dashboard: failed to start ({e})")
         print()
 
     async def stop(self) -> None:
         """Gracefully stop the gateway."""
         self._running = False
+        if self._config_watch_task:
+            self._config_watch_task.cancel()
+            try:
+                await self._config_watch_task
+            except asyncio.CancelledError:
+                pass
+        if self._gc_task:
+            self._gc_task.cancel()
+            try:
+                await self._gc_task
+            except asyncio.CancelledError:
+                pass
         await self._stop_channels()
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
@@ -1790,6 +2000,9 @@ class NeuralClawGateway:
             await self._calibrator.close()
         await self._audit.close()
         await self._idempotency.close()
+        await self._memory_db_pool.close()
+        if self._traceline:
+            await self._trace_db_pool.close()
         print("\n🧠 NeuralClaw Gateway stopped.")
 
     def _get_dashboard_stats(self) -> dict[str, Any]:
@@ -1804,6 +2017,8 @@ class NeuralClawGateway:
             ) if self._meta_cognitive else 1.0,
             "skills": self._skills.count,
             "channels": ", ".join(self._channels.keys()) or "none",
+            "readiness": self._startup_readiness.value,
+            "circuits": self._provider.get_circuit_states() if self._provider else {},
         }
 
     def _get_dashboard_agents(self) -> list[dict[str, Any]]:
@@ -1843,6 +2058,91 @@ class NeuralClawGateway:
             }
             for e in events
         ]
+
+    async def _get_dashboard_traces(self, limit: int = 50) -> list[dict[str, Any]]:
+        if not self._traceline:
+            return []
+        traces = await self._traceline.query_traces(limit=limit)
+        return [self._trace_to_dict(trace) for trace in traces]
+
+    async def _get_dashboard_trace(self, trace_id: str) -> dict[str, Any] | None:
+        if not self._traceline:
+            return None
+        trace = await self._traceline.get_trace(trace_id)
+        return self._trace_to_dict(trace) if trace else None
+
+    async def _get_dashboard_metrics(self) -> dict[str, Any]:
+        traceline_metrics = await self._traceline.get_metrics() if self._traceline else {}
+        return {
+            **traceline_metrics,
+            "provider": self._provider.name if self._provider else "none",
+            "readiness": self._startup_readiness.value,
+            "circuits": self._provider.get_circuit_states() if self._provider else {},
+        }
+
+    def _get_dashboard_config(self) -> dict[str, Any]:
+        return self._sanitize_config_value(self._config._raw)
+
+    def _get_dashboard_skills(self) -> list[dict[str, Any]]:
+        skills: list[dict[str, Any]] = []
+        for manifest in self._skills.list_skills():
+            skills.append(
+                {
+                    "name": manifest.name,
+                    "description": manifest.description,
+                    "version": manifest.version,
+                    "tool_count": len(manifest.tools),
+                    "capabilities": [cap.name for cap in manifest.capabilities],
+                }
+            )
+        return skills
+
+    def _trace_to_dict(self, trace: Any) -> dict[str, Any]:
+        return {
+            "trace_id": trace.trace_id,
+            "request_id": trace.request_id,
+            "user_id": trace.user_id,
+            "channel": trace.channel,
+            "platform": trace.platform,
+            "input_preview": trace.input_preview,
+            "output_preview": trace.output_preview,
+            "confidence": trace.confidence,
+            "reasoning_path": trace.reasoning_path,
+            "threat_score": trace.threat_score,
+            "memory_hits": trace.memory_hits,
+            "tool_calls": [
+                {
+                    "tool": call.tool,
+                    "args_preview": call.args_preview,
+                    "result_preview": call.result_preview,
+                    "duration_ms": call.duration_ms,
+                    "success": call.success,
+                    "idempotency_key": call.idempotency_key,
+                }
+                for call in trace.tool_calls
+            ],
+            "total_tool_calls": trace.total_tool_calls,
+            "tokens_used": trace.tokens_used,
+            "cost_usd": trace.cost_usd,
+            "duration_ms": trace.duration_ms,
+            "timestamp": trace.timestamp,
+            "error": trace.error,
+            "tags": trace.tags,
+        }
+
+    def _sanitize_config_value(self, value: Any, key: str = "") -> Any:
+        secret_markers = ("key", "token", "secret", "password", "cookie", "session")
+        lowered = key.lower()
+        if any(marker in lowered for marker in secret_markers):
+            return "[REDACTED]"
+        if isinstance(value, dict):
+            return {
+                item_key: self._sanitize_config_value(item_value, item_key)
+                for item_key, item_value in value.items()
+            }
+        if isinstance(value, list):
+            return [self._sanitize_config_value(item, key) for item in value]
+        return value
 
     # -- Dashboard action helpers ---------------------------------------------
 
@@ -1905,6 +2205,11 @@ class NeuralClawGateway:
             return False
         setattr(feat, feature, value)
         return True
+
+    def _dashboard_reset_provider_circuit(self, name: str) -> bool:
+        if not self._provider:
+            return False
+        return self._provider.reset_circuit(name)
 
     async def _handle_federation_message(self, content: str, from_name: str) -> str:
         """Process an incoming federation message through the cognitive pipeline."""
@@ -1969,6 +2274,142 @@ class NeuralClawGateway:
             except Exception:
                 pass
             await asyncio.sleep(interval)
+
+    def _setup_signal_handlers(self) -> None:
+        """Catch SIGTERM / SIGINT for clean shutdown."""
+        loop = asyncio.get_running_loop()
+
+        def _handle_signal(sig: int) -> None:
+            self._logger.info("Received signal %s - initiating graceful shutdown", sig)
+            if not self._shutdown_task or self._shutdown_task.done():
+                self._shutdown_task = asyncio.create_task(self._graceful_shutdown())
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, _handle_signal, sig)
+            except NotImplementedError:
+                pass
+
+    async def _graceful_shutdown(self) -> None:
+        """Ordered shutdown for in-flight requests and adapters."""
+        if not self._running:
+            return
+        try:
+            await asyncio.wait_for(self.stop(), timeout=30.0)
+        except asyncio.TimeoutError:
+            self._logger.warning("Graceful shutdown timed out after 30s")
+
+    async def _gc_loop(self) -> None:
+        """Periodic GC to guard memory growth on long-lived deployments."""
+        while self._running:
+            await asyncio.sleep(600)
+            pruned_windows = self._rate_limiter.prune_windows() if self._rate_limiter else 0
+            collected = gc.collect()
+            rss_bytes = self._traceline._get_process_rss_bytes() if self._traceline else 0
+            await self._bus.publish(
+                EventType.INFO,
+                {
+                    "event": "gc_collect",
+                    "collected": collected,
+                    "pruned_rate_limit_windows": pruned_windows,
+                    "rss_bytes": rss_bytes,
+                },
+                source="gateway",
+            )
+
+    async def _watch_config(self) -> None:
+        """Hot-reload non-destructive config changes in dev mode."""
+        if not self._config_path:
+            return
+        try:
+            from pathlib import Path
+
+            path = Path(self._config_path)
+            try:
+                from watchfiles import awatch
+
+                async for _changes in awatch(path):
+                    if not self._running:
+                        break
+                    self._logger.info("Config changed - reloading non-secret settings")
+                    try:
+                        new_config = load_config(path)
+                        self._apply_hot_config(new_config)
+                        self._logger.info("Config reloaded successfully")
+                    except Exception as exc:
+                        self._logger.error("Config reload failed: %s - keeping current config", exc)
+            except ImportError:
+                last_mtime = path.stat().st_mtime if path.exists() else 0.0
+                while self._running:
+                    await asyncio.sleep(1.0)
+                    if not path.exists():
+                        continue
+                    mtime = path.stat().st_mtime
+                    if mtime <= last_mtime:
+                        continue
+                    last_mtime = mtime
+                    self._logger.info("Config changed - reloading non-secret settings")
+                    try:
+                        new_config = load_config(path)
+                        self._apply_hot_config(new_config)
+                        self._logger.info("Config reloaded successfully")
+                    except Exception as exc:
+                        self._logger.error("Config reload failed: %s - keeping current config", exc)
+        except Exception as exc:
+            self._logger.error("Config watch loop failed: %s", exc)
+
+    def _apply_hot_config(self, new_config: NeuralClawConfig) -> None:
+        """Apply non-destructive config changes without restart."""
+        self._config.log_level = new_config.log_level
+        self._config.persona = new_config.persona
+        self._config.policy.allowed_tools = list(new_config.policy.allowed_tools)
+        self._config.security.threat_threshold = new_config.security.threat_threshold
+
+    async def _run_startup_readiness(self) -> None:
+        state = await self._health.run_readiness_check()
+        self._startup_readiness = state
+        for result in self._health.get_readiness_results():
+            self._logger.info(
+                "Readiness probe %s required=%s ok=%s %s",
+                result.name,
+                result.required,
+                result.ok,
+                result.detail,
+            )
+        if state not in (ReadinessState.READY, ReadinessState.DEGRADED):
+            raise ProviderError(
+                "Gateway readiness checks failed.\n\n"
+                "Required subsystems did not initialize cleanly.\n"
+                "Run neuralclaw doctor for a full diagnostic."
+            )
+        self._ready_at = time.time()
+
+    def _get_health_payload(self) -> dict[str, Any]:
+        probes = {
+            item.name: {
+                "required": item.required,
+                "ok": item.ok,
+                "detail": item.detail,
+            }
+            for item in self._health.get_readiness_results()
+        }
+        status = "healthy" if self._startup_readiness in (ReadinessState.READY, ReadinessState.DEGRADED) else "unhealthy"
+        return {"status": status, "readiness": self._startup_readiness.value, "probes": probes}
+
+    def _get_ready_payload(self) -> dict[str, Any]:
+        return {"status": self._startup_readiness.value}
+
+    async def _get_metrics_payload(self) -> str:
+        lines: list[str] = []
+        if self._traceline:
+            lines.append(await self._traceline.export_prometheus())
+        if self._episodic:
+            lines.append(
+                "# HELP neuralclaw_memory_episodes_total Episodes in episodic memory\n"
+                "# TYPE neuralclaw_memory_episodes_total gauge\n"
+                f"neuralclaw_memory_episodes_total {await self._episodic.count()}\n"
+            )
+        return "".join(lines).strip() + "\n"
 
     async def run_forever(self) -> None:
         """Run the gateway until interrupted."""

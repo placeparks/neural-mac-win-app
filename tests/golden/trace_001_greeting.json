@@ -1,0 +1,18 @@
+{
+  "description": "Greeting from new user",
+  "input": {
+    "content": "Hello there!",
+    "author_id": "new_user_001",
+    "author_name": "New User",
+    "channel_id": "telegram"
+  },
+  "expected": {
+    "reasoning_path": "fast_path",
+    "response": "Hello there. I can help with questions, research, and coding tasks.",
+    "response_contains": ["hello", "help"],
+    "response_excludes": ["error", "sorry"],
+    "threat_score_max": 0.1,
+    "tool_calls": 0,
+    "duration_ms_max": 500
+  }
+}

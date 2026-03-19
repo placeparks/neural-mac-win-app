@@ -1,0 +1,44 @@
+version: "3.9"
+
+services:
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: neuralclaw-orchestrator
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "8100:8100"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - orchestrator-data:/root/.neuralclaw
+    command: ["neuralclaw", "gateway", "--watchdog", "--name", "orchestrator"]
+
+  worker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: neuralclaw-worker-1
+    restart: unless-stopped
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - worker-1-data:/root/.neuralclaw
+    command:
+      [
+        "neuralclaw",
+        "gateway",
+        "--watchdog",
+        "--name",
+        "worker-1",
+        "--seed",
+        "http://orchestrator:8100"
+      ]
+    depends_on:
+      - orchestrator
+
+volumes:
+  orchestrator-data:
+  worker-1-data:

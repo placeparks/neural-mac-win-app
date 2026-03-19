@@ -638,6 +638,15 @@ class Dashboard:
         self._federation_provider: Any = None
         self._memory_provider: Any = None
         self._bus_provider: Any = None
+        self._health_provider: Any = None
+        self._ready_provider: Any = None
+        self._metrics_provider: Any = None
+        self._metrics_json_provider: Any = None
+        self._trace_list_provider: Any = None
+        self._trace_detail_provider: Any = None
+        self._config_provider: Any = None
+        self._skills_provider: Any = None
+        self._swarm_provider: Any = None
 
         # Action callables
         self._spawn_action: Any = None
@@ -648,6 +657,7 @@ class Dashboard:
         self._get_features_action: Any = None
         self._set_feature_action: Any = None
         self._message_peer_action: Any = None
+        self._provider_reset_action: Any = None
 
     # -- Data provider setters --
 
@@ -665,6 +675,31 @@ class Dashboard:
 
     def set_bus_provider(self, provider: Any) -> None:
         self._bus_provider = provider
+
+    def set_health_provider(self, provider: Any) -> None:
+        self._health_provider = provider
+
+    def set_ready_provider(self, provider: Any) -> None:
+        self._ready_provider = provider
+
+    def set_metrics_provider(self, provider: Any) -> None:
+        self._metrics_provider = provider
+
+    def set_metrics_json_provider(self, provider: Any) -> None:
+        self._metrics_json_provider = provider
+
+    def set_trace_providers(self, list_provider: Any, detail_provider: Any) -> None:
+        self._trace_list_provider = list_provider
+        self._trace_detail_provider = detail_provider
+
+    def set_config_provider(self, provider: Any) -> None:
+        self._config_provider = provider
+
+    def set_skills_provider(self, provider: Any) -> None:
+        self._skills_provider = provider
+
+    def set_swarm_provider(self, provider: Any) -> None:
+        self._swarm_provider = provider
 
     # -- Action setters --
 
@@ -689,6 +724,9 @@ class Dashboard:
 
     def set_message_peer_action(self, action: Any) -> None:
         self._message_peer_action = action
+
+    def set_provider_reset_action(self, action: Any) -> None:
+        self._provider_reset_action = action
 
     # -- Trace push --
 
@@ -722,7 +760,16 @@ class Dashboard:
         self._app.router.add_get("/api/memory", self._handle_memory)
         self._app.router.add_get("/api/bus", self._handle_bus)
         self._app.router.add_get("/api/features", self._handle_get_features)
+        self._app.router.add_get("/traces", self._handle_trace_list)
+        self._app.router.add_get("/traces/{trace_id}", self._handle_trace_detail)
+        self._app.router.add_get("/health", self._handle_health)
+        self._app.router.add_get("/ready", self._handle_ready)
+        self._app.router.add_get("/metrics", self._handle_metrics)
+        self._app.router.add_get("/config", self._handle_config)
+        self._app.router.add_get("/skills", self._handle_skills)
+        self._app.router.add_get("/swarm", self._handle_swarm)
         self._app.router.add_get("/ws/traces", self._handle_ws)
+        self._app.router.add_get("/ws", self._handle_ws)
         # POST routes
         self._app.router.add_post("/api/spawn", self._handle_spawn)
         self._app.router.add_post("/api/despawn", self._handle_despawn)
@@ -731,6 +778,7 @@ class Dashboard:
         self._app.router.add_post("/api/memory/clear", self._handle_memory_clear)
         self._app.router.add_post("/api/features", self._handle_set_feature)
         self._app.router.add_post("/api/federation/message", self._handle_message_peer)
+        self._app.router.add_post("/api/provider/reset-circuit", self._handle_provider_reset)
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -789,6 +837,67 @@ class Dashboard:
     async def _handle_get_features(self, request: Any) -> Any:
         features = self._get_features_action() if self._get_features_action else {}
         return web.json_response(features)
+
+    async def _handle_trace_list(self, request: Any) -> Any:
+        limit = int(request.query.get("limit", "50"))
+        data = self._trace_list_provider(limit) if self._trace_list_provider else self._traces[-limit:]
+        if asyncio.iscoroutine(data):
+            data = await data
+        return web.json_response(data)
+
+    async def _handle_trace_detail(self, request: Any) -> Any:
+        trace_id = str(request.match_info.get("trace_id", "")).strip()
+        if not trace_id:
+            return web.json_response({"error": "trace_id required"}, status=400)
+        data = self._trace_detail_provider(trace_id) if self._trace_detail_provider else None
+        if asyncio.iscoroutine(data):
+            data = await data
+        if not data:
+            return web.json_response({"error": "trace not found"}, status=404)
+        return web.json_response(data)
+
+    async def _handle_health(self, request: Any) -> Any:
+        payload = self._health_provider() if self._health_provider else {"status": "unhealthy"}
+        status = 200 if payload.get("status") == "healthy" else 503
+        return web.json_response(payload, status=status)
+
+    async def _handle_ready(self, request: Any) -> Any:
+        payload = self._ready_provider() if self._ready_provider else {"status": "starting"}
+        status = 200 if payload.get("status") in {"ready", "degraded"} else 503
+        return web.json_response(payload, status=status)
+
+    async def _handle_metrics(self, request: Any) -> Any:
+        accept = str(request.headers.get("Accept", "")).lower()
+        wants_json = request.query.get("format") == "json" or "application/json" in accept
+        if wants_json and self._metrics_json_provider:
+            payload = self._metrics_json_provider()
+            if asyncio.iscoroutine(payload):
+                payload = await payload
+            return web.json_response(payload)
+        payload = ""
+        if self._metrics_provider:
+            payload = self._metrics_provider()
+            if asyncio.iscoroutine(payload):
+                payload = await payload
+        return web.Response(text=str(payload), content_type="text/plain")
+
+    async def _handle_config(self, request: Any) -> Any:
+        payload = self._config_provider() if self._config_provider else {}
+        if asyncio.iscoroutine(payload):
+            payload = await payload
+        return web.json_response(payload)
+
+    async def _handle_skills(self, request: Any) -> Any:
+        payload = self._skills_provider() if self._skills_provider else []
+        if asyncio.iscoroutine(payload):
+            payload = await payload
+        return web.json_response(payload)
+
+    async def _handle_swarm(self, request: Any) -> Any:
+        payload = self._swarm_provider() if self._swarm_provider else []
+        if asyncio.iscoroutine(payload):
+            payload = await payload
+        return web.json_response(payload)
 
     # -- POST handlers --
 
@@ -891,6 +1000,21 @@ class Dashboard:
             if asyncio.iscoroutine(result):
                 result = await result
             return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_provider_reset(self, request: Any) -> Any:
+        if not self._provider_reset_action:
+            return web.json_response({"ok": False, "error": "Provider control not available"}, status=503)
+        try:
+            body = await request.json()
+            name = str(body.get("name", "")).strip()
+            if not name:
+                return web.json_response({"ok": False, "error": "name required"}, status=400)
+            ok = self._provider_reset_action(name)
+            if asyncio.iscoroutine(ok):
+                ok = await ok
+            return web.json_response({"ok": bool(ok)})
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
 

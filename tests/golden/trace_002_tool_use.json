@@ -1,0 +1,18 @@
+{
+  "description": "Tool-oriented request",
+  "input": {
+    "content": "Search for the latest AI agent headlines.",
+    "author_id": "user_tool",
+    "author_name": "Tool User",
+    "channel_id": "telegram"
+  },
+  "expected": {
+    "reasoning_path": "deliberative",
+    "response": "I can search recent AI agent headlines and summarize the key points.",
+    "response_contains": ["search", "summarize"],
+    "response_excludes": ["error"],
+    "threat_score_max": 0.2,
+    "tool_calls": 1,
+    "duration_ms_max": 1200
+  }
+}

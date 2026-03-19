@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -15,6 +16,7 @@ import aiosqlite
 
 from neuralclaw.bus.neural_bus import Event, EventType, NeuralBus
 from neuralclaw.config import TracelineConfig
+from neuralclaw.cortex.memory.db import DBPool
 
 
 @dataclass
@@ -58,17 +60,28 @@ class Traceline:
         db_path: str,
         bus: NeuralBus,
         config: TracelineConfig | None = None,
+        db_pool: DBPool | None = None,
     ) -> None:
         self._db_path = db_path
         self._bus = bus
         self._config = config or TracelineConfig(db_path=db_path)
-        self._db: aiosqlite.Connection | None = None
+        self._db: aiosqlite.Connection | DBPool | None = None
+        self._db_pool = db_pool
+        self._owns_db = db_pool is None
         self._lock = asyncio.Lock()
         self._partial: dict[str, ReasoningTrace] = {}
+        self._request_total = 0
+        self._threat_blocks_total: dict[str, int] = {}
+        self._tool_calls_total: dict[str, int] = {}
+        self._circuit_states: dict[str, int] = {}
 
     async def initialize(self) -> None:
-        self._db = await aiosqlite.connect(self._db_path)
-        await self._db.execute("PRAGMA journal_mode=WAL")
+        if self._db_pool:
+            await self._db_pool.initialize()
+            self._db = self._db_pool
+        else:
+            self._db = await aiosqlite.connect(self._db_path)
+            await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute(
             """
             CREATE TABLE IF NOT EXISTS traces (
@@ -101,10 +114,11 @@ class Traceline:
         self._bus.subscribe_all(self.handle_event)
 
     async def close(self) -> None:
-        if self._db:
+        self._bus.unsubscribe_all(self.handle_event)
+        if self._db and self._owns_db:
             await self._db.commit()
             await self._db.close()
-            self._db = None
+        self._db = None
 
     async def handle_event(self, event: Event) -> None:
         request_id = self._request_id_for(event)
@@ -144,6 +158,8 @@ class Traceline:
                 self._on_action_executing(trace, event)
             elif event.type == EventType.ACTION_COMPLETE:
                 self._on_action_complete(trace, event)
+            elif event.type == EventType.INFO:
+                self._on_info(event)
             elif event.type == EventType.ERROR:
                 self._on_error(trace, event)
             elif event.type == EventType.RESPONSE_READY:
@@ -248,6 +264,58 @@ class Traceline:
         await self._db.commit()
         return count
 
+    async def export_prometheus(self) -> str:
+        """Render metrics in Prometheus text exposition format."""
+        traces = await self.query_traces(limit=100000)
+        duration_lines = []
+        durations = [trace.duration_ms for trace in traces if trace.duration_ms > 0]
+        buckets = [100, 500, 2000]
+        for bucket in buckets:
+            count = sum(1 for value in durations if value <= bucket)
+            duration_lines.append(
+                f'neuralclaw_request_duration_ms_bucket{{le="{bucket}"}} {count}'
+            )
+        duration_lines.append(
+            f'neuralclaw_request_duration_ms_bucket{{le="+Inf"}} {len(durations)}'
+        )
+
+        requests_total = max(self._request_total, len(traces))
+        tool_lines = [
+            f'neuralclaw_tool_calls_total{{tool="{tool}"}} {count}'
+            for tool, count in sorted(self._tool_calls_total.items())
+        ]
+        threat_lines = [
+            f'neuralclaw_threat_blocks_total{{reason="{reason}"}} {count}'
+            for reason, count in sorted(self._threat_blocks_total.items())
+        ]
+        circuit_lines = [
+            f'neuralclaw_circuit_state{{provider="{provider}"}} {state}'
+            for provider, state in sorted(self._circuit_states.items())
+        ]
+
+        return "\n".join(
+            [
+                "# HELP neuralclaw_requests_total Total requests processed",
+                "# TYPE neuralclaw_requests_total counter",
+                f"neuralclaw_requests_total {requests_total}",
+                "# HELP neuralclaw_request_duration_ms Request duration in milliseconds",
+                "# TYPE neuralclaw_request_duration_ms histogram",
+                *duration_lines,
+                "# HELP neuralclaw_threat_blocks_total Requests blocked by threat screener",
+                "# TYPE neuralclaw_threat_blocks_total counter",
+                *(threat_lines or ["neuralclaw_threat_blocks_total{reason=\"none\"} 0"]),
+                "# HELP neuralclaw_tool_calls_total Tool calls made",
+                "# TYPE neuralclaw_tool_calls_total counter",
+                *(tool_lines or ["neuralclaw_tool_calls_total{tool=\"none\"} 0"]),
+                "# HELP neuralclaw_circuit_state Circuit breaker state (0=closed, 1=open, 2=half_open)",
+                "# TYPE neuralclaw_circuit_state gauge",
+                *(circuit_lines or ["neuralclaw_circuit_state{provider=\"none\"} 0"]),
+                "# HELP neuralclaw_process_memory_rss_bytes Process RSS memory usage",
+                "# TYPE neuralclaw_process_memory_rss_bytes gauge",
+                f"neuralclaw_process_memory_rss_bytes {self._get_process_rss_bytes()}",
+            ]
+        ) + "\n"
+
     def _on_signal_received(self, trace: ReasoningTrace, event: Event) -> None:
         data = event.data
         trace.user_id = str(data.get("author_id", trace.user_id) or trace.user_id)
@@ -267,9 +335,12 @@ class Traceline:
 
     def _on_action_executing(self, trace: ReasoningTrace, event: Event) -> None:
         data = event.data
+        tool_name = str(data.get("skill", ""))
+        if tool_name:
+            self._tool_calls_total[tool_name] = self._tool_calls_total.get(tool_name, 0) + 1
         trace.tool_calls.append(
             ToolCallTrace(
-                tool=str(data.get("skill", "")),
+                tool=tool_name,
                 args_preview=str(data.get("args", ""))[:200],
                 success=True,
             )
@@ -290,6 +361,7 @@ class Traceline:
 
     def _on_response_ready(self, trace: ReasoningTrace, event: Event) -> None:
         data = event.data
+        self._request_total += 1
         trace.user_id = str(data.get("user_id", trace.user_id) or trace.user_id)
         trace.channel = str(data.get("channel_id", trace.channel) or trace.channel)
         trace.platform = str(data.get("platform", trace.platform) or trace.platform)
@@ -297,6 +369,16 @@ class Traceline:
         if self._config.include_output:
             trace.output_preview = str(data.get("content", ""))[: self._config.max_preview_chars]
         trace.tags = [tag for tag in [trace.platform, trace.reasoning_path] if tag]
+
+    def _on_info(self, event: Event) -> None:
+        data = event.data
+        if data.get("circuit"):
+            state = str(data.get("state", "closed"))
+            state_map = {"closed": 0, "open": 1, "half_open": 2}
+            self._circuit_states[str(data["circuit"])] = state_map.get(state, 0)
+        if data.get("event") == "threat_blocked":
+            reason = str(data.get("reason", "unknown"))
+            self._threat_blocks_total[reason] = self._threat_blocks_total.get(reason, 0) + 1
 
     async def _persist_trace(self, trace: ReasoningTrace) -> None:
         assert self._db is not None
@@ -331,6 +413,17 @@ class Traceline:
             ),
         )
         await self._db.commit()
+
+    def _get_process_rss_bytes(self) -> int:
+        try:
+            import resource
+
+            rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            if os.name == "posix" and rss < 10_000_000:
+                return int(rss * 1024)
+            return int(rss)
+        except Exception:
+            return 0
 
     def _request_id_for(self, event: Event) -> str:
         data = event.data or {}

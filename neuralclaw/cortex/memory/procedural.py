@@ -18,6 +18,7 @@ from typing import Any
 import aiosqlite
 
 from neuralclaw.bus.neural_bus import EventType, NeuralBus
+from neuralclaw.cortex.memory.db import DBPool
 
 
 # ---------------------------------------------------------------------------
@@ -68,13 +69,24 @@ class ProceduralMemory:
     step sequences, and success tracking for continuous improvement.
     """
 
-    def __init__(self, db_path: str, bus: NeuralBus | None = None) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        bus: NeuralBus | None = None,
+        db_pool: DBPool | None = None,
+    ) -> None:
         self._db_path = db_path
         self._bus = bus
-        self._db: aiosqlite.Connection | None = None
+        self._db: aiosqlite.Connection | DBPool | None = None
+        self._db_pool = db_pool
+        self._owns_db = db_pool is None
 
     async def initialize(self) -> None:
-        self._db = await aiosqlite.connect(self._db_path)
+        if self._db_pool:
+            await self._db_pool.initialize()
+            self._db = self._db_pool
+        else:
+            self._db = await aiosqlite.connect(self._db_path)
         await self._db.executescript("""
             CREATE TABLE IF NOT EXISTS procedures (
                 id TEXT PRIMARY KEY,
@@ -94,8 +106,9 @@ class ProceduralMemory:
         await self._db.commit()
 
     async def close(self) -> None:
-        if self._db:
+        if self._db and self._owns_db:
             await self._db.close()
+        self._db = None
 
     async def store_procedure(
         self,

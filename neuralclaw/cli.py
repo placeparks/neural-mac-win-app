@@ -11,8 +11,11 @@ Commands:
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import click
@@ -243,18 +246,24 @@ def init() -> None:
         "(openai, anthropic, openrouter, proxy, chatgpt_app, claude_app, local)"
     ),
 )
-def chat(provider: str | None) -> None:
+@click.option("--dev", is_flag=True, default=False, help="Enable developer mode.")
+def chat(provider: str | None, dev: bool) -> None:
     """Interactive terminal chat session with optional provider override."""
     console.print(BANNER)
-    asyncio.run(_chat_loop(provider))
+    asyncio.run(_chat_loop(provider, dev_mode=dev))
 
 
-async def _chat_loop(provider_override: str | None = None) -> None:
+async def _chat_loop(provider_override: str | None = None, dev_mode: bool = False) -> None:
     """Main interactive chat loop."""
     from neuralclaw.gateway import NeuralClawGateway
 
     config = load_config()
-    gateway = NeuralClawGateway(config, provider_override=provider_override)
+    gateway = NeuralClawGateway(
+        config,
+        provider_override=provider_override,
+        dev_mode=dev_mode,
+        config_path=str(CONFIG_FILE),
+    )
     await gateway.initialize()
 
     provider_name = gateway._provider.name if gateway._provider else "none"
@@ -418,6 +427,17 @@ def _parse_since_value(value: str | None) -> float | None:
     if raw.endswith("m"):
         return time.time() - (float(raw[:-1]) * 60)
     return float(raw)
+
+
+def _http_probe(url: str) -> tuple[str, str]:
+    """Best-effort local HTTP probe for status surfaces."""
+    try:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            status = str(response.status)
+            body = response.read(200).decode("utf-8", errors="replace").strip()
+            return status, body[:120] or "ok"
+    except Exception as exc:
+        return "down", str(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -1395,19 +1415,64 @@ def _build_session_runtime(provider_key: str):
 
 @main.command()
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
-def doctor(json_output: bool) -> None:
+@click.option("--fix", is_flag=True, help="Apply repairable fixes before reporting.")
+def doctor(json_output: bool, fix: bool) -> None:
     """Diagnose all subsystems — config, providers, channels, memory, bus."""
     console.print(BANNER)
-    console.print(Panel("NeuralClaw Doctor", style="bold cyan"))
+    console.print(Panel("NeuralClaw Doctor v0.8.0", style="bold cyan"))
+
+    import platform as _platform
+    import shutil as _shutil
+    from pathlib import Path as _Path
 
     try:
         config = load_config()
     except Exception:
         config = None
 
-    from neuralclaw.health import HealthChecker, CheckStatus
+    from neuralclaw.health import HealthChecker, CheckStatus, RepairEngine
+    from neuralclaw.service import service_status
+
+    fixes: list[str] = []
+    if fix:
+        engine = RepairEngine(config)
+        fixes = engine.run_all()
+        try:
+            config = load_config()
+        except Exception:
+            config = None
+
     checker = HealthChecker(config)
     report = checker.run_all()
+
+    system_checks: list[dict[str, str]] = []
+    disk_target = _Path.home() / ".neuralclaw"
+    disk = _shutil.disk_usage(disk_target if disk_target.exists() else _Path.home())
+    system_checks.append({"name": "Python", "status": "OK", "message": sys.version.split()[0]})
+    system_checks.append({"name": "Platform", "status": "OK", "message": f"{_platform.system()} ({_platform.machine() or 'unknown'})"})
+    system_checks.append({"name": "Disk", "status": "OK", "message": f"{disk.free // (1024**3)} GB free at {disk_target}"})
+    system_checks.append({
+        "name": "sqlite-vec",
+        "status": "OK" if config and config.memory.vector_memory else "WARN",
+        "message": "Vector memory enabled" if config and config.memory.vector_memory else "Vector memory disabled",
+    })
+
+    section_map: dict[str, list] = {
+        "system": system_checks,
+        "config": [c for c in report.checks if c.name.startswith("Config") or c.name == "Config dir"],
+        "providers": [c for c in report.checks if c.name.startswith("Provider")],
+        "memory": [c for c in report.checks if "Memory DB" in c.name or c.name == "Data dir"],
+        "channels": [c for c in report.checks if c.name.startswith("Channel")],
+        "security": [
+            {"name": "Threat screener", "status": "OK", "message": "Initialized" if config else "Config unavailable"},
+            {"name": "Output filter", "status": "OK" if config and config.security.output_filtering else "WARN", "message": "Enabled" if config and config.security.output_filtering else "Disabled"},
+            {"name": "Canary tokens", "status": "OK" if config and config.security.canary_tokens else "WARN", "message": "Active" if config and config.security.canary_tokens else "Disabled"},
+            {"name": "Audit logging", "status": "OK" if config and config.audit.enabled else "WARN", "message": "Active" if config and config.audit.enabled else "Disabled"},
+        ],
+        "services": [
+            {"name": "Service", "status": "OK" if service_status() == "running" else "WARN", "message": service_status()}
+        ],
+    }
 
     if json_output:
         import json
@@ -1416,6 +1481,8 @@ def doctor(json_output: bool) -> None:
             "ok": report.ok_count,
             "warnings": report.warn_count,
             "failures": report.fail_count,
+            "fixes": fixes,
+            "sections": section_map,
             "checks": [
                 {"name": c.name, "status": c.status.name, "message": c.message, "repairable": c.repairable}
                 for c in report.checks
@@ -1424,35 +1491,48 @@ def doctor(json_output: bool) -> None:
         console.print_json(json.dumps(data))
         return
 
-    table = Table(title="Diagnostic Results", style="cyan")
-    table.add_column("Check", style="bold")
-    table.add_column("Status")
-    table.add_column("Details")
-    table.add_column("Fix")
-
     status_style = {
         CheckStatus.OK: "[green]OK[/green]",
         CheckStatus.WARN: "[yellow]WARN[/yellow]",
         CheckStatus.FAIL: "[red]FAIL[/red]",
         CheckStatus.SKIP: "[dim]SKIP[/dim]",
     }
+    icon_map = {"OK": "✓", "WARN": "⚠", "FAIL": "✗", "SKIP": "·"}
 
-    for check in report.checks:
-        table.add_row(
-            check.name,
-            status_style[check.status],
-            check.message,
-            check.repair_action if check.repairable else "",
-        )
+    def _render_section(title: str, items: list) -> None:
+        console.print(f"\n[bold]{title}[/bold]")
+        for item in items:
+            if isinstance(item, dict):
+                status = item["status"]
+                style = {"OK": "green", "WARN": "yellow", "FAIL": "red", "SKIP": "dim"}.get(status, "dim")
+                console.print(f"  [{style}]{icon_map.get(status, '·')}[/{style}] {item['name']} — {item['message']}")
+            else:
+                console.print(
+                    f"  {status_style[item.status]} {item.name} — {item.message}"
+                    + (f"\n    [dim]→ {item.repair_action}[/dim]" if item.repairable and item.repair_action else "")
+                )
 
-    console.print(table)
+    for title, items in [
+        ("System", section_map["system"]),
+        ("Config", section_map["config"]),
+        ("Providers", section_map["providers"]),
+        ("Memory", section_map["memory"]),
+        ("Channels", section_map["channels"]),
+        ("Security", section_map["security"]),
+        ("Services", section_map["services"]),
+    ]:
+        _render_section(title, items)
 
-    if report.healthy:
-        console.print("\n[bold green]All checks passed.[/bold green]\n")
-    else:
-        console.print(f"\n[bold red]{report.fail_count} issue(s) found.[/bold red]")
-        if report.repairable:
-            console.print("[dim]Run [cyan]neuralclaw repair[/cyan] to fix automatically.[/dim]\n")
+    if fixes:
+        console.print("\n[bold]Auto-fix[/bold]")
+        for item in fixes:
+            console.print(f"  [green]✓[/green] {item}")
+
+    summary_style = "green" if report.healthy else "red"
+    console.print(
+        f"\n[bold {summary_style}]Summary:[/bold {summary_style}] "
+        f"{report.warn_count} warnings, {report.fail_count} errors"
+    )
 
 
 @main.command()
@@ -1510,10 +1590,11 @@ def repair(dry_run: bool, backup: bool) -> None:
 @click.option("--web-port", default=None, type=int, help="Override web chat port.")
 @click.option("--name", default=None, help="Override node name.")
 @click.option("--seed", default=None, help="Seed node to join (e.g. http://localhost:8100).")
+@click.option("--dev", is_flag=True, default=False, help="Enable developer mode with hot config reload.")
 @click.option("--watchdog", is_flag=True, default=False, help="Auto-restart on crash (keeps gateway alive forever).")
 @click.option("--max-restarts", default=0, type=int, help="Max restarts before giving up (0=unlimited, default=0).")
 @click.option("--restart-delay", default=5, type=int, help="Seconds to wait before restart (default=5).")
-def gateway(federation_port, dashboard_port, web_port, name, seed, watchdog, max_restarts, restart_delay) -> None:
+def gateway(federation_port, dashboard_port, web_port, name, seed, dev, watchdog, max_restarts, restart_delay) -> None:
     """Start the full agent with all configured channels.
 
     Use --watchdog to keep the gateway running forever with automatic crash recovery.
@@ -1527,6 +1608,7 @@ def gateway(federation_port, dashboard_port, web_port, name, seed, watchdog, max
             web_port=web_port,
             node_name=name,
             seed_node=seed,
+            dev_mode=dev,
             max_restarts=max_restarts,
             restart_delay=restart_delay,
         )
@@ -1537,6 +1619,7 @@ def gateway(federation_port, dashboard_port, web_port, name, seed, watchdog, max
             web_port=web_port,
             node_name=name,
             seed_node=seed,
+            dev_mode=dev,
         ))
 
 
@@ -1546,6 +1629,7 @@ def _run_watchdog(
     web_port: int | None = None,
     node_name: str | None = None,
     seed_node: str | None = None,
+    dev_mode: bool = False,
     max_restarts: int = 0,
     restart_delay: int = 5,
 ) -> None:
@@ -1574,6 +1658,7 @@ def _run_watchdog(
             web_port=web_port,
             node_name=node_name,
             seed_node=seed_node,
+            dev_mode=dev_mode,
         )
 
     _svc._run_gateway_async = _patched  # type: ignore[assignment]
@@ -1589,6 +1674,7 @@ async def _run_gateway(
     web_port: int | None = None,
     node_name: str | None = None,
     seed_node: str | None = None,
+    dev_mode: bool = False,
 ) -> None:
     """Run the full gateway with channels."""
     from neuralclaw.gateway import NeuralClawGateway
@@ -1606,7 +1692,7 @@ async def _run_gateway(
         if seed_node not in config.federation.seed_nodes:
             config.federation.seed_nodes.append(seed_node)
 
-    gw = NeuralClawGateway(config)
+    gw = NeuralClawGateway(config, dev_mode=dev_mode, config_path=str(CONFIG_FILE))
     gw.build_channels(web_port=web_port or 8081)
 
     try:
@@ -1677,6 +1763,7 @@ def status() -> None:
     console.print(BANNER)
 
     config = load_config()
+    from neuralclaw.service import service_status
 
     table = Table(title="NeuralClaw Configuration", style="cyan")
     table.add_column("Setting", style="bold")
@@ -1685,6 +1772,7 @@ def status() -> None:
     table.add_row("Config File", str(CONFIG_FILE))
     table.add_row("Name", config.name)
     table.add_row("Log Level", config.log_level)
+    table.add_row("Service", service_status())
 
     # Providers
     providers = ["openai", "anthropic", "openrouter", "chatgpt_app", "claude_app", "proxy", "local"]
@@ -1713,6 +1801,14 @@ def status() -> None:
     table.add_row("Shell Execution", "allowed" if config.security.allow_shell_execution else "denied")
 
     console.print(table)
+    live_table = Table(title="Runtime Endpoints", style="green")
+    live_table.add_column("Endpoint", style="bold")
+    live_table.add_column("Status")
+    live_table.add_column("Details")
+    for route in ("health", "ready", "metrics"):
+        status_code, detail = _http_probe(f"http://127.0.0.1:{config.dashboard_port}/{route}")
+        live_table.add_row(route, status_code, detail)
+    console.print(live_table)
     console.print()
 
 
@@ -1872,6 +1968,149 @@ async def _audit_stats() -> None:
     table.add_row("Top tools", ", ".join(f"{name} ({count})" for name, count in stats["top_tools"]) or "—")
     table.add_row("Top users", ", ".join(f"{name} ({count})" for name, count in stats["top_users"]) or "—")
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Memory command group
+# ---------------------------------------------------------------------------
+
+@main.group(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
+)
+def memory() -> None:
+    """Inspect and maintain memory stores."""
+    pass
+
+
+@memory.command("prune")
+@click.option("--keep-days", default=30, type=int, show_default=True, help="Retain this many days of episodic memory.")
+def memory_prune(keep_days: int) -> None:
+    """Prune old episodic memory entries."""
+    asyncio.run(_memory_prune(keep_days))
+
+
+async def _memory_prune(keep_days: int) -> None:
+    from neuralclaw.cortex.memory.episodic import EpisodicMemory
+
+    config = load_config()
+    memory = EpisodicMemory(config.memory.db_path)
+    await memory.initialize()
+    deleted = await memory.prune(keep_days=keep_days)
+    await memory.close()
+    console.print(f"[green]Pruned[/green] {deleted} episodic memories older than {keep_days} days.")
+
+
+# ---------------------------------------------------------------------------
+# Traces command group
+# ---------------------------------------------------------------------------
+
+@main.group(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
+)
+def traces() -> None:
+    """Inspect and maintain reasoning traces."""
+    pass
+
+
+@traces.command("list")
+@click.option("--since", default=None, help="Only include traces newer than e.g. 7d, 12h, 30m.")
+@click.option("--limit", default=20, type=int, show_default=True, help="Maximum traces to show.")
+def traces_list(since: str | None, limit: int) -> None:
+    """List recent traces."""
+    asyncio.run(_traces_list(since=since, limit=limit))
+
+
+async def _traces_list(since: str | None, limit: int) -> None:
+    from neuralclaw.bus.neural_bus import NeuralBus
+    from neuralclaw.cortex.observability.traceline import Traceline
+
+    config = load_config()
+    traceline = Traceline(config.traceline.db_path, NeuralBus(), config=config.traceline)
+    await traceline.initialize()
+    try:
+        results = await traceline.query_traces(since=_parse_since_value(since), limit=limit)
+    finally:
+        await traceline.close()
+
+    table = Table(title="Recent Traces", style="cyan")
+    table.add_column("Time", style="bold")
+    table.add_column("Trace")
+    table.add_column("User")
+    table.add_column("Path")
+    table.add_column("Threat")
+    table.add_column("Preview")
+    for trace in results:
+        table.add_row(
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(trace.timestamp)),
+            trace.trace_id,
+            trace.user_id or "—",
+            trace.reasoning_path or "—",
+            f"{trace.threat_score:.2f}",
+            (trace.output_preview or trace.input_preview or "—")[:80],
+        )
+    console.print(table if results else "[dim]No traces matched the filters.[/dim]")
+
+
+@traces.command("prune")
+@click.option("--keep-days", default=14, type=int, show_default=True, help="Retain this many days of traces.")
+def traces_prune(keep_days: int) -> None:
+    """Prune old reasoning traces."""
+    asyncio.run(_traces_prune(keep_days))
+
+
+async def _traces_prune(keep_days: int) -> None:
+    from neuralclaw.bus.neural_bus import NeuralBus
+    from neuralclaw.cortex.observability.traceline import Traceline
+
+    config = load_config()
+    traceline = Traceline(config.traceline.db_path, NeuralBus(), config=config.traceline)
+    await traceline.initialize()
+    try:
+        deleted = await traceline.prune(keep_days=keep_days)
+    finally:
+        await traceline.close()
+    console.print(f"[green]Pruned[/green] {deleted} traces older than {keep_days} days.")
+
+
+# ---------------------------------------------------------------------------
+# Provider command group
+# ---------------------------------------------------------------------------
+
+@main.group(
+    context_settings={"help_option_names": ["-h", "--help"]},
+    no_args_is_help=True,
+)
+def provider() -> None:
+    """Inspect and control provider runtime state."""
+    pass
+
+
+@provider.command("reset-circuit")
+@click.option("--name", required=True, help="Provider name to reset.")
+@click.option("--port", default=8080, type=int, show_default=True, help="Gateway dashboard port.")
+def provider_reset_circuit(name: str, port: int) -> None:
+    """Reset a live provider circuit breaker via the local dashboard API."""
+    url = f"http://127.0.0.1:{port}/api/provider/reset-circuit"
+    body = json.dumps({"name": name}).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.URLError as exc:
+        console.print(f"[red]Failed to reach the running gateway:[/red] {exc}")
+        return
+
+    if payload.get("ok"):
+        console.print(f"[green]Reset circuit[/green] for provider [cyan]{name}[/cyan].")
+    else:
+        console.print(f"[red]Circuit reset failed:[/red] {payload.get('error', 'unknown error')}")
 
 
 # ---------------------------------------------------------------------------
@@ -2306,43 +2545,78 @@ def service() -> None:
 
 @service.command(name="install")
 def service_install() -> None:
-    """Install NeuralClaw as a Windows service (auto-starts on boot)."""
+    """Install the managed NeuralClaw service."""
     console.print(BANNER)
-    from neuralclaw.service import install_windows_service
-    if install_windows_service():
-        console.print("\n[green]Service installed. It will auto-start on boot.[/green]")
-    else:
-        console.print("\n[yellow]Tip: Try 'neuralclaw startup install' instead (no admin needed).[/yellow]")
+    from neuralclaw.service import install_service
+
+    ok, message = install_service()
+    console.print(f"\n[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
 
 
 @service.command(name="uninstall")
 def service_uninstall() -> None:
-    """Remove the Windows service."""
-    from neuralclaw.service import uninstall_windows_service
-    uninstall_windows_service()
+    """Remove the managed NeuralClaw service."""
+    from neuralclaw.service import uninstall_service
+
+    ok, message = uninstall_service()
+    console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
 
 
 @service.command(name="start")
 def service_start() -> None:
-    """Start the Windows service."""
-    from neuralclaw.service import start_windows_service
-    start_windows_service()
+    """Start the managed service."""
+    from neuralclaw.service import start_service
+
+    ok, message = start_service()
+    console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
 
 
 @service.command(name="stop")
 def service_stop() -> None:
-    """Stop the Windows service."""
-    from neuralclaw.service import stop_windows_service
-    stop_windows_service()
+    """Stop the managed service."""
+    from neuralclaw.service import stop_service
+
+    ok, message = stop_service()
+    console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
+
+
+@service.command(name="restart")
+def service_restart() -> None:
+    """Restart the managed service."""
+    from neuralclaw.service import restart_service
+
+    ok, message = restart_service()
+    console.print(f"[{'green' if ok else 'red'}]{message}[/{'green' if ok else 'red'}]")
 
 
 @service.command(name="status")
 def service_status_cmd() -> None:
-    """Check the Windows service status."""
+    """Check the service status."""
     from neuralclaw.service import service_status
     s = service_status()
-    style = {"running": "green", "stopped": "red", "not_installed": "yellow"}.get(s, "dim")
+    style = {"running": "green", "installed": "cyan", "stopped": "red", "not_installed": "yellow"}.get(s, "dim")
     console.print(f"Service: [{style}]{s}[/{style}]")
+
+
+@service.command(name="logs")
+@click.option("--lines", "-n", default=100, help="Number of lines to show.")
+@click.option("--follow", "-f", is_flag=True, help="Follow the service logs.")
+def service_logs_cmd(lines: int, follow: bool) -> None:
+    """View service logs."""
+    from neuralclaw.service import service_logs
+
+    result = service_logs(lines=lines, follow=follow)
+    if result is None:
+        logs.callback(lines=lines, follow=follow)
+
+
+@service.command(name="pm2")
+def service_pm2_cmd() -> None:
+    """Write a PM2 ecosystem file for non-systemd environments."""
+    from neuralclaw.service import write_pm2_config
+
+    path = write_pm2_config()
+    console.print(f"[green]Wrote PM2 config to[/green] [cyan]{path}[/cyan]")
 
 
 # ---------------------------------------------------------------------------

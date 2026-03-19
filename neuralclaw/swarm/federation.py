@@ -381,6 +381,10 @@ class FederationProtocol:
         if self._runner:
             await self._runner.cleanup()
 
+    async def ping(self) -> bool:
+        """Cheap readiness check for the in-process federation server."""
+        return bool(self._running and self._runner is not None)
+
     async def join_federation(self, seed_endpoint: str) -> bool:
         """
         Join a federation by connecting to a seed node.

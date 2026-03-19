@@ -8,7 +8,9 @@ import pytest
 from neuralclaw.config import NeuralClawConfig, ProviderConfig
 from neuralclaw.cortex.reasoning.deliberate import ConfidenceEnvelope
 from neuralclaw.cortex.memory.retrieval import MemoryContext
+from neuralclaw.errors import ProviderError
 from neuralclaw.gateway import NeuralClawGateway
+from neuralclaw.health import ReadinessProbe
 from neuralclaw.providers.app_session import AppSessionProvider
 from neuralclaw.session.runtime import ManagedBrowserSession, SessionRuntimeConfig
 
@@ -419,3 +421,80 @@ async def test_gateway_prepends_visual_context_to_reasoning(monkeypatch):
     assert response == "ok"
     assert captured["content"].startswith("## Visual Context")
     assert "A login form is visible." in captured["content"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_rate_limits_repeated_messages(monkeypatch):
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
+    )
+    config.policy.user_requests_per_minute = 1
+    gateway = NeuralClawGateway(config)
+
+    async def fake_intake(**kwargs):
+        return SimpleNamespace(
+            id="sig-rate",
+            content=kwargs["content"],
+            author_id=kwargs["author_id"],
+            author_name=kwargs["author_name"],
+            channel_type=None,
+            channel_id=kwargs["channel_id"],
+            context={},
+        )
+
+    async def fake_screen(signal):
+        return SimpleNamespace(blocked=False)
+
+    async def fake_fast_path(signal, memory_ctx=None):
+        return None
+
+    async def fake_classify(signal):
+        return SimpleNamespace(intent="chat")
+
+    async def fake_retrieve(content):
+        return MemoryContext()
+
+    async def fake_reason(signal, memory_ctx, tools=None, conversation_history=None, extra_system_sections=None):
+        return ConfidenceEnvelope(response="ok", confidence=0.9, source="llm")
+
+    async def fake_store_interaction(*args, **kwargs):
+        return None
+
+    async def fake_post_process(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(gateway._intake, "process", fake_intake)
+    monkeypatch.setattr(gateway._threat_screener, "screen", fake_screen)
+    monkeypatch.setattr(gateway._fast_path, "try_fast_path", fake_fast_path)
+    monkeypatch.setattr(gateway._classifier, "classify", fake_classify)
+    monkeypatch.setattr(gateway._retriever, "retrieve", fake_retrieve)
+    monkeypatch.setattr(gateway._deliberate, "reason", fake_reason)
+    monkeypatch.setattr(gateway, "_store_interaction", fake_store_interaction)
+    monkeypatch.setattr(gateway, "_post_process", fake_post_process)
+    gateway._procedural = None
+    gateway._identity = None
+
+    first = await gateway.process_message("hello", author_id="u1", author_name="User")
+    second = await gateway.process_message("hello again", author_id="u1", author_name="User")
+
+    assert first == "ok"
+    assert "too quickly" in second
+
+
+@pytest.mark.asyncio
+async def test_gateway_readiness_failure_raises_provider_error():
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
+    )
+    gateway = NeuralClawGateway(config)
+
+    async def bad_probe() -> bool:
+        return False
+
+    gateway._health._probes = [
+        gateway._health._probes[0],
+        ReadinessProbe(name="forced_failure", required=True, check=bad_probe),
+    ]
+
+    with pytest.raises(ProviderError):
+        await gateway._run_startup_readiness()

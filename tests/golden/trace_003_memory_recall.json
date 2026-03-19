@@ -1,0 +1,18 @@
+{
+  "description": "Memory recall style response",
+  "input": {
+    "content": "What do you remember about my preferences?",
+    "author_id": "memory_user",
+    "author_name": "Memory User",
+    "channel_id": "discord"
+  },
+  "expected": {
+    "reasoning_path": "deliberative",
+    "response": "You prefer concise answers and direct recommendations.",
+    "response_contains": ["concise", "direct"],
+    "response_excludes": ["error"],
+    "threat_score_max": 0.2,
+    "tool_calls": 0,
+    "duration_ms_max": 1200
+  }
+}

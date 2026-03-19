@@ -1,0 +1,18 @@
+{
+  "description": "Reflective planning path",
+  "input": {
+    "content": "Plan a safe rollout for a production migration.",
+    "author_id": "planner",
+    "author_name": "Planner",
+    "channel_id": "cli"
+  },
+  "expected": {
+    "reasoning_path": "reflective",
+    "response": "Here is a staged rollout plan with validation, rollback, and monitoring steps.",
+    "response_contains": ["rollout", "rollback", "monitoring"],
+    "response_excludes": ["error"],
+    "threat_score_max": 0.2,
+    "tool_calls": 0,
+    "duration_ms_max": 1500
+  }
+}
