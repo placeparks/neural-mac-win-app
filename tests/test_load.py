@@ -244,7 +244,7 @@ async def test_traceline_write_throughput(tmp_path):
 @pytest.fixture
 async def large_episodic_db(tmp_path):
     """Fixture: populate DB with 10,000 episodic entries."""
-    from neuralclaw.db.pool import DBPool
+    from neuralclaw.cortex.memory.db import DBPool
 
     db_path = str(tmp_path / "large_episodic.db")
     db_pool = DBPool(db_path)

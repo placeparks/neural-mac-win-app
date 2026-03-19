@@ -76,12 +76,50 @@ class URLValidationResult:
 # Validators
 # ---------------------------------------------------------------------------
 
+def _normalize_ip(ip_str: str) -> str:
+    """Normalize octal/hex IP notation to standard dotted-decimal.
+
+    Handles formats like 0177.0.0.1 (octal) and 0x7f000001 (hex).
+    """
+    # Single hex integer (e.g. 0x7f000001)
+    if ip_str.startswith("0x") or ip_str.startswith("0X"):
+        try:
+            num = int(ip_str, 16)
+            return str(ipaddress.ip_address(num))
+        except (ValueError, OverflowError):
+            pass
+
+    # Dotted notation with octal/hex octets (e.g. 0177.0.0.1)
+    parts = ip_str.split(".")
+    if len(parts) == 4:
+        try:
+            octets = []
+            for p in parts:
+                if p.startswith(("0x", "0X")):
+                    octets.append(int(p, 16))
+                elif p.startswith("0") and len(p) > 1 and p.isdigit():
+                    octets.append(int(p, 8))
+                else:
+                    octets.append(int(p))
+            if all(0 <= o <= 255 for o in octets):
+                return ".".join(str(o) for o in octets)
+        except (ValueError, OverflowError):
+            pass
+
+    return ip_str
+
+
 def _is_private_ip(ip_str: str) -> bool:
     """Check if an IP address is in a blocked range."""
-    # Let ValueError bubble up if ip_str is a hostname, not an IP.
-    addr = ipaddress.ip_address(ip_str)
+    # Normalize octal/hex encodings before checking.
+    normalized = _normalize_ip(ip_str)
+    try:
+        addr = ipaddress.ip_address(normalized)
+    except ValueError:
+        # Let ValueError bubble up if ip_str is a hostname, not an IP.
+        addr = ipaddress.ip_address(ip_str)
 
-    if ip_str in _BLOCKED_IPS:
+    if normalized in _BLOCKED_IPS or ip_str in _BLOCKED_IPS:
         return True
 
     for network in _BLOCKED_NETWORKS:

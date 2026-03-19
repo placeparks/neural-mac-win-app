@@ -2,6 +2,20 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
+## [1.0.1] - 2026-03-19
+
+### Fixed
+- **Threat screener gaps**: Added 9 new injection patterns covering Cyrillic
+  homoglyphs, base64 smuggling, token/MASK smuggling, roleplay jailbreak,
+  fake authority overrides, context extraction, and fake system prompt boundaries.
+- **SSRF octal/hex bypass**: `_normalize_ip()` now converts octal (`0177.0.0.1`)
+  and hex (`0x7f000001`) IP encodings to standard notation before validation.
+- **Jailbreak confirmation detection**: Added 8 dangerous output hints (pipe bomb,
+  as DAN, disabled restrictions, no guidelines) and 12 confirmation prefixes.
+- **Test fixes**: Corrected `_canary` → `_canary_token`, `tool=` → `skill_name=`
+  in AuditRecord, `str(path)` → `Path` for load_config, `Capability` enum import,
+  `DBPool` import path.
+
 ## [1.0.0] - 2026-03-19
 
 ### Production Stable Release

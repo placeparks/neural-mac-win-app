@@ -7,6 +7,7 @@ A runbook that doesn't work is worse than no runbook.
 from __future__ import annotations
 
 import sqlite3
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -173,7 +174,7 @@ def test_provider_fallback_config_switch(tmp_path):
         '[providers.openrouter]\nmodel = "anthropic/claude-sonnet-4-6"\n',
         encoding="utf-8",
     )
-    config = load_config(str(config_path))
+    config = load_config(config_path)
     assert config.providers.primary == "openrouter"
 
 
@@ -185,13 +186,18 @@ def test_audit_search_finds_denied_actions(tmp_path):
     from neuralclaw.cortex.action.audit import AuditRecord
 
     record = AuditRecord(
-        tool="shell_exec",
-        args={"command": "rm -rf /"},
+        timestamp=time.time(),
+        request_id="req_abc",
+        skill_name="shell_exec",
+        action="execute",
+        args_preview='{"command": "rm -rf /"}',
+        result_preview="",
+        allowed=False,
+        denied_reason="policy_denied: dangerous command",
+        success=False,
+        execution_time_ms=0.0,
         user_id="attacker_123",
         channel_id="telegram:999",
-        request_id="req_abc",
-        allowed=False,
-        reason="policy_denied: dangerous command",
     )
 
     assert not record.allowed
@@ -207,5 +213,5 @@ def test_canary_token_rotation():
     filter2 = OutputThreatFilter()
 
     # Each instance should have its own canary (or at minimum, canary exists)
-    assert hasattr(filter1, "_canary")
-    assert filter1._canary  # non-empty
+    assert hasattr(filter1, "_canary_token")
+    assert filter1._canary_token  # non-empty
