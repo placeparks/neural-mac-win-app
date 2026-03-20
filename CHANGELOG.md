@@ -2,6 +2,22 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
+## [1.1.6] - 2026-03-20
+
+### Fixed — Memory System
+- **Consolidation was dead code**: `MemoryMetabolism._consolidate()` passed
+  `properties=` and `confidence=` to `SemanticMemory.upsert_entity()` which
+  expects `attributes=`. Silently failed on every call. Now fixed.
+- **`EpisodicMemory.get_recent(since=0.0)` skipped filter**: `if since:` was
+  falsy for `0.0`, ignoring the WHERE clause. Fixed to `if since is not None:`.
+
+### Fixed — SkillForge
+- **Handler name mismatch in auto-appended `get_manifest()`**: Now extracts
+  actual `async def` names from generated code and maps them to spec tool names
+  using exact → fuzzy → order-based fallback.
+- **Final safety for `get_manifest()`**: Added check right before `_persist_skill()`
+  so neither `_attempt_fix()` nor any other code path can strip it.
+
 ## [1.1.5] - 2026-03-20
 
 ### Fixed — SkillForge End-to-End

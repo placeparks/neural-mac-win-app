@@ -255,7 +255,7 @@ class EpisodicMemory:
         """Get recent episodes, optionally since a timestamp."""
         assert self._db is not None
 
-        if since:
+        if since is not None:
             rows = await self._db.execute_fetchall(
                 """SELECT id, timestamp, source, author, content,
                           importance, emotional_valence, tags_json,

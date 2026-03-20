@@ -156,8 +156,7 @@ class MemoryMetabolism:
                     await self._semantic.upsert_entity(
                         name=entity_name,
                         entity_type="consolidated_memory",
-                        properties={"source": "consolidation", "original_importance": importance},
-                        confidence=min(0.9, importance + 0.1),
+                        attributes={"source": "consolidation", "original_importance": importance},
                     )
                     consolidated += 1
                 except Exception:

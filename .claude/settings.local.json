@@ -128,7 +128,9 @@
       "Bash(python -m pytest tests/ -v --no-header)",
       "Bash(python -m pytest tests/ --no-header -q)",
       "Bash(python -m pytest tests/test_runbooks.py::test_provider_fallback_config_switch -v --no-header)",
-      "Bash(python -m pytest tests/test_integration_matrix.py::test_evolution_synthesizer_produces_valid_skill -v --no-header)"
+      "Bash(python -m pytest tests/test_integration_matrix.py::test_evolution_synthesizer_produces_valid_skill -v --no-header)",
+      "Bash(python -m pytest tests/test_memory.py -v --no-header)",
+      "Bash(python -m pytest tests/test_memory.py -v --no-header -q)"
     ]
   }
 }
