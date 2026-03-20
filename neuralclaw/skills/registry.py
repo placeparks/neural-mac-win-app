@@ -93,6 +93,49 @@ class SkillRegistry:
                 # Log but don't crash on individual skill failures
                 print(f"[SkillRegistry] Failed to load builtin skill '{modname}': {e}")
 
+    def hot_register(self, manifest: SkillManifest) -> None:
+        """
+        Register or replace a skill at runtime.
+        If a skill with the same name already exists, removes its old tools
+        before registering the new ones. Enables live skill updates.
+        """
+        existing = self._skills.get(manifest.name)
+        if existing:
+            old_names = {t.name for t in existing.tools}
+            self._tool_defs = [td for td in self._tool_defs if td.name not in old_names]
+
+        self._skills[manifest.name] = manifest
+        for tool in manifest.tools:
+            self._tool_defs.append(ToolDef(
+                name=tool.name,
+                description=tool.description,
+                parameters=tool.to_json_schema(),
+                handler=tool.handler,
+            ))
+
+    def load_user_skills(self, policy_config: Any = None) -> None:
+        """Load all skills from ~/.neuralclaw/skills/ on startup."""
+        import importlib.util
+        skills_dir = Path.home() / ".neuralclaw" / "skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        for path in skills_dir.glob("*.py"):
+            try:
+                spec = importlib.util.spec_from_file_location(f"_user_{path.stem}", path)
+                if spec is None or spec.loader is None:
+                    continue
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                if hasattr(mod, "get_manifest"):
+                    manifest = mod.get_manifest()
+                    self.register(manifest)
+                    # Allowlist tools in policy
+                    if policy_config and hasattr(policy_config, "allowed_tools"):
+                        for tool in manifest.tools:
+                            if tool.name not in policy_config.allowed_tools:
+                                policy_config.allowed_tools.append(tool.name)
+            except Exception as e:
+                print(f"[SkillRegistry] Failed to load user skill '{path.name}': {e}")
+
     def get_all_tools(self) -> list[ToolDef]:
         """Get all registered tool definitions."""
         return self._tool_defs.copy()

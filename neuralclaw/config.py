@@ -288,6 +288,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_install_timeout_seconds": 300,
         "max_exec_timeout_seconds": 300,
     },
+    "forge": {
+        "model": "claude-sonnet-4-20250514",
+        "user_skills_dir": "",
+        "hot_reload": True,
+        "sandbox_timeout": 15,
+        "max_tools_per_skill": 10,
+        "allow_network_skills": True,
+        "allow_filesystem_skills": False,
+        "require_use_case": False,
+    },
     "apis": {},  # User-saved API configs: [apis.myapi] = {base_url = "...", auth_type = "bearer"}
     "channels": {
         "telegram": {"enabled": False, "trust_mode": ""},
@@ -599,6 +609,7 @@ class FeaturesConfig:
     procedural_memory: bool = True
     semantic_memory: bool = True
     a2a_federation: bool = False
+    skill_forge: bool = True
 
     @classmethod
     def lite(cls) -> "FeaturesConfig":
@@ -621,7 +632,21 @@ class FeaturesConfig:
             procedural_memory=False,
             semantic_memory=False,
             a2a_federation=False,
+            skill_forge=False,
         )
+
+
+@dataclass
+class ForgeConfig:
+    """SkillForge configuration for proactive skill synthesis."""
+    model: str = "claude-sonnet-4-20250514"
+    user_skills_dir: str = ""
+    hot_reload: bool = True
+    sandbox_timeout: int = 15
+    max_tools_per_skill: int = 10
+    allow_network_skills: bool = True
+    allow_filesystem_skills: bool = False
+    require_use_case: bool = False
 
 
 @dataclass
@@ -673,6 +698,7 @@ class NeuralClawConfig:
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
     federation: FederationConfig = field(default_factory=FederationConfig)
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
+    forge: ForgeConfig = field(default_factory=ForgeConfig)
     apis: dict[str, dict[str, Any]] = field(default_factory=dict)
     channels: list[ChannelConfig] = field(default_factory=list)
     dashboard_port: int = 8080
@@ -726,6 +752,7 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
     feat_section = merged.get("features", {})
     fed_section = merged.get("federation", {})
     ws_section = merged.get("workspace", {})
+    forge_section = merged.get("forge", {})
     apis_section = merged.get("apis", {})
     chan_section = merged.get("channels", {})
 
@@ -814,6 +841,7 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
         features=FeaturesConfig(**_filter_fields(FeaturesConfig, feat_section)) if feat_section else FeaturesConfig(),
         federation=FederationConfig(**_filter_fields(FederationConfig, fed_section)) if fed_section else FederationConfig(),
         workspace=WorkspaceConfig(**_filter_fields(WorkspaceConfig, ws_section)) if ws_section else WorkspaceConfig(),
+        forge=ForgeConfig(**_filter_fields(ForgeConfig, forge_section)) if forge_section else ForgeConfig(),
         apis=apis_section if isinstance(apis_section, dict) else {},
         channels=channels,
         _raw=merged,
@@ -892,6 +920,10 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
         ]:
             if tool_name not in config.policy.mutating_tools:
                 config.policy.mutating_tools.append(tool_name)
+
+    if config.features.skill_forge:
+        if "forge_skill" not in config.policy.allowed_tools:
+            config.policy.allowed_tools.append("forge_skill")
 
     return config
 

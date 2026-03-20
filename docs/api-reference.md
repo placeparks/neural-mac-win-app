@@ -264,3 +264,50 @@ econ.rate_skill(skill_name, rater_id, score, review)
 econ.get_trending()
 econ.get_author_leaderboard()
 ```
+
+---
+
+## SkillForge
+
+```python
+from neuralclaw.skills.forge import (
+    SkillForge,
+    ForgeInputType,
+    ForgeResult,
+    SkillHotLoader,
+    detect_forge_command,
+)
+
+# Constructor
+forge = SkillForge(provider, sandbox, registry, bus, model="claude-sonnet-4-20250514")
+
+# Main entry point — accepts a natural-language description, URL, or code snippet.
+# use_case is an optional string that constrains the generated skill's scope.
+result: ForgeResult = await forge.steal(source="send SMS reminders via Twilio", use_case="appointment reminders")
+
+# ForgeInputType enum — classifies the source argument
+ForgeInputType.DESCRIPTION      # plain-language request
+ForgeInputType.URL              # URL to inspect and wrap
+ForgeInputType.CODE_SNIPPET     # raw code to package as a skill
+
+# ForgeResult dataclass
+result.success          # bool
+result.skill_name       # str
+result.manifest         # dict — full skill manifest
+result.tools_created    # int
+result.warnings         # list[str]
+result.error            # str | None
+
+# Hot loader — watches ~/.neuralclaw/skills/ for new/updated files
+loader = SkillHotLoader(registry, bus)
+await loader.start()    # Begin asyncio polling loop
+await loader.stop()     # Stop watching
+
+# Channel command parser — detects /forge commands in message content
+parsed = detect_forge_command(content)
+# Returns None if no forge command found, otherwise a dict with
+# {"source": str, "use_case": str | None}
+
+# Registry method — register a skill manifest at runtime without restart
+registry.hot_register(manifest)
+```

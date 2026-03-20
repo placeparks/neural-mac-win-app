@@ -135,6 +135,55 @@ is currently an upstream Baileys / WhatsApp-Web connection failure rather than a
 Python-side dependency problem. Retry once with a clean auth dir; if it still
 fails, treat WhatsApp as unstable until the upstream bridge path is updated.
 
+## SkillForge Issues
+
+### `forge` command not recognized
+
+Make sure SkillForge is enabled in your config:
+
+```toml
+[features]
+skill_forge = true
+```
+
+### Static analysis blocked my skill
+
+The generated code triggered a security flag during static analysis. Try providing a more specific use case description so the generator produces narrower code, or edit the generated file manually in `~/.neuralclaw/skills/` to remove the flagged pattern.
+
+### Sandbox test failed
+
+SkillForge attempts one automatic fix when a sandbox test fails. If it still fails after the retry, inspect the error details:
+
+```bash
+neuralclaw forge show <name>
+```
+
+Review the reported error and fix the generated file manually.
+
+### Forged skill not loading
+
+Verify that hot reload is enabled so the gateway picks up new skill files:
+
+```toml
+[forge]
+hot_reload = true
+```
+
+Also confirm the generated file is valid Python and exports a `get_manifest()` function.
+
+### `forge_skill` tool not appearing
+
+Ensure SkillForge is enabled in features and restart the gateway:
+
+```toml
+[features]
+skill_forge = true
+```
+
+```bash
+neuralclaw gateway --restart
+```
+
 ## Validation and Build
 
 Run the full release validation path:

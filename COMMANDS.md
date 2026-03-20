@@ -1,6 +1,6 @@
 # NeuralClaw Commands
 
-Version target: `1.0.0`
+Version target: `1.1.0`
 
 ## Install
 
@@ -115,6 +115,27 @@ neuralclaw benchmark
 neuralclaw benchmark --category security
 neuralclaw benchmark --export
 ```
+
+## SkillForge
+
+```bash
+neuralclaw forge --help
+neuralclaw forge create "https://api.stripe.com" --use-case "charge chiro patients"
+neuralclaw forge create "twilio" --use-case "send appointment reminders"
+neuralclaw forge create "I want to look up drug interactions"
+neuralclaw forge list
+neuralclaw forge show <skill-name>
+neuralclaw forge remove <skill-name>
+```
+
+Subcommands:
+
+| Subcommand | Purpose |
+|---|---|
+| `forge create <source>` | Generate a new skill from a URL, API spec, library name, repo, MCP server, or description. Use `--use-case` to tailor the output. |
+| `forge list` | List all forged skills in `~/.neuralclaw/skills/` |
+| `forge show <name>` | Display the manifest and source of a forged skill |
+| `forge remove <name>` | Delete a forged skill from disk |
 
 ## Release Validation
 

@@ -159,7 +159,7 @@ async def test_evolution_synthesizer_produces_valid_skill(tmp_path, monkeypatch)
             name="celsius_to_fahrenheit",
             version="1.0.0",
             description="Convert Celsius temperatures to Fahrenheit",
-            capabilities=[Capability.CODE_EXECUTION],
+            capabilities=[Capability.SHELL_EXECUTE],
             tools=[
                 ToolDefinition(
                     name="celsius_to_fahrenheit",

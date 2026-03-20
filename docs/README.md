@@ -1,6 +1,6 @@
 # NeuralClaw Documentation
 
-Version: `1.0.0`
+Version: `1.1.0`
 
 This doc set reflects the current repo state after the full `AGENT.md`
 roadmap implementation.
@@ -14,7 +14,7 @@ roadmap implementation.
 | [architecture.md](architecture.md) | gateway, cortices, bus, runtime wiring |
 | [memory.md](memory.md) | episodic, semantic, procedural, vector, identity |
 | [reasoning.md](reasoning.md) | fast-path, deliberative, reflective, structured |
-| [skills.md](skills.md) | built-ins, manifests, capability model |
+| [skills.md](skills.md) | built-ins, manifests, capability model, **SkillForge** |
 | [channels.md](channels.md) | adapters, trust, streaming, Discord voice |
 | [security.md](security.md) | threat screening, output filtering, audit, policy |
 | [swarm.md](swarm.md) | delegation, consensus, mesh |
@@ -35,6 +35,8 @@ roadmap implementation.
 - Google Workspace and Microsoft 365 builtin skills
 - traceline observability, Prompt Armor v2, and audit replay
 - A2A-compatible federation agent cards and task APIs
+- **SkillForge**: proactive skill synthesis from URLs, APIs, repos, or plain
+  descriptions — works from CLI, channels, or mid-conversation
 
 ## Repo-local Handoff
 

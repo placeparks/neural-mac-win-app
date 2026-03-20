@@ -100,6 +100,17 @@ neuralclaw audit stats
 - tool call previews
 - request/user/channel metadata
 
+## SkillForge Security
+
+SkillForge-generated skills pass through the same layered security model as the rest of NeuralClaw, with additional checks specific to code generation:
+
+- **SSRF validation** -- All URLs used by generated skills pass through `validate_url_with_dns()`, blocking private-network and DNS-rebinding attacks.
+- **Static analysis** -- Generated code is scanned before registration. High-severity findings are blocked automatically, including keyring access, raw socket usage, and OS-level system calls (`os.system`, `subprocess` with shell=True, etc.).
+- **Mandatory sandbox testing** -- Every generated skill must pass a sandbox test run before it is registered with the gateway. Skills that fail sandbox testing are not loaded.
+- **Filesystem access disabled by default** -- `allow_filesystem_skills = false` is the default, preventing generated skills from reading or writing the local filesystem.
+- **API key handling** -- Generated skills reference API keys via `os.getenv()`. Credentials are never hardcoded into skill source files.
+- **Operator-owned skills** -- Skills stored in `~/.neuralclaw/skills/` are operator-owned and locally managed. They are not part of any shared marketplace and do not execute without the operator's gateway loading them.
+
 ## Idempotency
 
 Mutating tools are protected by `IdempotencyStore` so retries do not duplicate

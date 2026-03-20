@@ -73,6 +73,27 @@ and output filtering.
 9. output filtering
 10. delivery, storage, audit, and evolution ticks
 
+## SkillForge (Action Cortex Extension)
+
+SkillForge extends the Action cortex with dynamic skill creation. Rather than
+requiring manual skill development, it lets users describe a capability in
+natural language and generates a working skill on the fly.
+
+Key implementation details:
+
+- `skills/forge.py` sits alongside the existing `skills/registry.py`. It
+  receives a natural-language description (or a URL / code snippet), synthesizes
+  a skill manifest, validates it through `StaticAnalyzer`, tests it inside
+  `Sandbox`, and registers the result with the `SkillRegistry`.
+- SkillForge reuses the existing `Sandbox` for isolated test execution, the
+  `StaticAnalyzer` for security checks, and the configured LLM provider for
+  code generation.
+- `SkillHotLoader` watches `~/.neuralclaw/skills/` via asyncio polling and
+  automatically registers any new or updated skill files it detects.
+- Forge commands (`/forge ...`) are intercepted early in
+  `gateway._on_channel_message()` before normal message processing, so they
+  bypass the standard perception-reasoning pipeline.
+
 ## Bus and Telemetry
 
 The `NeuralBus` is the integration contract between modules. `Telemetry` and

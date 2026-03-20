@@ -2,7 +2,70 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
-## [1.0.1] - 2026-03-19
+## [1.1.5] - 2026-03-20
+
+### Fixed — SkillForge End-to-End
+- **Gateway crash on startup**: `AttributeError: 'NeuralClawGateway' object has no
+  attribute '_sandbox'` — SkillForge now creates its own `Sandbox` instance using
+  `forge.sandbox_timeout` from config.
+- **CLI `forge create` crash**: `Sandbox(config=config)` used wrong constructor
+  signature; fixed to `Sandbox(timeout_seconds=...)`.
+- **Hot loader duplicate tools**: `SkillHotLoader._load_skill_file()` called
+  `register()` instead of `hot_register()`, causing duplicate tool entries on
+  skill reload.
+- **Null safety for `importlib` spec loading**: Added `None` checks for
+  `spec_from_file_location()` return value in `forge.py`, `hot_loader.py`, and
+  `registry.py` — prevents `AttributeError` on malformed skill files.
+- **Missing session in clarification retry**: `forge_handlers.py`
+  `_handle_clarification_reply()` now passes `session` to `forge.steal()` so
+  multi-turn context is preserved.
+- **Forged tools denied by policy**: `forge_skill` and all dynamically forged
+  tools are now auto-added to `policy.allowed_tools` — applies to
+  `_forge_skill_tool`, `SkillHotLoader`, and `load_user_skills`.
+- **Forged skills had no handlers**: `_build_manifest_from_spec()` now keeps
+  loaded modules alive (prevents GC), loads from persisted skill files, and
+  creates lazy on-demand handlers as a last resort.
+- **LLM omits `get_manifest()`**: Auto-appends `get_manifest()` from the spec
+  if the generated code is missing it. Final safety check runs right before
+  `_persist_skill()` so neither `_attempt_fix()` nor any other path can strip it.
+  Strengthened the generation prompt with NON-NEGOTIABLE instruction.
+- **Handler name mismatch**: `_append_manifest_function()` now extracts actual
+  `async def` names from the generated code and maps them to spec tool names
+  using exact match → fuzzy match → order-based fallback. Previously it assumed
+  the LLM would name functions identically to the spec tool names.
+- **`steal()` used `register()` instead of `hot_register()`**: Re-forging the
+  same skill now properly replaces old tool entries instead of duplicating them.
+- **4 test failures**: Fixed `AuditRecord.reason` → `.denied_reason`,
+  `config.providers.primary` → `config.primary_provider.name`, canary token
+  assertion, and `Capability.CODE_EXECUTION` → `.SHELL_EXECUTE`.
+
+## [1.1.0] - 2026-03-20
+
+### Added — SkillForge: Proactive Skill Synthesis
+- **`neuralclaw/skills/forge.py`**: Complete SkillForge engine with 10 input
+  source types — URL, OpenAPI, GraphQL, Python library, natural language
+  description, code, file, GitHub repo, MCP server, and auto-detection.
+- **Use-case interview**: Before generating code, SkillForge asks the LLM
+  to design domain-specific tools tailored to the user's exact use case.
+  Stripe + "charge chiro patients" → `charge_patient`, `issue_refund`,
+  `list_invoices` — NOT 200 generic wrappers.
+- **`neuralclaw/skills/forge_handlers.py`**: Multi-platform channel handlers.
+  Trigger from Discord (`!forge`), Telegram (`/forge`), Slack (`forge`),
+  WhatsApp (`forge:`), or CLI. Multi-turn clarification sessions.
+- **`neuralclaw/skills/hot_loader.py`**: Watch `~/.neuralclaw/skills/` for
+  new files and hot-load them into the registry without restart.
+- **Registry `hot_register()`**: Replace a skill at runtime, removing old
+  tool definitions before registering new ones.
+- **`load_user_skills()`**: Load all user-generated skills on startup.
+- **`forge_skill` agent tool**: The agent can proactively forge its own
+  skills mid-conversation when asked to "learn" something new.
+- **CLI `neuralclaw forge` group**: `create`, `list`, `remove`, `show`
+  commands for managing forged skills.
+- **`ForgeConfig` dataclass**: `[forge]` config section with model, sandbox
+  timeout, max tools per skill, network/filesystem allowlists.
+- **`skill_forge` feature flag**: Master switch in `[features]`.
+- **`tests/test_skillforge.py`**: Input detection, command parsing,
+  clarification detection, slugify, and hot loader tests.
 
 ### Fixed
 - **Threat screener gaps**: Added 9 new injection patterns covering Cyrillic

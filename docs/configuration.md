@@ -36,6 +36,7 @@ Feature-gates optional subsystems:
 - `procedural_memory`
 - `semantic_memory`
 - `a2a_federation`
+- `skill_forge`
 
 ### `[memory]`
 
@@ -153,6 +154,19 @@ Feature-gates optional subsystems:
 - `desktop_allowed_apps`
 - `desktop_blocked_regions`
 
+### `[forge]` — SkillForge Settings
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `model` | string | `"claude-sonnet-4-20250514"` | LLM model used for skill synthesis |
+| `user_skills_dir` | string | `""` | Custom skills directory (default: `~/.neuralclaw/skills/`) |
+| `hot_reload` | bool | `true` | Watch skills directory for new files |
+| `sandbox_timeout` | int | `15` | Seconds for sandbox test execution |
+| `max_tools_per_skill` | int | `10` | Maximum tools per generated skill |
+| `allow_network_skills` | bool | `true` | Allow skills that make HTTP calls |
+| `allow_filesystem_skills` | bool | `false` | Allow skills with file system access |
+| `require_use_case` | bool | `false` | Require use_case before generating |
+
 ### `[federation]`
 
 - `enabled`
@@ -188,6 +202,7 @@ reflective_reasoning = true
 procedural_memory = true
 semantic_memory = true
 a2a_federation = false
+skill_forge = true
 
 [providers]
 primary = "openai"

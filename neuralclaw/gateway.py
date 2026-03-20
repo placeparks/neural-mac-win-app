@@ -230,6 +230,8 @@ class NeuralClawGateway:
         self._skills = SkillRegistry()
         self._desktop = None
         self._browser = None
+        self._forge = None
+        self._hot_loader = None
         if feat.desktop and self._config.desktop.enabled:
             from neuralclaw.cortex.action.desktop import DesktopCortex
 
@@ -444,6 +446,51 @@ class NeuralClawGateway:
             if self._synthesizer:
                 self._synthesizer.set_structured(self._structured)
                 self._synthesizer.set_provider(self._provider)
+
+            # SkillForge — proactive skill synthesis
+            feat = self._config.features
+            if feat.skill_forge:
+                from neuralclaw.skills.forge import SkillForge
+                from neuralclaw.skills.hot_loader import SkillHotLoader
+
+                from neuralclaw.cortex.action.sandbox import Sandbox as _ForgeSandbox
+
+                self._forge = SkillForge(
+                    provider=self._provider,
+                    sandbox=_ForgeSandbox(timeout_seconds=self._config.forge.sandbox_timeout),
+                    registry=self._skills,
+                    bus=self._bus,
+                    model=self._config.forge.model,
+                )
+                self._hot_loader = SkillHotLoader(
+                    registry=self._skills, bus=self._bus,
+                    policy_config=self._config.policy,
+                )
+                await self._hot_loader.start()
+                self._skills.load_user_skills(policy_config=self._config.policy)
+
+                # Register forge as an agent tool
+                self._skills.register_tool(
+                    name="forge_skill",
+                    description=(
+                        "Create a new skill for yourself from any source — URL, description, "
+                        "Python library, OpenAPI spec, GitHub repo, or MCP server. "
+                        "The skill is immediately available after forging. "
+                        "Use when the user asks you to 'learn' something new, "
+                        "add a new capability, or integrate with a new service."
+                    ),
+                    function=self._forge_skill_tool,
+                    parameters={
+                        "source": {
+                            "type": "string",
+                            "description": "URL, library name, natural language description, or code to forge from.",
+                        },
+                        "use_case": {
+                            "type": "string",
+                            "description": "What you specifically need this skill to do. More specific = better tools.",
+                        },
+                    },
+                )
         else:
             configured = self._config.primary_provider.name if self._config.primary_provider else "none"
             raise ProviderError(
@@ -812,6 +859,30 @@ class NeuralClawGateway:
         try:
             async with self._request_semaphore:
                 media = getattr(msg, "media", []) or []
+
+                # SkillForge intercept — handle forge commands before normal processing
+                if self._forge and msg.content and msg.content.strip():
+                    from neuralclaw.skills.forge_handlers import handle_forge_message
+
+                    channel_type_name = self._get_channel_type(msg)
+                    source_channel = self._get_source_adapter(msg)
+                    if source_channel and source_channel in self._channels:
+                        _adapter = self._channels[source_channel]
+
+                        async def _forge_respond(text: str) -> None:
+                            await _adapter.send(msg.channel_id, text)
+
+                        handled = await handle_forge_message(
+                            content=msg.content,
+                            author_id=msg.author_id,
+                            channel_id=msg.channel_id,
+                            platform=channel_type_name.lower() if channel_type_name else "unknown",
+                            forge=self._forge,
+                            respond=_forge_respond,
+                        )
+                        if handled:
+                            return
+
                 if await self._try_stream_channel_message(msg):
                     return
 
@@ -2289,6 +2360,25 @@ class NeuralClawGateway:
                 loop.add_signal_handler(sig, _handle_signal, sig)
             except NotImplementedError:
                 pass
+
+    async def _forge_skill_tool(self, source: str, use_case: str = "") -> dict:
+        """Tool handler: forge a new skill from inside the agent."""
+        if not self._forge:
+            return {"error": "SkillForge not enabled"}
+        result = await self._forge.steal(source, use_case=use_case)
+        if result.success:
+            # Add forged tools to the policy allowlist so they can be invoked
+            if result.manifest:
+                for tool in result.manifest.tools:
+                    if tool.name not in self._config.policy.allowed_tools:
+                        self._config.policy.allowed_tools.append(tool.name)
+            return {
+                "ok": True,
+                "skill_name": result.skill_name,
+                "tools": [t.name for t in result.manifest.tools] if result.manifest else [],
+                "message": f"Skill '{result.skill_name}' is now active with {result.tools_generated} tools.",
+            }
+        return {"ok": False, "error": result.error, "clarifications": result.clarifications_needed}
 
     async def _graceful_shutdown(self) -> None:
         """Ordered shutdown for in-flight requests and adapters."""

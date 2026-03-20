@@ -107,3 +107,15 @@ neuralclaw doctor
 pytest -q
 python -m build --sdist --wheel
 ```
+
+## Forge Your First Skill
+
+SkillForge lets you create new skills from a plain-language description.
+
+```bash
+# From CLI
+neuralclaw forge create "I want to send SMS reminders" --use-case "appointment reminders for my clinic"
+
+# Or from Telegram
+/forge twilio for: send appointment reminders
+```

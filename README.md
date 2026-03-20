@@ -12,6 +12,10 @@ integrations, and A2A-compatible federation.
 - **Computer use**: Take screenshots, analyze screen content with vision,
   click UI elements, type text, press hotkeys, and launch apps — all
   controllable remotely via Telegram, Discord, or any channel
+- **SkillForge**: Proactive skill synthesis — give it a URL, API spec, Python
+  library, GitHub repo, MCP server, or plain description and it generates
+  domain-specific tools tailored to your use case. Works from any channel
+  (`/forge`, `!forge`, `forge:`) or the agent forges its own skills mid-conversation
 - **Dynamic self-awareness**: Agent knows its own capabilities and active
   tools; never says "I can't" when it has a tool for the job
 - **Multi-provider routing**: `openai` (GPT-5.4), `anthropic` (Claude 4.6),
@@ -26,6 +30,32 @@ integrations, and A2A-compatible federation.
 - Google Workspace and Microsoft 365 built-in skills
 - traceline observability, Prompt Armor v2, and audit replay
 - swarm, native federation, and A2A interoperability
+
+## SkillForge — Teach Your Agent New Tricks
+
+SkillForge turns any input into a deployable NeuralClaw skill. No developer needed.
+
+```bash
+# CLI
+neuralclaw forge create "https://api.stripe.com" --use-case "charge chiro patients"
+neuralclaw forge create "twilio" --use-case "send appointment reminders"
+neuralclaw forge create "I want to look up drug interactions"
+
+# From Telegram
+/forge https://github.com/owner/repo for: analyze X-ray reports
+
+# From Discord
+!forge twilio --for send SMS reminders
+
+# The agent can forge its own skills mid-conversation
+User: "Can you learn to query our Google Sheets?"
+Agent: [forges sheets_query skill] → "Done, I can now read your reports directly."
+```
+
+Supported sources: URLs, OpenAPI/Swagger specs, GraphQL endpoints, Python libraries,
+GitHub repos, MCP servers, code files, or natural language descriptions.
+
+Skills are saved to `~/.neuralclaw/skills/` and hot-loaded without restart.
 
 ## Install
 

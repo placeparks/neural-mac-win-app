@@ -84,6 +84,17 @@ Voice playback requires:
 
 - uses `signal-cli`
 
+## Forge Command Triggers
+
+SkillForge commands are intercepted by each channel adapter **before** normal message processing, so they never reach the LLM router. Each platform uses its own trigger pattern:
+
+| Platform | Pattern |
+|---|---|
+| Discord | `!forge <source> [--for <use_case>]` |
+| Telegram | `/forge <source> [for: <use_case>]` |
+| Slack | `forge <source> [for: <use_case>]` |
+| WhatsApp | `forge: <source>` |
+
 ## Web Chat
 
 - always added by the gateway

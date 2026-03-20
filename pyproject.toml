@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neuralclaw"
-version = "1.0.1"
+version = "1.1.5"
 description = "The Self-Evolving Cognitive Agent Framework"
 readme = "README.md"
 license = "MIT"

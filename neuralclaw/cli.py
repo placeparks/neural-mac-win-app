@@ -2423,6 +2423,115 @@ def federation(port: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# SkillForge commands
+# ---------------------------------------------------------------------------
+
+@main.group()
+def forge():
+    """SkillForge — synthesize new skills from any source."""
+    pass
+
+
+@forge.command(name="create")
+@click.argument("source")
+@click.option("--use-case", "-u", default="", help="What you specifically need this skill to do")
+@click.option("--dry-run", is_flag=True, help="Show generated code without registering")
+def forge_create(source: str, use_case: str, dry_run: bool):
+    """
+    Forge a new skill from SOURCE.
+
+    SOURCE can be a URL, Python library name, description, file path,
+    GitHub repo, or MCP server URL.
+
+    Examples:
+      neuralclaw forge create "https://api.stripe.com" --use-case "charge chiro patients"
+      neuralclaw forge create "twilio" --use-case "send SMS reminders"
+      neuralclaw forge create "I want to look up drug interactions"
+    """
+    import asyncio
+    from neuralclaw.config import load_config
+    from neuralclaw.skills.forge import SkillForge
+    from neuralclaw.skills.registry import SkillRegistry
+    from neuralclaw.cortex.action.sandbox import Sandbox
+
+    console.print(f"[bold]SkillForge[/bold] — forging from: [cyan]{source[:80]}[/cyan]")
+    if use_case:
+        console.print(f"  Use case: [yellow]{use_case}[/yellow]")
+
+    config = load_config()
+    registry = SkillRegistry()
+    sandbox = Sandbox(timeout_seconds=config.forge.sandbox_timeout)
+
+    # Build provider
+    from neuralclaw.providers.router import build_provider_from_config
+    provider = build_provider_from_config(config)
+
+    forge_engine = SkillForge(
+        provider=provider, sandbox=sandbox, registry=registry,
+        model=config.forge.model,
+    )
+
+    async def _run():
+        return await forge_engine.steal(source, use_case=use_case)
+
+    with console.status("Forging skill..."):
+        result = asyncio.run(_run())
+
+    if result.success:
+        console.print(f"\n[green]✓[/green] Skill [bold]{result.skill_name}[/bold] forged!")
+        console.print(f"  Tools: {result.tools_generated}")
+        console.print(f"  Saved: {result.file_path}")
+        console.print(f"  Time:  {result.elapsed_seconds}s")
+        if dry_run:
+            console.print("\n[dim]--- Generated Code ---[/dim]")
+            console.print(result.code)
+    else:
+        console.print(f"\n[red]✗[/red] Forge failed: {result.error}")
+        if result.clarifications_needed:
+            console.print("\n[yellow]Questions needed:[/yellow]")
+            for q in result.clarifications_needed:
+                console.print(f"  - {q}")
+
+
+@forge.command(name="list")
+def forge_list():
+    """List all forged skills in ~/.neuralclaw/skills/"""
+    from pathlib import Path
+    skills_dir = Path.home() / ".neuralclaw" / "skills"
+    files = sorted(skills_dir.glob("*.py"))
+    if not files:
+        console.print("[dim]No forged skills yet. Run: neuralclaw forge create <source>[/dim]")
+        return
+    for f in files:
+        console.print(f"  {f.stem}")
+
+
+@forge.command(name="remove")
+@click.argument("skill_name")
+def forge_remove(skill_name: str):
+    """Remove a forged skill."""
+    from pathlib import Path
+    path = Path.home() / ".neuralclaw" / "skills" / f"{skill_name}.py"
+    if path.exists():
+        path.unlink()
+        console.print(f"[green]Removed:[/green] {skill_name}")
+    else:
+        console.print(f"[red]Skill not found:[/red] {skill_name}")
+
+
+@forge.command(name="show")
+@click.argument("skill_name")
+def forge_show(skill_name: str):
+    """Show the generated code for a forged skill."""
+    from pathlib import Path
+    path = Path.home() / ".neuralclaw" / "skills" / f"{skill_name}.py"
+    if path.exists():
+        console.print(path.read_text())
+    else:
+        console.print(f"[red]Skill not found:[/red] {skill_name}")
+
+
+# ---------------------------------------------------------------------------
 # Test command
 # ---------------------------------------------------------------------------
 
