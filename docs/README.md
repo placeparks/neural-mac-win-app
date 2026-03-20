@@ -1,6 +1,6 @@
 # NeuralClaw Documentation
 
-Version: `1.1.0`
+Version: `1.2.0`
 
 This doc set reflects the current repo state after the full `AGENT.md`
 roadmap implementation.
@@ -37,6 +37,9 @@ roadmap implementation.
 - A2A-compatible federation agent cards and task APIs
 - **SkillForge**: proactive skill synthesis from URLs, APIs, repos, or plain
   descriptions — works from CLI, channels, or mid-conversation
+- **SkillScout**: discovery layer on top of SkillForge — searches PyPI, GitHub,
+  npm, and MCP registries, ranks by stars/maintenance/license/relevance, and
+  auto-forges the best match into a ready-to-use skill
 
 ## Repo-local Handoff
 

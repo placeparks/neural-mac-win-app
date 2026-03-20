@@ -184,6 +184,35 @@ skill_forge = true
 neuralclaw gateway --restart
 ```
 
+## SkillScout Issues
+
+### "No candidates found"
+
+The search query may be too broad or too long. Try a more specific or shorter query:
+
+```bash
+neuralclaw scout find "password strength checker"
+```
+
+### Wrong candidate chosen
+
+If Scout auto-selects the wrong candidate, run the search step separately, review the results, then forge the correct one manually:
+
+```bash
+neuralclaw scout search "what you need"
+neuralclaw forge create "<correct-candidate>" --use-case "your use case"
+```
+
+### Scout works but forged skill does not execute
+
+This is a known code-generation fragility. The candidate metadata was valid but the generated code failed at runtime. Try re-forging the same candidate:
+
+```bash
+neuralclaw scout find "your query"
+```
+
+If the problem persists, inspect the generated file in `~/.neuralclaw/skills/` and fix it manually.
+
 ## Validation and Build
 
 Run the full release validation path:

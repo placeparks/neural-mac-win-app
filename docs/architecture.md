@@ -73,6 +73,27 @@ and output filtering.
 9. output filtering
 10. delivery, storage, audit, and evolution ticks
 
+## SkillScout (Discovery Layer)
+
+SkillScout is the discovery layer that sits between user intent and SkillForge.
+When a user describes a capability they need, SkillScout searches five
+registries in parallel (PyPI, GitHub, npm, MCP Registry, Claw Club), ranks the
+results using LLM scoring with heuristic fallback (stars, maintenance recency,
+license, relevance), and pipes the best candidate to `SkillForge.steal()`
+automatically.
+
+Key implementation details:
+
+- `skills/scout.py` sits in front of `skills/forge.py`. The flow is:
+  `scout.py` -> `forge.py` -> `registry.py`.
+- Scout commands (`/scout ...`, `!scout ...`, `scout:`, `scout`) are
+  intercepted in `gateway._on_channel_message()` alongside forge commands.
+- The `scout_skill` tool is exposed to the agent so it can self-discover
+  capabilities mid-conversation without user intervention.
+- Registry searches run concurrently via `asyncio.gather()` and results are
+  merged into a single ranked candidate list before the top pick is forwarded
+  to SkillForge.
+
 ## SkillForge (Action Cortex Extension)
 
 SkillForge extends the Action cortex with dynamic skill creation. Rather than

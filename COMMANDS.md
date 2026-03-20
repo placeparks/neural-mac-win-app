@@ -1,6 +1,6 @@
 # NeuralClaw Commands
 
-Version target: `1.1.0`
+Version target: `1.2.0`
 
 ## Install
 
@@ -136,6 +136,21 @@ Subcommands:
 | `forge list` | List all forged skills in `~/.neuralclaw/skills/` |
 | `forge show <name>` | Display the manifest and source of a forged skill |
 | `forge remove <name>` | Delete a forged skill from disk |
+
+## SkillScout
+
+```bash
+neuralclaw scout --help
+neuralclaw scout find "verify patient insurance eligibility"
+neuralclaw scout search "send SMS reminders"
+```
+
+Subcommands:
+
+| Subcommand | Purpose |
+|---|---|
+| `scout find <query>` | Search PyPI, GitHub, npm, and MCP registries for the best match, then auto-forge it into a deployable skill. |
+| `scout search <query>` | Search only — display ranked candidates without forging. |
 
 ## Release Validation
 

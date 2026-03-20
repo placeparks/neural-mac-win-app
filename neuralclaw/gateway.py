@@ -231,6 +231,7 @@ class NeuralClawGateway:
         self._desktop = None
         self._browser = None
         self._forge = None
+        self._scout = None
         self._hot_loader = None
         if feat.desktop and self._config.desktop.enabled:
             from neuralclaw.cortex.action.desktop import DesktopCortex
@@ -491,6 +492,39 @@ class NeuralClawGateway:
                         },
                     },
                 )
+                # Allowlist forge_skill in policy
+                if "forge_skill" not in self._config.policy.allowed_tools:
+                    self._config.policy.allowed_tools.append("forge_skill")
+
+                # SkillScout — discovery layer on top of SkillForge
+                from neuralclaw.skills.scout import SkillScout
+
+                self._scout = SkillScout(
+                    forge=self._forge,
+                    provider=self._provider,
+                )
+
+                # Register scout as an agent tool
+                self._skills.register_tool(
+                    name="scout_skill",
+                    description=(
+                        "Search PyPI, GitHub, npm, and MCP registries for the best "
+                        "open-source package or API that matches a need, then "
+                        "automatically forge it into a live skill. Use when the user "
+                        "describes what they need but doesn't know which library or "
+                        "API to use. Searches, ranks, picks the best, and forges it."
+                    ),
+                    function=self._scout_skill_tool,
+                    parameters={
+                        "query": {
+                            "type": "string",
+                            "description": "Natural language description of what capability is needed.",
+                        },
+                    },
+                )
+                # Allowlist scout_skill in policy
+                if "scout_skill" not in self._config.policy.allowed_tools:
+                    self._config.policy.allowed_tools.append("scout_skill")
         else:
             configured = self._config.primary_provider.name if self._config.primary_provider else "none"
             raise ProviderError(
@@ -882,6 +916,21 @@ class NeuralClawGateway:
                         )
                         if handled:
                             return
+
+                        # SkillScout intercept — handle scout commands
+                        if self._scout:
+                            from neuralclaw.skills.scout_handlers import handle_scout_message
+
+                            scout_handled = await handle_scout_message(
+                                content=msg.content,
+                                author_id=msg.author_id,
+                                channel_id=msg.channel_id,
+                                platform=channel_type_name.lower() if channel_type_name else "unknown",
+                                scout=self._scout,
+                                respond=_forge_respond,
+                            )
+                            if scout_handled:
+                                return
 
                 if await self._try_stream_channel_message(msg):
                     return
@@ -2379,6 +2428,40 @@ class NeuralClawGateway:
                 "message": f"Skill '{result.skill_name}' is now active with {result.tools_generated} tools.",
             }
         return {"ok": False, "error": result.error, "clarifications": result.clarifications_needed}
+
+    async def _scout_skill_tool(self, query: str) -> dict:
+        """Tool handler: scout for the best package/API and forge it."""
+        if not self._scout:
+            return {"error": "SkillScout not enabled"}
+        result = await self._scout.scout(query)
+        if result.success:
+            # Allowlist the forged tools
+            if result.forge_result and result.forge_result.manifest:
+                for tool in result.forge_result.manifest.tools:
+                    if tool.name not in self._config.policy.allowed_tools:
+                        self._config.policy.allowed_tools.append(tool.name)
+            candidates_summary = [
+                {"name": c.name, "registry": c.registry.value, "stars": c.stars}
+                for c in result.candidates[:5]
+            ]
+            return {
+                "ok": True,
+                "skill_name": result.skill_name,
+                "tools": result.tools,
+                "candidates_searched": len(result.candidates),
+                "top_candidates": candidates_summary,
+                "chosen": result.chosen.name if result.chosen else "",
+                "elapsed": result.elapsed_seconds,
+                "message": (
+                    f"Scouted {len(result.candidates)} candidates, "
+                    f"forged '{result.skill_name}' with {len(result.tools)} tools."
+                ),
+            }
+        return {
+            "ok": False,
+            "error": result.error,
+            "candidates_searched": len(result.candidates),
+        }
 
     async def _graceful_shutdown(self) -> None:
         """Ordered shutdown for in-flight requests and adapters."""

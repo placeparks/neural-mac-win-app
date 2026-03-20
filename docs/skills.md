@@ -66,6 +66,85 @@ Builtin skill handlers should:
 - validate outbound URLs through `validate_url_with_dns()`
 - rely on policy and idempotency for side-effect safety
 
+## SkillScout — Intelligent Skill Discovery
+
+### Overview
+
+SkillScout is a discovery layer that sits in front of SkillForge. Instead of
+requiring users to find a skill source and forge it manually, SkillScout lets
+them describe what they need in plain language. It searches five registries in
+parallel, ranks the results using a combination of LLM reasoning and heuristic
+signals, selects the best candidate, and pipes it directly to
+`SkillForge.steal()` for automatic skill creation.
+
+### Supported Registries
+
+| Registry | What it searches |
+|----------|-----------------|
+| PyPI | Python packages by keyword and classifier |
+| GitHub | Repositories by topic, description, and README |
+| npm | Node packages by keyword |
+| MCP Registry | Model Context Protocol servers and tools |
+| Claw Club | NeuralClaw community marketplace |
+
+All five registries are queried concurrently. Results are merged into a single
+ranked candidate list before selection.
+
+### Ranking
+
+Candidates are ranked using a hybrid approach:
+
+1. **LLM-powered ranking** — an LLM scores each candidate for relevance to the
+   user's query, weighing description match, documentation quality, and
+   ecosystem fit.
+2. **Heuristic fallback** — when LLM ranking is unavailable or as a tiebreaker,
+   candidates are scored by stars/downloads, maintenance recency, license
+   permissiveness, and registry priority.
+
+The top-ranked candidate is automatically forwarded to SkillForge for skill
+generation.
+
+### Channel Commands
+
+```
+Discord:   !scout <query>
+Telegram:  /scout <query>
+Slack:     scout <query>
+WhatsApp:  scout: <query>
+CLI:       neuralclaw scout find <query>
+           neuralclaw scout search <query>
+```
+
+### Agent Self-Scouting
+
+The `scout_skill` tool lets the agent discover and install new capabilities
+mid-conversation. When the agent determines it lacks a skill needed for the
+current task, it can call `scout_skill` to search all registries, rank results,
+and forge the best match — all without user intervention.
+
+### CLI Commands
+
+```bash
+neuralclaw scout find <query>       # Search and auto-forge the best result
+neuralclaw scout search <query>     # Search only — list candidates without forging
+```
+
+### Full Flow Example
+
+```
+User:  "I need to send SMS reminders"
+
+  1. SkillScout receives the query
+  2. Searches PyPI, GitHub, npm, MCP Registry, and Claw Club in parallel
+  3. Collects candidates: twilio (PyPI), vonage-sms (npm), sms-mcp (MCP Registry), ...
+  4. LLM + heuristic ranking picks twilio as the best match
+  5. Pipes "twilio" to SkillForge.steal(source="twilio", use_case="send SMS reminders")
+  6. SkillForge generates the skill, tests it, and registers it
+  7. Agent now has SMS tools available and responds to the user
+```
+
+---
+
 ## SkillForge — Proactive Skill Synthesis
 
 ### Overview

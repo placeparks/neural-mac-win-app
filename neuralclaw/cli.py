@@ -2532,6 +2532,102 @@ def forge_show(skill_name: str):
 
 
 # ---------------------------------------------------------------------------
+# Scout command group
+# ---------------------------------------------------------------------------
+
+@main.group()
+def scout():
+    """SkillScout — discover and forge skills from open-source registries."""
+    pass
+
+
+@scout.command(name="find")
+@click.argument("query")
+def scout_find(query: str):
+    """
+    Scout for the best open-source match and forge it automatically.
+
+    \b
+    Examples:
+        neuralclaw scout find "verify patient insurance eligibility"
+        neuralclaw scout find "image resizing library"
+        neuralclaw scout find "DNS lookup tool"
+    """
+    import asyncio
+    from neuralclaw.config import load_config
+
+    async def _run():
+        config = load_config()
+        from neuralclaw.skills.forge import SkillForge
+        from neuralclaw.skills.scout import SkillScout
+        from neuralclaw.skills.registry import SkillRegistry
+        from neuralclaw.cortex.action.sandbox import Sandbox
+
+        registry = SkillRegistry()
+        registry.load_builtins()
+
+        provider = _get_provider(config)
+        if not provider:
+            console.print("[red]No LLM provider configured. Run: neuralclaw init[/red]")
+            return
+
+        forge = SkillForge(
+            provider=provider,
+            sandbox=Sandbox(timeout_seconds=config.forge.sandbox_timeout),
+            registry=registry,
+            model=config.forge.model,
+        )
+        scout_engine = SkillScout(forge=forge, provider=provider)
+
+        console.print(f"[cyan]Scouting:[/cyan] {query}")
+        console.print("Searching PyPI, GitHub, npm, MCP registries...")
+        result = await scout_engine.scout(query)
+
+        if result.candidates:
+            console.print(f"\n[bold]Found {len(result.candidates)} candidates:[/bold]")
+            for i, c in enumerate(result.candidates[:5]):
+                stars = f" ({c.stars} ★)" if c.stars else ""
+                console.print(f"  {i+1}. [{c.registry.value}] {c.name}{stars} — {c.description[:60]}")
+
+        if result.success:
+            console.print(f"\n[green]✅ Forged:[/green] {result.skill_name}")
+            for t in result.tools:
+                console.print(f"  • {t}")
+            console.print(f"\n[dim]({result.elapsed_seconds}s)[/dim]")
+        else:
+            console.print(f"\n[red]Failed:[/red] {result.error}")
+
+    asyncio.run(_run())
+
+
+@scout.command(name="search")
+@click.argument("query")
+def scout_search(query: str):
+    """Search registries without forging — just show candidates."""
+    import asyncio
+
+    async def _run():
+        from neuralclaw.skills.scout import SkillScout
+
+        scout_engine = SkillScout(forge=None, provider=None)
+        candidates = await scout_engine._search_all(query)
+
+        if not candidates:
+            console.print(f"[yellow]No results found for:[/yellow] {query}")
+            return
+
+        console.print(f"[bold]Found {len(candidates)} candidates:[/bold]")
+        for i, c in enumerate(candidates):
+            stars = f" ({c.stars} ★)" if c.stars else ""
+            lic = f" [{c.license}]" if c.license else ""
+            console.print(f"  {i+1}. [{c.registry.value}] {c.name}{stars}{lic}")
+            if c.description:
+                console.print(f"     {c.description[:80]}")
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
 # Test command
 # ---------------------------------------------------------------------------
 

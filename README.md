@@ -16,6 +16,10 @@ integrations, and A2A-compatible federation.
   library, GitHub repo, MCP server, or plain description and it generates
   domain-specific tools tailored to your use case. Works from any channel
   (`/forge`, `!forge`, `forge:`) or the agent forges its own skills mid-conversation
+- **SkillScout**: Discovery layer on top of SkillForge — searches PyPI, GitHub,
+  npm, and MCP registries, ranks results by stars, maintenance, license, and
+  relevance, then auto-forges the best match into a ready-to-use skill.
+  Works from any channel (`/scout`, `!scout`, `scout:`)
 - **Dynamic self-awareness**: Agent knows its own capabilities and active
   tools; never says "I can't" when it has a tool for the job
 - **Multi-provider routing**: `openai` (GPT-5.4), `anthropic` (Claude 4.6),
@@ -56,6 +60,38 @@ Supported sources: URLs, OpenAPI/Swagger specs, GraphQL endpoints, Python librar
 GitHub repos, MCP servers, code files, or natural language descriptions.
 
 Skills are saved to `~/.neuralclaw/skills/` and hot-loaded without restart.
+
+## SkillScout — Find the Best Tool, Automatically
+
+SkillScout is a discovery layer on top of SkillForge. Instead of handing it a
+specific URL or library, you describe what you need and SkillScout searches
+package registries and repositories to find the best candidate, then forges it
+for you.
+
+**Flow:**
+
+1. User says: `scout: verify patient insurance eligibility`
+2. SkillScout searches PyPI, GitHub, npm, and MCP registries
+3. Results are ranked by stars, maintenance status, license, and relevance
+4. The best match is automatically forged into a deployable skill
+
+```
+User: scout: verify patient insurance eligibility
+
+SkillScout searching...
+  PyPI:   eligibility-check (★ 340, MIT, maintained)
+  GitHub: open-insurance/eligibility-api (★ 1.2k, Apache-2.0)
+  npm:    insurance-verify (★ 89, MIT)
+  MCP:    mcp-insurance-eligibility (★ 210, MIT)
+
+Best match: open-insurance/eligibility-api (★ 1.2k, Apache-2.0, active)
+Forging skill... done.
+
+✓ Skill "insurance_eligibility" forged and loaded.
+  Commands: check_eligibility, get_payer_list, verify_member
+```
+
+Channel commands: `/scout`, `!scout`, `scout:`
 
 ## Install
 

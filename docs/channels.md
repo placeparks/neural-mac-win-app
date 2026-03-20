@@ -95,6 +95,17 @@ SkillForge commands are intercepted by each channel adapter **before** normal me
 | Slack | `forge <source> [for: <use_case>]` |
 | WhatsApp | `forge: <source>` |
 
+## Scout Command Triggers
+
+SkillScout commands follow the same interception pattern as forge commands -- they are handled by each channel adapter before normal message processing and never reach the LLM router.
+
+| Platform | Pattern |
+|---|---|
+| Discord | `!scout <query>` |
+| Telegram | `/scout <query>` |
+| Slack | `scout <query>` |
+| WhatsApp | `scout: <query>` |
+
 ## Web Chat
 
 - always added by the gateway

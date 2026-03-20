@@ -13,6 +13,16 @@ Create the skill in the registry pattern already used by built-ins, restart the 
 ## Expected result
 The new skill shows up in the dashboard and can be called by the router.
 
+## The Easiest Way: SkillScout
+
+Before writing anything, check if someone has already published what you need:
+
+```bash
+neuralclaw scout find "what you need"
+```
+
+Scout searches public skill registries, picks the best candidate, and forges it through SkillForge automatically. If the result is close but not perfect, edit the generated file in `~/.neuralclaw/skills/`.
+
 ## The Easy Way: SkillForge
 
 Instead of manually writing a skill from scratch, you can use **SkillForge** to generate one in seconds.

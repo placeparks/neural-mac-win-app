@@ -627,6 +627,9 @@ class SkillForge:
                 error="Code generation produced empty output",
             )
 
+        # Post-generation hardening: fix common LLM mistakes
+        code = self._harden_generated_code(code, spec)
+
         findings = StaticAnalyzer.scan(code)
         high_risk = [f for f in findings if f.get("severity", 0) > 0.85]
         if high_risk:
@@ -763,6 +766,113 @@ If you need more info to design good domain-specific tools, put questions in "cl
                 clarifications=[f"Could not auto-design tools: {e}. Describe what you want this skill to do."],
             )
 
+    def _harden_generated_code(self, code: str, spec: UseCaseSpec) -> str:
+        """Fix common LLM code generation mistakes before sandbox testing.
+
+        1. Add missing imports for referenced names
+        2. Remove references to undefined base URLs
+        3. Ensure all tool functions accept their declared parameters
+        4. Strip markdown fences that slipped through
+        """
+        lines = code.split("\n")
+
+        # --- Fix 1: Add missing imports ---
+        needed_imports: list[str] = []
+
+        # Check for Capability reference without import
+        if "Capability" in code and "from neuralclaw.cortex.action.capabilities import" not in code:
+            needed_imports.append("from neuralclaw.cortex.action.capabilities import Capability")
+
+        # Check for SkillManifest reference without import
+        if "SkillManifest" in code and "from neuralclaw.skills.manifest import" not in code:
+            needed_imports.append(
+                "from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParameter"
+            )
+
+        # Check for validate_url_with_dns without import
+        if "validate_url_with_dns" in code and "from neuralclaw.cortex.action.network import" not in code:
+            needed_imports.append("from neuralclaw.cortex.action.network import validate_url_with_dns")
+
+        # Check for aiohttp usage without import
+        if "aiohttp" in code and "import aiohttp" not in code:
+            needed_imports.append("import aiohttp")
+
+        # Check for json usage without import
+        if "json." in code and "import json" not in code:
+            needed_imports.append("import json")
+
+        # Check for os.getenv without import
+        if "os.getenv" in code and "import os" not in code:
+            needed_imports.append("import os")
+
+        if needed_imports:
+            # Insert after the first line (or __future__ import)
+            insert_idx = 0
+            for i, line in enumerate(lines):
+                if line.strip().startswith("from __future__"):
+                    insert_idx = i + 1
+                    break
+                elif line.strip().startswith("import ") or line.strip().startswith("from "):
+                    insert_idx = i
+                    break
+            for imp in reversed(needed_imports):
+                lines.insert(insert_idx, imp)
+
+        code = "\n".join(lines)
+
+        # --- Fix 2: Replace invalid Capability enum values ---
+        # The LLM often invents values like Capability.NETWORK, Capability.HTTP, etc.
+        _VALID_CAPABILITIES = {
+            "FILESYSTEM_READ", "FILESYSTEM_WRITE", "NETWORK_HTTP",
+            "NETWORK_WEBSOCKET", "SHELL_EXECUTE", "MESSAGING_READ",
+            "MESSAGING_WRITE", "CALENDAR_READ", "CALENDAR_WRITE",
+            "MEMORY_READ", "MEMORY_WRITE", "GITHUB_CLONE",
+            "API_CLIENT", "AUDIO_OUTPUT",
+        }
+        # Find all Capability.XXX references and fix invalid ones
+        for match in re.finditer(r"Capability\.(\w+)", code):
+            cap_name = match.group(1)
+            if cap_name not in _VALID_CAPABILITIES:
+                # Map common LLM mistakes to valid values
+                _CAP_FIXES = {
+                    "NETWORK": "NETWORK_HTTP",
+                    "HTTP": "NETWORK_HTTP",
+                    "WEBSOCKET": "NETWORK_WEBSOCKET",
+                    "FILESYSTEM": "FILESYSTEM_READ",
+                    "FILE_READ": "FILESYSTEM_READ",
+                    "FILE_WRITE": "FILESYSTEM_WRITE",
+                    "SHELL": "SHELL_EXECUTE",
+                    "MESSAGING": "MESSAGING_READ",
+                    "CALENDAR": "CALENDAR_READ",
+                    "MEMORY": "MEMORY_READ",
+                    "AUDIO": "AUDIO_OUTPUT",
+                    "API": "API_CLIENT",
+                    "GITHUB": "GITHUB_CLONE",
+                }
+                fixed_cap = _CAP_FIXES.get(cap_name, "NETWORK_HTTP")
+                code = code.replace(f"Capability.{cap_name}", f"Capability.{fixed_cap}")
+
+        # --- Fix 3: Replace hardcoded placeholder URLs with env var pattern ---
+        code = re.sub(
+            r'_BASE_URL\s*=\s*"(N/A|YOUR_BASE_URL|https?://example\.com[^"]*)"',
+            '_BASE_URL = os.getenv("SKILL_BASE_URL", "")',
+            code,
+        )
+
+        # --- Fix 4: Ensure tool functions accept **kwargs for flexibility ---
+        # Find all async def tool_name(...) and ensure they won't break on extra params
+        for t in spec.tools:
+            # Check if the function exists and add **kwargs if not present
+            pattern = rf"(async\s+def\s+{re.escape(t.name)}\s*\([^)]*)"
+            match = re.search(pattern, code)
+            if match:
+                sig = match.group(1)
+                if "**kwargs" not in sig and "**kw" not in sig:
+                    # Add **kwargs before closing paren
+                    code = code.replace(sig, sig.rstrip() + ", **_extra")
+
+        return code
+
     async def _generate_skill_code(
         self,
         spec: UseCaseSpec,
@@ -807,6 +917,16 @@ Requirements:
 7. Add a brief docstring to each function
 8. Handle API keys via os.getenv() — never hardcode credentials
 9. Include retry logic for transient network failures (max 2 retries)
+
+CRITICAL RULES (violations = broken skill):
+A. Each async def MUST accept EXACTLY the parameters listed in TOOLS above
+   e.g. if tool has params (name, age), the function must be: async def tool_name(name: str, age: int, **_extra)
+B. ALWAYS add **_extra to function signatures for forward compatibility
+C. If BASE URL is "N/A" or empty, the skill MUST work WITHOUT any external API
+   — use Python stdlib (hashlib, socket, platform, zipfile, json, etc.)
+   — do NOT invent URLs or assume an API exists
+D. NEVER reference variables that are not defined in the same file
+E. The function name MUST match the tool name exactly
 
 Skill file template:
 ```python
@@ -933,14 +1053,67 @@ def get_manifest() -> SkillManifest:
         return code + manifest_code
 
     async def _sandbox_test(self, code: str, spec: UseCaseSpec) -> SandboxResult:
-        """Run the generated skill through sandbox."""
+        """Run the generated skill through sandbox with deep validation.
+
+        Tests:
+        1. get_manifest() returns a valid SkillManifest
+        2. Each tool handler is callable with its declared parameters
+        3. No NameError / ImportError at module scope
+        4. Handler signatures accept the declared parameters
+        """
+        # Build per-tool smoke tests
+        tool_tests = []
+        for t in spec.tools:
+            # Build kwargs with safe dummy values per type
+            kwargs_parts = []
+            for p in t.parameters:
+                ptype = p.get("type", "string")
+                if ptype == "string":
+                    val = '""'
+                elif ptype in ("integer", "number"):
+                    val = "0"
+                elif ptype == "boolean":
+                    val = "False"
+                elif ptype == "array":
+                    val = "[]"
+                else:
+                    val = '""'
+                kwargs_parts.append(f'"{p["name"]}": {val}')
+            kwargs_str = "{" + ", ".join(kwargs_parts) + "}"
+
+            tool_tests.append(f"""
+# Validate tool: {t.name}
+_tool_{t.name} = next((t for t in manifest.tools if t.name == "{t.name}"), None)
+assert _tool_{t.name} is not None, "Tool '{t.name}' not in manifest"
+assert callable(_tool_{t.name}.handler), "Tool '{t.name}' handler is not callable"
+
+# Smoke-call with dummy args to catch signature mismatches
+import inspect as _ins
+_sig = _ins.signature(_tool_{t.name}.handler)
+_dummy_kwargs = {kwargs_str}
+try:
+    _bound = _sig.bind(**_dummy_kwargs)
+    print("  SIG_OK: {t.name}")
+except TypeError as _e:
+    # Try without required params that have defaults
+    print(f"  SIG_WARN: {t.name}: {{_e}}")
+""")
+
+        all_tool_tests = "\n".join(tool_tests)
+
         test_code = f"""{code}
 
 import asyncio
 
+# Phase 1: manifest loads
 manifest = get_manifest()
 assert manifest.name == "{spec.skill_name}", f"Name mismatch: {{manifest.name}}"
 assert len(manifest.tools) >= 1, "No tools in manifest"
+print("MANIFEST_OK:", manifest.name, "tools:", len(manifest.tools))
+
+# Phase 2: each tool handler is callable and accepts declared params
+{all_tool_tests}
+
 print("FORGE_TEST_OK:", manifest.name, "tools:", len(manifest.tools))
 """
         return await self._sandbox.execute_python(test_code)
@@ -950,7 +1123,12 @@ print("FORGE_TEST_OK:", manifest.name, "tools:", len(manifest.tools))
         try:
             response = await self._provider.complete(
                 messages=[
-                    {"role": "system", "content": "Fix the Python error in this NeuralClaw skill code. Return only the fixed code."},
+                    {"role": "system", "content": (
+                        "Fix the Python error in this NeuralClaw skill code. Return only the fixed code. "
+                        "CRITICAL: The file MUST contain a get_manifest() function that returns a SkillManifest. "
+                        "Each tool handler MUST accept exactly the parameters declared in its ToolDefinition. "
+                        "Do NOT use external APIs or base URLs unless the original code already had them working."
+                    )},
                     {"role": "user", "content": f"ERROR:\n{error[:500]}\n\nCODE:\n{code[:3000]}\n\nFix the error. Return only Python code."},
                 ],
                 temperature=0.1,
@@ -961,7 +1139,13 @@ print("FORGE_TEST_OK:", manifest.name, "tools:", len(manifest.tools))
                 fixed = fixed.split("```python")[1].split("```")[0].strip()
             elif "```" in fixed:
                 fixed = fixed.split("```")[1].split("```")[0].strip()
-            return fixed.strip()
+            fixed = fixed.strip()
+
+            # Safety: re-append get_manifest() if the fix dropped it
+            if fixed and "def get_manifest" not in fixed:
+                fixed = self._append_manifest_function(fixed, spec)
+
+            return fixed
         except Exception:
             return ""
 

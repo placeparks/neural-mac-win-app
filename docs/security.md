@@ -111,6 +111,14 @@ SkillForge-generated skills pass through the same layered security model as the 
 - **API key handling** -- Generated skills reference API keys via `os.getenv()`. Credentials are never hardcoded into skill source files.
 - **Operator-owned skills** -- Skills stored in `~/.neuralclaw/skills/` are operator-owned and locally managed. They are not part of any shared marketplace and do not execute without the operator's gateway loading them.
 
+## SkillScout Security
+
+SkillScout searches public skill registries to find candidates that match a natural-language query, then optionally hands the best match to SkillForge for code generation.
+
+- **Read-only searches** -- Scout performs only HTTP GET requests against public registries. No data is written or modified on the remote side.
+- **No credentials sent** -- Registry searches never transmit API keys, tokens, or any other credentials. Only the search query string is sent.
+- **Full SkillForge pipeline for forging** -- When Scout triggers SkillForge to generate a skill from a candidate, the entire SkillForge security pipeline applies: static analysis, mandatory sandbox testing, SSRF validation, and all other checks described in the SkillForge Security section above.
+
 ## Idempotency
 
 Mutating tools are protected by `IdempotencyStore` so retries do not duplicate

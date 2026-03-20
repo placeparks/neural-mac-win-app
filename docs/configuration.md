@@ -154,7 +154,11 @@ Feature-gates optional subsystems:
 - `desktop_allowed_apps`
 - `desktop_blocked_regions`
 
-### `[forge]` — SkillForge Settings
+### `[forge]` — SkillForge & SkillScout Settings
+
+> **Note:** SkillScout reuses the `[forge]` configuration section. No additional
+> config keys are needed for scout -- it reads `model`, `user_skills_dir`,
+> `sandbox_timeout`, and the other forge keys directly.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

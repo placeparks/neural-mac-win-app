@@ -267,6 +267,58 @@ econ.get_author_leaderboard()
 
 ---
 
+## SkillScout
+
+```python
+from neuralclaw.skills.scout import (
+    SkillScout,
+    ScoutCandidate,
+    ScoutResult,
+    SourceRegistry,
+    detect_scout_command,
+)
+
+# Constructor
+# forge: SkillForge instance used to create the skill once a candidate is selected
+# provider: LLM provider used for ranking candidates
+# http_get: optional async callable for custom HTTP fetching (defaults to internal implementation)
+scout = SkillScout(forge, provider, http_get=None)
+
+# Main entry point — searches all registries and forges the best match.
+# Returns a ScoutResult containing the winning candidate and the forge outcome.
+result: ScoutResult = await scout.scout(query="send SMS reminders")
+
+# SourceRegistry enum — identifies which registry a candidate came from
+SourceRegistry.PYPI            # "pypi"
+SourceRegistry.GITHUB          # "github"
+SourceRegistry.NPM             # "npm"
+SourceRegistry.RAPIDAPI        # "rapidapi"
+SourceRegistry.MCP_REGISTRY    # "mcp_registry"
+SourceRegistry.CLAW_CLUB       # "claw_club"
+
+# ScoutCandidate dataclass — a single search result from any registry
+candidate.name           # str — package/repo name
+candidate.registry       # SourceRegistry
+candidate.url            # str — link to the package or repo
+candidate.description    # str — short summary
+candidate.stars          # int | None — GitHub stars or download count
+candidate.license        # str | None — SPDX license identifier
+candidate.score          # float — combined ranking score (0.0–1.0)
+
+# ScoutResult dataclass — the full outcome of a scout operation
+result.candidates        # list[ScoutCandidate] — all candidates found, ranked
+result.winner            # ScoutCandidate | None — the top-ranked candidate
+result.forge_result      # ForgeResult | None — result from SkillForge.steal()
+result.error             # str | None — error message if scouting failed
+
+# Channel command parser — detects scout commands in message content
+parsed = detect_scout_command(content)
+# Returns None if no scout command found, otherwise the query string.
+# Recognizes: /scout <query>, !scout <query>, scout: <query>, scout <query>
+```
+
+---
+
 ## SkillForge
 
 ```python

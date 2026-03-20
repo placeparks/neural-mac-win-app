@@ -2,6 +2,25 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
+## [1.2.0] - 2026-03-20
+
+### Added — SkillScout (Discovery Layer)
+- **`neuralclaw/skills/scout.py`**: New `SkillScout` engine that searches PyPI,
+  GitHub, npm, MCP registries, and Claw Club marketplace in parallel
+- **Automatic ranking**: LLM-powered ranking with heuristic fallback (stars,
+  license, registry priority)
+- **Full pipeline**: `scout("need X")` → search → rank → `forge.steal()` → live
+  skill in under 2 minutes
+- **`neuralclaw/skills/scout_handlers.py`**: Channel command handlers —
+  `!scout`, `/scout`, `scout:` across Discord, Telegram, Slack, WhatsApp
+- **`scout_skill` agent tool**: Agent can self-scout mid-conversation
+- **CLI commands**: `neuralclaw scout find <query>` and
+  `neuralclaw scout search <query>` (search-only, no forge)
+- **Gateway wiring**: Scout command interception in `_on_channel_message()`,
+  tool registration with policy allowlisting
+- **14 tests** covering command detection, heuristic ranking, Claw Club
+  priority, URL encoding, and end-to-end mock flow
+
 ## [1.1.6] - 2026-03-20
 
 ### Fixed — Memory System

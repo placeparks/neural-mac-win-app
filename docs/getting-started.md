@@ -119,3 +119,13 @@ neuralclaw forge create "I want to send SMS reminders" --use-case "appointment r
 # Or from Telegram
 /forge twilio for: send appointment reminders
 ```
+
+## Scout Your First Skill
+
+SkillScout searches public registries for existing skill candidates and can forge them automatically:
+
+```bash
+neuralclaw scout find "check password strength"
+```
+
+Scout finds the best matching candidate, passes it to SkillForge, and registers the resulting skill with the gateway -- all in one command.
