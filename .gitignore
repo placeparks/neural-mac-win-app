@@ -37,6 +37,9 @@ Desktop.ini
 *.key
 *.pem
 
+# Stale build artifacts
+neuralclaw-*/
+
 # Testing
 .pytest_cache/
 .coverage

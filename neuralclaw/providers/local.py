@@ -21,9 +21,15 @@ class LocalProvider(OpenAIProvider):
         self,
         model: str = "qwen3.5:2b",
         base_url: str = "http://localhost:11434/v1",
+        request_timeout_seconds: float = 120.0,
     ) -> None:
         # Local models don't need an API key, but the parent class expects one
-        super().__init__(api_key="local", model=model, base_url=base_url)
+        super().__init__(
+            api_key="local",
+            model=model,
+            base_url=base_url,
+            request_timeout_seconds=request_timeout_seconds,
+        )
 
     async def is_available(self) -> bool:
         """Check if local model server is running."""

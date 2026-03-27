@@ -17,7 +17,7 @@ class ProviderError(NeuralClawError):
     """LLM provider is unreachable, unauthorized, or returned bad data."""
 
 
-class MemoryError(NeuralClawError):
+class MemoryStoreError(NeuralClawError):
     """Memory store initialization, read, or write failure."""
 
 

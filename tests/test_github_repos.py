@@ -11,13 +11,16 @@ import pytest
 
 from neuralclaw.skills.builtins.github_repos import (
     REPOS_DIR,
+    _build_python_install_command,
     _detect_deps,
+    _preferred_python_extras,
     _safe_repo_name,
     _validate_git_url,
     clone_repo,
     install_repo_deps,
     list_repos,
     remove_repo,
+    set_workspace_config,
 )
 
 
@@ -141,6 +144,40 @@ class TestDetectDeps:
         assert deps[0]["type"] == "go"
 
 
+class TestPythonInstallPlanning:
+    def test_detects_preferred_pyproject_extras(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text(
+            """
+[project]
+name = "demo"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+test = ["coverage"]
+docs = ["mkdocs"]
+""".strip()
+        )
+
+        extras = _preferred_python_extras(tmp_path)
+
+        assert extras == ["test", "dev"]
+
+    def test_builds_editable_install_with_test_extras(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text(
+            """
+[project]
+name = "demo"
+
+[project.optional-dependencies]
+test = ["pytest"]
+""".strip()
+        )
+
+        cmd = _build_python_install_command(tmp_path, "pip", "pyproject.toml")
+
+        assert cmd == ["pip", "install", "-e", ".[test]", "--no-input"]
+
+
 # ---------------------------------------------------------------------------
 # clone_repo (mocked)
 # ---------------------------------------------------------------------------
@@ -168,6 +205,25 @@ class TestCloneRepo:
         assert result["success"] is True
         assert result["already_existed"] is True
         assert len(result["detected_deps"]) == 1
+
+    def test_workspace_config_overrides_repo_dir(self, tmp_path):
+        config = type("Workspace", (), {
+            "repos_dir": str(tmp_path / "custom"),
+            "max_repo_size_mb": 50,
+            "max_clone_timeout_seconds": 99,
+            "max_install_timeout_seconds": 123,
+            "allowed_git_hosts": ["github.com"],
+        })()
+        original = REPOS_DIR
+        try:
+            set_workspace_config(config)
+            from neuralclaw.skills.builtins import github_repos as mod
+
+            assert mod.REPOS_DIR == (tmp_path / "custom")
+        finally:
+            from neuralclaw.skills.builtins import github_repos as mod
+
+            mod.REPOS_DIR = original
 
 
 # ---------------------------------------------------------------------------
@@ -228,3 +284,67 @@ class TestRemoveRepo:
         result = await remove_repo("../../etc")
         assert "error" in result
         assert "traversal" in result["error"].lower()
+
+
+class TestInstallRepoDeps:
+    @pytest.mark.asyncio
+    async def test_node_install_uses_ci_when_lockfile_exists(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("neuralclaw.skills.builtins.github_repos.REPOS_DIR", tmp_path)
+        repo = tmp_path / "my_repo"
+        repo.mkdir()
+        (repo / "package.json").write_text("{}")
+        (repo / "package-lock.json").write_text("{}")
+        monkeypatch.setattr(shutil, "which", lambda name: "npm" if name == "npm" else None)
+
+        commands = []
+
+        class FakeSandbox:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def execute_command(self, cmd, working_dir=None):
+                commands.append(cmd)
+                return type("Result", (), {
+                    "success": True,
+                    "output": "",
+                    "error": None,
+                    "execution_time_ms": 1.0,
+                })()
+
+        monkeypatch.setattr("neuralclaw.skills.builtins.github_repos.Sandbox", FakeSandbox)
+
+        result = await install_repo_deps("my_repo")
+
+        assert result["success"] is True
+        assert commands[0][:2] == ["npm", "ci"]
+
+    @pytest.mark.asyncio
+    async def test_node_install_includes_dev_dependencies(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("neuralclaw.skills.builtins.github_repos.REPOS_DIR", tmp_path)
+        repo = tmp_path / "my_repo"
+        repo.mkdir()
+        (repo / "package.json").write_text("{}")
+        monkeypatch.setattr(shutil, "which", lambda name: "npm" if name == "npm" else None)
+
+        commands = []
+
+        class FakeSandbox:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def execute_command(self, cmd, working_dir=None):
+                commands.append(cmd)
+                return type("Result", (), {
+                    "success": True,
+                    "output": "",
+                    "error": None,
+                    "execution_time_ms": 1.0,
+                })()
+
+        monkeypatch.setattr("neuralclaw.skills.builtins.github_repos.Sandbox", FakeSandbox)
+
+        result = await install_repo_deps("my_repo")
+
+        assert result["success"] is True
+        assert commands[0][0:2] == ["npm", "install"]
+        assert "--production" not in commands[0]

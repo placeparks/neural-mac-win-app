@@ -22,10 +22,12 @@ class AnthropicProvider(LLMProvider):
         api_key: str,
         model: str = "claude-sonnet-4-6",
         base_url: str = "https://api.anthropic.com",
+        request_timeout_seconds: float = 120.0,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._base_url = base_url.rstrip("/")
+        self._request_timeout_seconds = request_timeout_seconds
 
     async def complete(
         self,
@@ -112,7 +114,7 @@ class AnthropicProvider(LLMProvider):
                 f"{self._base_url}/v1/messages",
                 json=payload,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=120),
+                timeout=aiohttp.ClientTimeout(total=self._request_timeout_seconds),
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()

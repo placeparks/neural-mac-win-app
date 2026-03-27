@@ -22,6 +22,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover
+    tomllib = None  # type: ignore[assignment]
+
 from neuralclaw.cortex.action.capabilities import Capability
 from neuralclaw.cortex.action.sandbox import Sandbox
 from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParameter
@@ -48,16 +53,21 @@ DEPENDENCY_HANDLERS: dict[str, dict[str, Any]] = {
 # Module-level workspace config — set by gateway on init
 _max_clone_timeout: int = 120
 _max_install_timeout: int = 300
+_max_repo_size_mb: int = 500
 _allowed_git_hosts: set[str] = set(ALLOWED_GIT_HOSTS)
 
 
 def set_workspace_config(config: Any) -> None:
     """Configure workspace settings from ``WorkspaceConfig``."""
-    global _max_clone_timeout, _max_install_timeout, _allowed_git_hosts
+    global REPOS_DIR, _max_clone_timeout, _max_install_timeout, _max_repo_size_mb, _allowed_git_hosts
+    if hasattr(config, "repos_dir") and config.repos_dir:
+        REPOS_DIR = Path(str(config.repos_dir)).expanduser()
     if hasattr(config, "max_clone_timeout_seconds"):
         _max_clone_timeout = config.max_clone_timeout_seconds
     if hasattr(config, "max_install_timeout_seconds"):
         _max_install_timeout = config.max_install_timeout_seconds
+    if hasattr(config, "max_repo_size_mb"):
+        _max_repo_size_mb = config.max_repo_size_mb
     if hasattr(config, "allowed_git_hosts"):
         _allowed_git_hosts = set(config.allowed_git_hosts)
 
@@ -102,11 +112,54 @@ def _detect_deps(repo_dir: Path) -> list[dict[str, str]]:
     return found
 
 
+def _repo_size_mb(repo_dir: Path) -> float:
+    """Compute a repository's on-disk size."""
+    size_bytes = sum(f.stat().st_size for f in repo_dir.rglob("*") if f.is_file())
+    return round(size_bytes / (1024 * 1024), 1)
+
+
+def _preferred_python_extras(repo_dir: Path) -> list[str]:
+    """Detect common dev/test extras from ``pyproject.toml``."""
+    pyproject = repo_dir / "pyproject.toml"
+    if tomllib is None or not pyproject.exists():
+        return []
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    optional = (
+        data.get("project", {}).get("optional-dependencies", {})
+        if isinstance(data, dict)
+        else {}
+    )
+    if not isinstance(optional, dict):
+        return []
+
+    preferred: list[str] = []
+    for name in ("test", "tests", "testing", "dev"):
+        if name in optional and name not in preferred:
+            preferred.append(name)
+    return preferred
+
+
+def _build_python_install_command(repo_dir: Path, pip_bin: str, dep_file: str) -> list[str]:
+    """Build the best-effort Python install command for a repo."""
+    if dep_file == "requirements.txt":
+        return [pip_bin, "install", "-r", "requirements.txt", "--no-input"]
+
+    extras = _preferred_python_extras(repo_dir) if dep_file == "pyproject.toml" else []
+    editable_target = "."
+    if extras:
+        editable_target = f".[{','.join(extras)}]"
+    return [pip_bin, "install", "-e", editable_target, "--no-input"]
+
+
 # ---------------------------------------------------------------------------
 # Tool handlers
 # ---------------------------------------------------------------------------
 
-async def clone_repo(url: str, branch: str | None = None) -> dict[str, Any]:
+async def clone_repo(url: str, branch: str | None = None, **_kwargs: Any) -> dict[str, Any]:
     """Clone a GitHub / GitLab / Bitbucket repository."""
     allowed, reason = _validate_git_url(url)
     if not allowed:
@@ -152,6 +205,18 @@ async def clone_repo(url: str, branch: str | None = None) -> dict[str, Any]:
             "timed_out": result.timed_out,
         }
 
+    if _max_repo_size_mb > 0:
+        size_mb = _repo_size_mb(target)
+        if size_mb > _max_repo_size_mb:
+            shutil.rmtree(target, ignore_errors=True)
+            return {
+                "error": (
+                    f"Repository exceeds configured size limit: {size_mb} MB > "
+                    f"{_max_repo_size_mb} MB"
+                ),
+                "repo_name": repo_name,
+            }
+
     deps = _detect_deps(target)
     return {
         "success": True,
@@ -159,11 +224,12 @@ async def clone_repo(url: str, branch: str | None = None) -> dict[str, Any]:
         "repo_path": str(target),
         "already_existed": False,
         "detected_deps": deps,
+        "size_mb": _repo_size_mb(target),
         "clone_time_ms": result.execution_time_ms,
     }
 
 
-async def install_repo_deps(repo_name: str) -> dict[str, Any]:
+async def install_repo_deps(repo_name: str, **_kwargs: Any) -> dict[str, Any]:
     """Install dependencies for a cloned repository."""
     repo_dir = REPOS_DIR / repo_name
     if not repo_dir.exists():
@@ -210,10 +276,7 @@ async def install_repo_deps(repo_name: str) -> dict[str, Any]:
             else:
                 pip_bin = str(venv_dir / "bin" / "pip")
 
-            if dep_file == "requirements.txt":
-                cmd = [pip_bin, "install", "-r", "requirements.txt", "--no-input"]
-            else:
-                cmd = [pip_bin, "install", "-e", ".", "--no-input"]
+            cmd = _build_python_install_command(repo_dir, pip_bin, dep_file)
 
             result = await sandbox.execute_command(cmd, working_dir=str(repo_dir))
             installed.append({
@@ -232,7 +295,14 @@ async def install_repo_deps(repo_name: str) -> dict[str, Any]:
             if not npm_bin:
                 errors.append("npm is not installed or not on PATH")
                 continue
-            cmd = [npm_bin, "install", "--production", "--no-audit", "--no-fund"]
+            lockfile = next(
+                (
+                    name for name in ("package-lock.json", "npm-shrinkwrap.json")
+                    if (repo_dir / name).exists()
+                ),
+                "",
+            )
+            cmd = [npm_bin, "ci" if lockfile else "install", "--no-audit", "--no-fund"]
             result = await sandbox.execute_command(cmd, working_dir=str(repo_dir))
             installed.append({
                 "type": dep_type,
@@ -321,7 +391,7 @@ async def list_repos() -> dict[str, Any]:
     return {"repos": repos}
 
 
-async def remove_repo(repo_name: str) -> dict[str, Any]:
+async def remove_repo(repo_name: str, **_kwargs: Any) -> dict[str, Any]:
     """Remove a cloned repository."""
     repo_dir = REPOS_DIR / repo_name
     # Validate no path traversal

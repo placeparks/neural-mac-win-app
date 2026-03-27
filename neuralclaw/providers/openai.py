@@ -22,10 +22,12 @@ class OpenAIProvider(LLMProvider):
         api_key: str,
         model: str = "gpt-5.4",
         base_url: str = "https://api.openai.com/v1",
+        request_timeout_seconds: float = 120.0,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._base_url = base_url.rstrip("/")
+        self._request_timeout_seconds = request_timeout_seconds
 
     # Models that use the new API: max_completion_tokens, no custom temperature
     _NEW_API_PREFIX = ("gpt-5", "gpt-4.1", "o1", "o3", "o4")
@@ -68,7 +70,7 @@ class OpenAIProvider(LLMProvider):
                 f"{self._base_url}/chat/completions",
                 json=payload,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=120),
+                timeout=aiohttp.ClientTimeout(total=self._request_timeout_seconds),
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()

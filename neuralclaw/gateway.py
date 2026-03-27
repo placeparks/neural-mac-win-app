@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import inspect
 import logging
 import secrets
 import signal
@@ -65,8 +66,10 @@ from neuralclaw.cortex.evolution.distiller import ExperienceDistiller
 from neuralclaw.cortex.evolution.synthesizer import SkillSynthesizer
 from neuralclaw.errors import ChannelError, ConfigurationError, ProviderError, SecurityError
 from neuralclaw.health import HealthChecker, ReadinessProbe, ReadinessState
+from neuralclaw.providers.circuit_breaker import CircuitBreakerConfig
 from neuralclaw.providers.router import LLMProvider, ProviderRouter
 from neuralclaw.skills.registry import SkillRegistry
+from neuralclaw.skills.paths import resolve_user_skills_dir
 from neuralclaw.swarm.delegation import DelegationChain, DelegationPolicy
 from neuralclaw.swarm.consensus import ConsensusProtocol
 from neuralclaw.swarm.mesh import AgentMesh
@@ -378,60 +381,72 @@ class NeuralClawGateway:
 
         # Load skills
         self._skills.load_builtins()
+        self._skills.register_tool(
+            name="list_active_user_skills",
+            description=(
+                "Return the authoritative live registry view of currently active "
+                "user-provided skills and their tool names. Use this instead of "
+                "guessing from memory when asked what custom skills are active."
+            ),
+            function=self._list_active_user_skills_tool,
+        )
+        if "list_active_user_skills" not in self._config.policy.allowed_tools:
+            self._config.policy.allowed_tools.append("list_active_user_skills")
 
         # Configure built-in skills with policy roots (default-deny for FS)
         try:
             from neuralclaw.skills.builtins import file_ops as _file_ops
 
             _file_ops.set_allowed_roots(self._policy.get_allowed_roots())
-        except Exception:
-            pass
+        except Exception as e:
+            self._logger.debug("Failed to configure file_ops skill: %s", e)
 
         # Configure github_repos skill with workspace settings
         try:
             from neuralclaw.skills.builtins import github_repos as _github_repos
 
             _github_repos.set_workspace_config(self._config.workspace)
-        except Exception:
-            pass
+        except Exception as e:
+            self._logger.debug("Failed to configure github_repos skill: %s", e)
 
         # Configure repo_exec skill with workspace timeout
         try:
             from neuralclaw.skills.builtins import repo_exec as _repo_exec
 
+            _repo_exec.set_workspace_config(self._config.workspace)
             _repo_exec.set_max_exec_timeout(self._config.workspace.max_exec_timeout_seconds)
-        except Exception:
-            pass
+        except Exception as e:
+            self._logger.debug("Failed to configure repo_exec skill: %s", e)
 
         # Configure api_client skill with saved API configs
         try:
             from neuralclaw.skills.builtins import api_client as _api_client
 
             _api_client.set_api_configs(self._config.apis)
-        except Exception:
-            pass
+        except Exception as e:
+            self._logger.debug("Failed to configure api_client skill: %s", e)
 
         # Configure optional integration skills
         try:
             from neuralclaw.skills.builtins import tts as _tts
 
             _tts.set_tts_config(self._config.tts)
-        except Exception:
-            pass
+        except Exception as e:
+            self._logger.debug("Failed to configure tts skill: %s", e)
 
         try:
             from neuralclaw.skills.builtins import google_workspace as _google_workspace
 
             _google_workspace.set_google_workspace_config(self._config.google_workspace)
-        except Exception:
-            pass
+        except Exception as e:
+            self._logger.debug("Failed to configure google_workspace skill: %s", e)
 
         try:
             from neuralclaw.skills.builtins import microsoft365 as _microsoft365
 
             _microsoft365.set_microsoft365_config(self._config.microsoft365)
-        except Exception:
-            pass
+        except Exception as e:
+            self._logger.debug("Failed to configure microsoft365 skill: %s", e)
 
         if self._desktop:
             self._register_desktop_tools()
@@ -455,20 +470,29 @@ class NeuralClawGateway:
                 from neuralclaw.skills.hot_loader import SkillHotLoader
 
                 from neuralclaw.cortex.action.sandbox import Sandbox as _ForgeSandbox
+                skills_dir = resolve_user_skills_dir(self._config.forge.user_skills_dir)
+                forge_provider = self._build_forge_provider() or self._provider
 
                 self._forge = SkillForge(
-                    provider=self._provider,
+                    provider=forge_provider,
                     sandbox=_ForgeSandbox(timeout_seconds=self._config.forge.sandbox_timeout),
                     registry=self._skills,
                     bus=self._bus,
                     model=self._config.forge.model,
+                    user_skills_dir=skills_dir,
                 )
-                self._hot_loader = SkillHotLoader(
-                    registry=self._skills, bus=self._bus,
+                self._skills.load_user_skills(
                     policy_config=self._config.policy,
+                    skills_dir=skills_dir,
                 )
-                await self._hot_loader.start()
-                self._skills.load_user_skills(policy_config=self._config.policy)
+                if self._config.forge.hot_reload:
+                    self._hot_loader = SkillHotLoader(
+                        registry=self._skills,
+                        bus=self._bus,
+                        policy_config=self._config.policy,
+                        skills_dir=skills_dir,
+                    )
+                    await self._hot_loader.start(load_existing=False)
 
                 # Register forge as an agent tool
                 self._skills.register_tool(
@@ -501,7 +525,7 @@ class NeuralClawGateway:
 
                 self._scout = SkillScout(
                     forge=self._forge,
-                    provider=self._provider,
+                    provider=forge_provider,
                 )
 
                 # Register scout as an agent tool
@@ -607,12 +631,32 @@ class NeuralClawGateway:
 
     def _build_provider(self) -> ProviderRouter | None:
         """Build the provider router from config."""
+        return self._build_provider_router()
+
+    def _build_forge_provider(self) -> ProviderRouter | None:
+        """Build a dedicated provider router for forge/scout workloads."""
+        breaker_config = CircuitBreakerConfig(
+            timeout_seconds=float(self._config.forge.provider_circuit_timeout_seconds),
+            slow_call_threshold_ms=float(self._config.forge.provider_slow_call_threshold_ms),
+        )
+        return self._build_provider_router(
+            request_timeout_seconds=float(self._config.forge.provider_request_timeout_seconds),
+            breaker_config=breaker_config,
+            max_retries=int(self._config.forge.provider_max_retries),
+        )
+
+    def _build_provider_router(
+        self,
+        request_timeout_seconds: float | None = None,
+        breaker_config: CircuitBreakerConfig | None = None,
+        max_retries: int = 2,
+    ) -> ProviderRouter | None:
+        """Build the provider router from config with optional timeout overrides."""
         providers: list[LLMProvider] = []
         primary: LLMProvider | None = None
 
         cfg = self._config
 
-        # Build all configured providers
         provider_builders = {
             "openai": self._build_openai,
             "anthropic": self._build_anthropic,
@@ -628,27 +672,38 @@ class NeuralClawGateway:
         if self._provider_override:
             builder = provider_builders.get(self._provider_override)
             if builder:
-                p = builder(self._get_provider_config(self._provider_override))
+                p = self._call_provider_builder(
+                    builder,
+                    self._get_provider_config(self._provider_override),
+                    request_timeout_seconds,
+                )
                 if p:
                     primary = p
         elif cfg.primary_provider:
             builder = provider_builders.get(cfg.primary_provider.name)
             if builder:
-                p = builder(cfg.primary_provider)
+                p = self._call_provider_builder(
+                    builder,
+                    cfg.primary_provider,
+                    request_timeout_seconds,
+                )
                 if p:
                     primary = p
 
         for fp in cfg.fallback_providers:
             builder = provider_builders.get(fp.name)
             if builder:
-                p = builder(fp)
+                p = self._call_provider_builder(builder, fp, request_timeout_seconds)
                 if p:
                     providers.append(p)
 
         if not primary:
-            # Try to find any available provider
             for name, builder in provider_builders.items():
-                p = builder(self._get_provider_config(name))
+                p = self._call_provider_builder(
+                    builder,
+                    self._get_provider_config(name),
+                    request_timeout_seconds,
+                )
                 if p:
                     primary = p
                     break
@@ -656,23 +711,63 @@ class NeuralClawGateway:
         if not primary:
             return None
 
-        return ProviderRouter(primary=primary, fallbacks=providers, bus=self._bus)
+        return ProviderRouter(
+            primary=primary,
+            fallbacks=providers,
+            bus=self._bus,
+            breaker_config=breaker_config,
+            max_retries=max_retries,
+        )
 
-    def _build_openai(self, cfg: Any) -> LLMProvider | None:
+    def _call_provider_builder(
+        self,
+        builder: Any,
+        provider_cfg: Any,
+        request_timeout_seconds: float | None,
+    ) -> LLMProvider | None:
+        """Call provider builders while preserving backward-compatible test monkeypatches."""
+        params = inspect.signature(builder).parameters
+        if "request_timeout_seconds" in params:
+            return builder(provider_cfg, request_timeout_seconds=request_timeout_seconds)
+        return builder(provider_cfg)
+
+    def _build_openai(
+        self,
+        cfg: Any,
+        request_timeout_seconds: float | None = None,
+    ) -> LLMProvider | None:
         key = get_api_key("openai")
         if not key:
             return None
         from neuralclaw.providers.openai import OpenAIProvider
-        return OpenAIProvider(api_key=key, model=cfg.model or "gpt-4o", base_url=cfg.base_url or "https://api.openai.com/v1")
+        return OpenAIProvider(
+            api_key=key,
+            model=cfg.model or "gpt-4o",
+            base_url=cfg.base_url or "https://api.openai.com/v1",
+            request_timeout_seconds=request_timeout_seconds or 120.0,
+        )
 
-    def _build_anthropic(self, cfg: Any) -> LLMProvider | None:
+    def _build_anthropic(
+        self,
+        cfg: Any,
+        request_timeout_seconds: float | None = None,
+    ) -> LLMProvider | None:
         key = get_api_key("anthropic")
         if not key:
             return None
         from neuralclaw.providers.anthropic import AnthropicProvider
-        return AnthropicProvider(api_key=key, model=cfg.model or "claude-sonnet-4-20250514", base_url=cfg.base_url or "https://api.anthropic.com")
+        return AnthropicProvider(
+            api_key=key,
+            model=cfg.model or "claude-sonnet-4-20250514",
+            base_url=cfg.base_url or "https://api.anthropic.com",
+            request_timeout_seconds=request_timeout_seconds or 120.0,
+        )
 
-    def _build_openrouter(self, cfg: Any) -> LLMProvider | None:
+    def _build_openrouter(
+        self,
+        cfg: Any,
+        request_timeout_seconds: float | None = None,
+    ) -> LLMProvider | None:
         key = get_api_key("openrouter")
         if not key:
             return None
@@ -681,16 +776,26 @@ class NeuralClawGateway:
             api_key=key,
             model=cfg.model or "anthropic/claude-sonnet-4-20250514",
             base_url=cfg.base_url or "https://openrouter.ai/api/v1",
+            request_timeout_seconds=request_timeout_seconds or 120.0,
         )
 
-    def _build_local(self, cfg: Any) -> LLMProvider | None:
+    def _build_local(
+        self,
+        cfg: Any,
+        request_timeout_seconds: float | None = None,
+    ) -> LLMProvider | None:
         from neuralclaw.providers.local import LocalProvider
         return LocalProvider(
             model=cfg.model or "qwen3.5:2b",
             base_url=cfg.base_url or "http://localhost:11434/v1",
+            request_timeout_seconds=request_timeout_seconds or 120.0,
         )
 
-    def _build_proxy(self, cfg: Any) -> LLMProvider | None:
+    def _build_proxy(
+        self,
+        cfg: Any,
+        request_timeout_seconds: float | None = None,
+    ) -> LLMProvider | None:
         if not cfg.base_url:
             return None
         from neuralclaw.providers.proxy import ProxyProvider
@@ -699,6 +804,7 @@ class NeuralClawGateway:
             base_url=cfg.base_url,
             model=cfg.model or "gpt-4",
             api_key=api_key,
+            request_timeout_seconds=request_timeout_seconds or 120.0,
         )
 
     def _build_chatgpt_app(self, cfg: Any) -> LLMProvider | None:
@@ -2461,6 +2567,36 @@ class NeuralClawGateway:
             "ok": False,
             "error": result.error,
             "candidates_searched": len(result.candidates),
+        }
+
+    async def _list_active_user_skills_tool(self) -> dict:
+        """Tool handler: return the live runtime view of user skill registrations."""
+        skills_dir = resolve_user_skills_dir(self._config.forge.user_skills_dir)
+        skills = []
+        missing_files = []
+        for manifest in self._skills.list_user_skills():
+            file_path = skills_dir / f"{manifest.name}.py"
+            file_exists = file_path.exists()
+            if not file_exists:
+                missing_files.append(manifest.name)
+            skills.append({
+                "name": manifest.name,
+                "description": manifest.description,
+                "tools": [tool.name for tool in manifest.tools],
+                "file_path": str(file_path),
+                "file_exists": file_exists,
+            })
+        return {
+            "ok": True,
+            "count": len(skills),
+            "skills_dir": str(skills_dir),
+            "skills": skills,
+            "ghost_skills": missing_files,
+            "active_tool_names": sorted(
+                tool_name
+                for skill in skills
+                for tool_name in skill["tools"]
+            ),
         }
 
     async def _graceful_shutdown(self) -> None:

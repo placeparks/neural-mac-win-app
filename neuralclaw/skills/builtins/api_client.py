@@ -196,6 +196,7 @@ async def save_api_config(
     auth_key: str,
     auth_header_name: str = "X-API-Key",
     auth_query_param: str = "api_key",
+    **_kwargs: Any,
 ) -> dict[str, Any]:
     """Save an API configuration for reuse."""
     if auth_type not in ("bearer", "api_key_header", "api_key_query", "basic"):

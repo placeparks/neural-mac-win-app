@@ -15,9 +15,11 @@ from neuralclaw.skills.builtins.repo_exec import (
     _build_repo_env,
     _build_script_command,
     _detect_env_type,
+    _resolve_python_command,
     _validate_command,
     run_repo_command,
     run_repo_script,
+    set_workspace_config,
 )
 
 
@@ -142,6 +144,56 @@ class TestBuildRepoEnv:
     def test_generic(self, tmp_path):
         env = _build_repo_env(tmp_path, "generic")
         assert env == {}
+
+    def test_workspace_config_overrides_repo_dir(self, tmp_path):
+        config = type("Workspace", (), {
+            "repos_dir": str(tmp_path / "custom"),
+            "max_exec_timeout_seconds": 42,
+        })()
+        original = REPOS_DIR
+        try:
+            set_workspace_config(config)
+            from neuralclaw.skills.builtins import repo_exec as mod
+
+            assert mod.REPOS_DIR == (tmp_path / "custom")
+        finally:
+            from neuralclaw.skills.builtins import repo_exec as mod
+
+            mod.REPOS_DIR = original
+
+
+class TestResolvePythonCommand:
+    def test_rewrites_python_to_repo_venv(self, tmp_path):
+        venv_dir = tmp_path / ".venv"
+        if sys.platform == "win32":
+            scripts = venv_dir / "Scripts"
+            scripts.mkdir(parents=True)
+            (scripts / "python.exe").write_text("")
+        else:
+            bin_dir = venv_dir / "bin"
+            bin_dir.mkdir(parents=True)
+            (bin_dir / "python").write_text("")
+
+        cmd = _resolve_python_command(tmp_path, ["python", "-m", "pytest", "-q"])
+
+        assert ".venv" in cmd[0]
+        assert cmd[1:] == ["-m", "pytest", "-q"]
+
+    def test_rewrites_pytest_to_python_module_when_pytest_bin_missing(self, tmp_path):
+        venv_dir = tmp_path / ".venv"
+        if sys.platform == "win32":
+            scripts = venv_dir / "Scripts"
+            scripts.mkdir(parents=True)
+            (scripts / "python.exe").write_text("")
+        else:
+            bin_dir = venv_dir / "bin"
+            bin_dir.mkdir(parents=True)
+            (bin_dir / "python").write_text("")
+
+        cmd = _resolve_python_command(tmp_path, ["pytest", "-q"])
+
+        assert ".venv" in cmd[0]
+        assert cmd[1:] == ["-m", "pytest", "-q"]
 
 
 # ---------------------------------------------------------------------------

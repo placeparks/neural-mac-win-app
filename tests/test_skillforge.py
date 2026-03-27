@@ -2,10 +2,13 @@
 SkillForge test suite.
 Tests input detection, use-case interview, code generation, and channel parsing.
 """
+from pathlib import Path
 import pytest
 from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
 from neuralclaw.skills.forge import SkillForge, ForgeInputType
 from neuralclaw.skills.forge_handlers import detect_forge_command, detect_clarification_reply
+from neuralclaw.skills.registry import SkillRegistry
 
 
 # -- Fixtures --
@@ -118,3 +121,321 @@ def get_manifest():
 
     # Restore
     hl_mod.SKILLS_DIR = original
+
+
+@pytest.mark.asyncio
+async def test_registry_hot_load_then_boot_load_does_not_duplicate_tools(tmp_path):
+    from neuralclaw.skills.hot_loader import SkillHotLoader
+    import neuralclaw.skills.hot_loader as hl_mod
+
+    skill_code = '''
+from typing import Any
+from neuralclaw.skills.manifest import SkillManifest, ToolDefinition
+
+async def ping() -> dict[str, Any]:
+    return {"pong": True}
+
+def get_manifest():
+    return SkillManifest(name="ping_skill", description="Ping", tools=[
+        ToolDefinition(name="ping", description="Ping", handler=ping)
+    ])
+'''
+
+    home = tmp_path
+    skills_dir = home / ".neuralclaw" / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "ping_skill.py").write_text(skill_code)
+
+    original = hl_mod.SKILLS_DIR
+    hl_mod.SKILLS_DIR = skills_dir
+    registry = SkillRegistry()
+
+    try:
+        loader = SkillHotLoader(registry=registry)
+        await loader.start()
+        await loader.stop()
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("pathlib.Path.home", lambda: home)
+            registry.load_user_skills()
+        assert registry.count == 1
+        assert registry.tool_count == 1
+        assert [tool.name for tool in registry.get_all_tools()] == ["ping"]
+    finally:
+        hl_mod.SKILLS_DIR = original
+
+
+def test_invalid_user_skill_is_quarantined_on_load(tmp_path):
+    home = tmp_path
+    skills_dir = home / ".neuralclaw" / "skills"
+    skills_dir.mkdir(parents=True)
+    bad_skill = skills_dir / "bad_async_manifest.py"
+    bad_skill.write_text(
+        """
+from neuralclaw.skills.manifest import SkillManifest
+
+async def get_manifest():
+    return SkillManifest(name="broken", description="broken")
+""",
+        encoding="utf-8",
+    )
+
+    registry = SkillRegistry()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("pathlib.Path.home", lambda: home)
+        registry.load_user_skills()
+
+    quarantine_root = home / ".neuralclaw" / "skills_quarantine" / "invalid"
+    quarantined = list(quarantine_root.rglob("bad_async_manifest.py"))
+
+    assert registry.count == 0
+    assert not bad_skill.exists()
+    assert len(quarantined) == 1
+
+
+@pytest.mark.asyncio
+async def test_forge_fails_closed_when_sandbox_validation_fails(tmp_path, mock_forge):
+    from neuralclaw.cortex.action.sandbox import SandboxResult
+    from neuralclaw.skills.forge import UseCaseSpec, ToolSpec
+
+    mock_forge.USER_SKILLS_DIR = tmp_path
+    mock_forge._run_use_case_interview = AsyncMock(return_value=UseCaseSpec(
+        skill_name="broken_skill",
+        skill_description="Broken skill",
+        tools=[ToolSpec(name="do_thing", description="Do thing", parameters=[])],
+        required_imports=[],
+    ))
+    mock_forge._generate_skill_code = AsyncMock(return_value=(
+        "from typing import Any\n"
+        "async def do_thing(**_extra) -> dict[str, Any]:\n"
+        "    return {\"ok\": True}\n"
+    ))
+    mock_forge._sandbox_test = AsyncMock(return_value=SandboxResult(
+        success=False,
+        output="",
+        error="manifest invalid",
+    ))
+    mock_forge._attempt_fix = AsyncMock(return_value="")
+    mock_forge._persist_skill = AsyncMock()
+
+    result = await mock_forge._interview_then_generate("desc", "", "", "", "broken_skill")
+
+    assert result.success is False
+    assert "manifest invalid" in (result.error or "")
+    mock_forge._persist_skill.assert_not_called()
+    mock_forge._registry.hot_register.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_forge_quarantines_invalid_persisted_skill(tmp_path, mock_forge):
+    from neuralclaw.cortex.action.sandbox import SandboxResult
+    from neuralclaw.skills.forge import UseCaseSpec, ToolSpec
+
+    mock_forge.USER_SKILLS_DIR = tmp_path
+    mock_forge._run_use_case_interview = AsyncMock(return_value=UseCaseSpec(
+        skill_name="bad_manifest_skill",
+        skill_description="Broken manifest",
+        tools=[ToolSpec(name="do_thing", description="Do thing", parameters=[])],
+        required_imports=[],
+    ))
+    mock_forge._generate_skill_code = AsyncMock(return_value=(
+        "from typing import Any\n"
+        "async def do_thing(**_extra) -> dict[str, Any]:\n"
+        "    return {\"ok\": True}\n"
+    ))
+    mock_forge._sandbox_test = AsyncMock(return_value=SandboxResult(
+        success=True,
+        output="ok",
+        error=None,
+    ))
+    mock_forge._attempt_fix = AsyncMock(return_value="")
+    mock_forge._build_manifest_from_spec = MagicMock(side_effect=ValueError("broken manifest"))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("pathlib.Path.home", lambda: tmp_path)
+        result = await mock_forge._interview_then_generate("desc", "", "", "", "bad_manifest_skill")
+        quarantine_root = tmp_path / ".neuralclaw" / "skills_quarantine" / "invalid"
+        quarantined = list(quarantine_root.rglob("bad_manifest_skill.py"))
+
+        assert result.success is False
+        assert "quarantined" in (result.error or "")
+        assert not (tmp_path / "bad_manifest_skill.py").exists()
+        assert mock_forge._registry.hot_register.call_count == 0
+        assert quarantined
+
+
+def test_normalize_spec_strips_network_dependencies_for_local_only(mock_forge):
+    from neuralclaw.skills.forge import UseCaseSpec
+
+    spec = UseCaseSpec(
+        skill_name="system_monitoring",
+        skill_description="Local monitor",
+        tools=[],
+        required_imports=["aiohttp", "psutil", "validate_url_with_dns"],
+        auth_pattern="bearer",
+        base_url="https://example.com",
+    )
+
+    normalized = mock_forge._normalize_spec_for_generation(spec, local_only_requested=True)
+
+    assert normalized.base_url == ""
+    assert normalized.auth_pattern == "none"
+    assert normalized.required_imports == ["psutil"]
+
+
+@pytest.mark.asyncio
+async def test_generate_skill_code_uses_local_only_prompt_when_requested(mock_forge):
+    from neuralclaw.skills.forge import UseCaseSpec, ToolSpec
+
+    mock_forge._provider.complete = AsyncMock(return_value=SimpleNamespace(
+        content="def get_manifest():\n    return None\n",
+    ))
+    spec = UseCaseSpec(
+        skill_name="system_monitoring",
+        skill_description="Local monitor",
+        tools=[ToolSpec(name="get_system_overview", description="Overview", parameters=[])],
+        required_imports=[],
+    )
+
+    await mock_forge._generate_skill_code(
+        spec=spec,
+        base_url="",
+        auth_pattern="none",
+        extra_imports=[],
+        existing_code="",
+        local_only_requested=True,
+    )
+
+    prompt = mock_forge._provider.complete.await_args.kwargs["messages"][1]["content"]
+    assert "Do NOT import aiohttp or validate_url_with_dns" in prompt
+    assert "Do not make any HTTP calls" in prompt
+
+
+@pytest.mark.asyncio
+async def test_sandbox_test_injects_project_pythonpath(mock_forge):
+    from neuralclaw.cortex.action.sandbox import SandboxResult
+    from neuralclaw.skills.forge import UseCaseSpec, ToolSpec
+
+    mock_forge.PROJECT_ROOT = Path(r"C:\repo")
+    mock_forge._sandbox.execute_python = AsyncMock(return_value=SandboxResult(
+        success=True,
+        output="ok",
+        error=None,
+    ))
+    spec = UseCaseSpec(
+        skill_name="system_monitoring",
+        skill_description="Local monitor",
+        tools=[ToolSpec(name="get_system_overview", description="Overview", parameters=[])],
+        required_imports=[],
+    )
+
+    await mock_forge._sandbox_test("def get_manifest():\n    return None\n", spec)
+
+    kwargs = mock_forge._sandbox.execute_python.await_args.kwargs
+    assert kwargs["extra_env"]["PYTHONPATH"].startswith(r"C:\repo")
+
+
+def test_extract_explicit_skill_name_from_request_text(mock_forge):
+    explicit = mock_forge._extract_explicit_skill_name(
+        "Create a skill named system_monitoring that reports local system health",
+        "",
+    )
+
+    assert explicit == "system_monitoring"
+
+
+def test_normalize_spec_sanitizes_generated_identifiers(mock_forge):
+    from neuralclaw.skills.forge import UseCaseSpec, ToolSpec
+
+    spec = UseCaseSpec(
+        skill_name="1 Weird Skill",
+        skill_description="",
+        tools=[
+            ToolSpec(
+                name="List Processes By RAM",
+                description="",
+                parameters=[
+                    {"name": "Sort By", "type": "nonsense", "description": "", "required": True},
+                    {"name": "Sort By", "type": "integer", "description": "", "required": False},
+                ],
+            )
+        ],
+        required_imports=[],
+    )
+
+    normalized = mock_forge._normalize_spec_for_generation(spec, local_only_requested=False)
+
+    assert normalized.skill_name == "skill_1_weird_skill"
+    assert normalized.tools[0].name == "list_processes_by_ram"
+    assert normalized.tools[0].parameters[0]["name"] == "sort_by"
+    assert normalized.tools[0].parameters[0]["type"] == "string"
+    assert normalized.tools[0].parameters[1]["name"] == "sort_by_2"
+
+
+def test_finalize_generated_code_rewrites_manifest_from_spec(mock_forge):
+    from neuralclaw.skills.forge import UseCaseSpec, ToolSpec
+
+    spec = UseCaseSpec(
+        skill_name="system_monitoring",
+        skill_description="System monitoring",
+        tools=[ToolSpec(name="get_system_overview", description="Overview", parameters=[])],
+        required_imports=[],
+    )
+    code = """
+from typing import Any
+from neuralclaw.skills.manifest import SkillManifest, ToolDefinition
+
+async def wrong_handler(**_extra) -> dict[str, Any]:
+    return {"ok": True}
+
+def get_manifest():
+    return SkillManifest(
+        name="system_overview",
+        description="Wrong manifest",
+        tools=[
+            ToolDefinition(name="wrong_handler", description="Wrong", handler=wrong_handler)
+        ],
+    )
+"""
+
+    finalized = mock_forge._finalize_generated_code(code, spec, local_only_requested=True)
+
+    assert 'name="system_monitoring"' in finalized
+    assert 'name="system_overview"' not in finalized
+    assert 'name="get_system_overview"' in finalized
+    assert "handler=wrong_handler" in finalized
+
+
+@pytest.mark.asyncio
+async def test_forge_attempts_fix_on_syntax_error_before_sandbox(tmp_path, mock_forge):
+    from neuralclaw.cortex.action.sandbox import SandboxResult
+    from neuralclaw.skills.forge import UseCaseSpec, ToolSpec
+
+    mock_forge.USER_SKILLS_DIR = tmp_path
+    mock_forge._run_use_case_interview = AsyncMock(return_value=UseCaseSpec(
+        skill_name="syntax_skill",
+        skill_description="Syntax skill",
+        tools=[ToolSpec(name="ping", description="Ping", parameters=[])],
+        required_imports=[],
+    ))
+    mock_forge._generate_skill_code = AsyncMock(return_value="async def ping(:\n    return {}\n")
+    mock_forge._attempt_fix = AsyncMock(return_value=(
+        "from typing import Any\n"
+        "async def ping(**_extra) -> dict[str, Any]:\n"
+        "    return {\"ok\": True}\n"
+    ))
+    mock_forge._sandbox_test = AsyncMock(return_value=SandboxResult(
+        success=True,
+        output="ok",
+        error=None,
+    ))
+
+    result = await mock_forge._interview_then_generate(
+        "Create a skill named syntax_skill that returns a ping response",
+        "",
+        "",
+        "",
+        "syntax_skill",
+    )
+
+    assert result.success is True
+    assert mock_forge._attempt_fix.await_count == 1
+    assert mock_forge._sandbox_test.await_count == 1

@@ -2432,6 +2432,12 @@ def forge():
     pass
 
 
+def _get_user_skills_dir() -> Path:
+    from neuralclaw.skills.paths import resolve_user_skills_dir
+
+    return resolve_user_skills_dir(load_config().forge.user_skills_dir)
+
+
 @forge.command(name="create")
 @click.argument("source")
 @click.option("--use-case", "-u", default="", help="What you specifically need this skill to do")
@@ -2469,6 +2475,7 @@ def forge_create(source: str, use_case: str, dry_run: bool):
     forge_engine = SkillForge(
         provider=provider, sandbox=sandbox, registry=registry,
         model=config.forge.model,
+        user_skills_dir=config.forge.user_skills_dir,
     )
 
     async def _run():
@@ -2496,8 +2503,7 @@ def forge_create(source: str, use_case: str, dry_run: bool):
 @forge.command(name="list")
 def forge_list():
     """List all forged skills in ~/.neuralclaw/skills/"""
-    from pathlib import Path
-    skills_dir = Path.home() / ".neuralclaw" / "skills"
+    skills_dir = _get_user_skills_dir()
     files = sorted(skills_dir.glob("*.py"))
     if not files:
         console.print("[dim]No forged skills yet. Run: neuralclaw forge create <source>[/dim]")
@@ -2510,8 +2516,7 @@ def forge_list():
 @click.argument("skill_name")
 def forge_remove(skill_name: str):
     """Remove a forged skill."""
-    from pathlib import Path
-    path = Path.home() / ".neuralclaw" / "skills" / f"{skill_name}.py"
+    path = _get_user_skills_dir() / f"{skill_name}.py"
     if path.exists():
         path.unlink()
         console.print(f"[green]Removed:[/green] {skill_name}")
@@ -2523,8 +2528,7 @@ def forge_remove(skill_name: str):
 @click.argument("skill_name")
 def forge_show(skill_name: str):
     """Show the generated code for a forged skill."""
-    from pathlib import Path
-    path = Path.home() / ".neuralclaw" / "skills" / f"{skill_name}.py"
+    path = _get_user_skills_dir() / f"{skill_name}.py"
     if path.exists():
         console.print(path.read_text())
     else:

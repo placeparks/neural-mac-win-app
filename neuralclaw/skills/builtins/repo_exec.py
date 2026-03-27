@@ -35,6 +35,7 @@ ALLOWED_COMMANDS: set[str] = {
     "python", "python3", "node", "npm", "npx",
     "cargo", "go", "bash", "sh",
     "pip", "pip3", "pytest", "make",
+    "maturin", "poetry", "rustup", "uv",
 }
 
 # Substrings that immediately block a command
@@ -51,6 +52,15 @@ OUTPUT_CAP = 10_000
 
 # Module-level timeout cap
 _max_exec_timeout: int = 300
+
+
+def set_workspace_config(config: Any) -> None:
+    """Configure workspace settings from ``WorkspaceConfig``."""
+    global REPOS_DIR, _max_exec_timeout
+    if hasattr(config, "repos_dir") and config.repos_dir:
+        REPOS_DIR = Path(str(config.repos_dir)).expanduser()
+    if hasattr(config, "max_exec_timeout_seconds"):
+        _max_exec_timeout = config.max_exec_timeout_seconds
 
 
 def set_max_exec_timeout(seconds: int) -> None:
@@ -99,6 +109,42 @@ def _build_repo_env(repo_dir: Path, env_type: str) -> dict[str, str]:
             extra["NODE_PATH"] = str(node_modules)
 
     return extra
+
+
+def _resolve_python_command(repo_dir: Path, tokens: list[str]) -> list[str]:
+    """Bind python-family commands to the repo venv when one exists."""
+    if not tokens:
+        return tokens
+
+    exe = Path(tokens[0]).name.lower().replace(".exe", "")
+    if exe not in {"python", "python3", "pip", "pip3", "pytest"}:
+        return tokens
+
+    venv_dir = repo_dir / ".venv"
+    if not venv_dir.exists():
+        return tokens
+
+    if sys.platform == "win32":
+        bin_dir = venv_dir / "Scripts"
+        python_bin = bin_dir / "python.exe"
+        pip_bin = bin_dir / "pip.exe"
+        pytest_bin = bin_dir / "pytest.exe"
+    else:
+        bin_dir = venv_dir / "bin"
+        python_bin = bin_dir / "python"
+        pip_bin = bin_dir / "pip"
+        pytest_bin = bin_dir / "pytest"
+
+    if exe in {"python", "python3"} and python_bin.exists():
+        return [str(python_bin), *tokens[1:]]
+    if exe in {"pip", "pip3"} and pip_bin.exists():
+        return [str(pip_bin), *tokens[1:]]
+    if exe == "pytest":
+        if pytest_bin.exists():
+            return [str(pytest_bin), *tokens[1:]]
+        if python_bin.exists():
+            return [str(python_bin), "-m", "pytest", *tokens[1:]]
+    return tokens
 
 
 def _detect_env_type(script_path: str) -> str:
@@ -252,6 +298,7 @@ async def run_repo_script(
 async def run_repo_command(
     repo_name: str,
     command: str,
+    subdir: str = "",
     timeout_seconds: int = 60,
 ) -> dict[str, Any]:
     """Run a command within a repo's environment."""
@@ -263,6 +310,21 @@ async def run_repo_command(
     if validate_err:
         return {"error": validate_err}
 
+    # Resolve working directory (repo root or subdirectory)
+    working_dir = repo_dir
+    if subdir:
+        working_dir = repo_dir / subdir
+        try:
+            resolved_wd = working_dir.resolve()
+            if not resolved_wd.is_relative_to(repo_dir.resolve()):
+                return {"error": "Subdirectory path traversal blocked"}
+        except (ValueError, TypeError):
+            return {"error": "Invalid subdirectory path"}
+        if not resolved_wd.exists():
+            return {"error": f"Subdirectory not found: {subdir}"}
+        if not resolved_wd.is_dir():
+            return {"error": f"Not a directory: {subdir}"}
+
     # Detect env type from the first token
     exe = Path(tokens[0]).name.lower().replace(".exe", "")
     if exe in ("python", "python3", "pip", "pip3", "pytest"):
@@ -273,6 +335,8 @@ async def run_repo_command(
         env_type = "generic"
 
     extra_env = _build_repo_env(repo_dir, env_type)
+    if env_type == "python":
+        tokens = _resolve_python_command(repo_dir, tokens)
 
     timeout = min(max(timeout_seconds, 5), _max_exec_timeout)
     sandbox = Sandbox(
@@ -282,7 +346,7 @@ async def run_repo_command(
 
     result = await sandbox.execute_command(
         tokens,
-        working_dir=str(repo_dir),
+        working_dir=str(working_dir),
         extra_env=extra_env,
     )
 
@@ -339,8 +403,9 @@ def get_manifest() -> SkillManifest:
                 name="run_repo_command",
                 description=(
                     "Run an arbitrary command within a repo's environment. "
+                    "Use 'subdir' to run from a subdirectory instead of cd. "
                     "Allowed commands: python, node, npm, npx, cargo, go, bash, "
-                    "pip, pytest, make. Dangerous commands are blocked."
+                    "pip, pytest, make, maturin, poetry, uv. Dangerous commands are blocked."
                 ),
                 parameters=[
                     ToolParameter(
@@ -349,7 +414,12 @@ def get_manifest() -> SkillManifest:
                     ),
                     ToolParameter(
                         name="command", type="string",
-                        description="Command to run (e.g. 'python -m pytest', 'npm test')",
+                        description="Command to run (e.g. 'python -m pytest', 'npm test', 'maturin develop')",
+                    ),
+                    ToolParameter(
+                        name="subdir", type="string",
+                        description="Subdirectory within the repo to run the command from (e.g. 'bindings/python'). Defaults to repo root.",
+                        required=False,
                     ),
                     ToolParameter(
                         name="timeout_seconds", type="integer",

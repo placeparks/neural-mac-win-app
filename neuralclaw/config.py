@@ -224,7 +224,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "pii_patterns": [],
     },
     "policy": {
-        "max_tool_calls_per_request": 10,
+        "max_tool_calls_per_request": 25,
         "max_request_wall_seconds": 120.0,
         "allowed_tools": [
             # Built-in tools (safe defaults; unknown tools are denied)
@@ -293,6 +293,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "user_skills_dir": "",
         "hot_reload": True,
         "sandbox_timeout": 15,
+        "provider_request_timeout_seconds": 300,
+        "provider_max_retries": 0,
+        "provider_circuit_timeout_seconds": 20,
+        "provider_slow_call_threshold_ms": 240000,
         "max_tools_per_skill": 10,
         "allow_network_skills": True,
         "allow_filesystem_skills": False,
@@ -551,7 +555,7 @@ class Microsoft365Config:
 
 @dataclass
 class PolicyConfig:
-    max_tool_calls_per_request: int = 10
+    max_tool_calls_per_request: int = 25
     max_request_wall_seconds: float = 120.0
     # Tool allowlist. If empty, tools are allowed by name (legacy behavior).
     # If non-empty, any tool not in this list will be denied (recommended for production).
@@ -643,6 +647,10 @@ class ForgeConfig:
     user_skills_dir: str = ""
     hot_reload: bool = True
     sandbox_timeout: int = 15
+    provider_request_timeout_seconds: int = 300
+    provider_max_retries: int = 0
+    provider_circuit_timeout_seconds: int = 20
+    provider_slow_call_threshold_ms: int = 240000
     max_tools_per_skill: int = 10
     allow_network_skills: bool = True
     allow_filesystem_skills: bool = False

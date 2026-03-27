@@ -12,11 +12,13 @@ Slack, WhatsApp, or CLI with a single command. No developer needed.
 from __future__ import annotations
 
 import asyncio
+import ast
 import hashlib
 import importlib
 import importlib.util
 import inspect
 import json
+import os
 import re
 import sys
 import tempfile
@@ -30,6 +32,7 @@ from typing import Any, Callable
 from neuralclaw.bus.neural_bus import EventType, NeuralBus
 from neuralclaw.cortex.action.network import validate_url_with_dns
 from neuralclaw.cortex.action.sandbox import Sandbox, SandboxResult
+from neuralclaw.skills.loader import load_skill_manifest
 from neuralclaw.skills.manifest import (
     Capability,
     SkillManifest,
@@ -37,6 +40,7 @@ from neuralclaw.skills.manifest import (
     ToolParameter,
 )
 from neuralclaw.skills.marketplace import StaticAnalyzer
+from neuralclaw.skills.paths import quarantine_skill_file, resolve_user_skills_dir
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +136,8 @@ class SkillForge:
         result = await forge.steal("https://api.stripe.com/v1", use_case="charge chiro patients")
     """
 
-    USER_SKILLS_DIR = Path.home() / ".neuralclaw" / "skills"
+    USER_SKILLS_DIR = resolve_user_skills_dir()
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
     def __init__(
         self,
@@ -141,6 +146,7 @@ class SkillForge:
         registry: Any,
         bus: NeuralBus | None = None,
         model: str = "claude-sonnet-4-20250514",
+        user_skills_dir: str | Path | None = None,
     ) -> None:
         self._provider = provider
         self._sandbox = sandbox
@@ -148,7 +154,9 @@ class SkillForge:
         self._bus = bus
         self._model = model
         self._sessions: dict[str, ForgeSession] = {}
+        self.USER_SKILLS_DIR = resolve_user_skills_dir(user_skills_dir)
         self.USER_SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+        self.PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
     # -- Public interface --
 
@@ -596,12 +604,28 @@ class SkillForge:
         existing_code: str = "",
     ) -> ForgeResult:
         """Core pipeline: use-case interview -> code generation -> test -> register."""
+        local_only_requested = self._is_local_only_request(
+            capability_description=capability_description,
+            use_case=use_case,
+            base_url=base_url,
+            auth_pattern=auth_pattern,
+        )
+        explicit_skill_name = self._extract_explicit_skill_name(
+            capability_description,
+            use_case,
+        )
         spec = await self._run_use_case_interview(
             capability_description=capability_description,
             use_case=use_case,
             base_url=base_url,
             auth_pattern=auth_pattern,
-            skill_name_hint=skill_name_hint,
+            skill_name_hint=explicit_skill_name or skill_name_hint,
+            local_only_requested=local_only_requested,
+        )
+        spec = self._normalize_spec_for_generation(
+            spec,
+            local_only_requested,
+            forced_skill_name=explicit_skill_name or skill_name_hint,
         )
 
         if spec.clarifications:
@@ -618,6 +642,7 @@ class SkillForge:
             auth_pattern=auth_pattern,
             extra_imports=extra_imports or [],
             existing_code=existing_code,
+            local_only_requested=local_only_requested,
         )
 
         if not code:
@@ -628,7 +653,57 @@ class SkillForge:
             )
 
         # Post-generation hardening: fix common LLM mistakes
-        code = self._harden_generated_code(code, spec)
+        code = self._finalize_generated_code(
+            code,
+            spec,
+            local_only_requested=local_only_requested,
+        )
+        preflight_error = self._preflight_generated_code(code, spec)
+        if preflight_error:
+            fixed = await self._attempt_fix(code, preflight_error, spec)
+            if fixed:
+                code = self._finalize_generated_code(
+                    fixed,
+                    spec,
+                    local_only_requested=local_only_requested,
+                )
+                preflight_error = self._preflight_generated_code(code, spec)
+            if preflight_error:
+                return ForgeResult(
+                    success=False,
+                    skill_name=spec.skill_name,
+                    input_type=ForgeInputType.UNKNOWN,
+                    code=code,
+                    error=f"Preflight validation failed: {preflight_error}",
+                )
+
+        if local_only_requested and self._has_forbidden_local_only_dependencies(code):
+            fixed = await self._attempt_fix(
+                code,
+                (
+                    "Local-only skill violation: remove aiohttp, validate_url_with_dns, "
+                    "external URLs, API-key env vars, and network capabilities. "
+                    "Use only local Python libraries and machine-local data."
+                ),
+                spec,
+            )
+            if fixed:
+                code = self._finalize_generated_code(
+                    fixed,
+                    spec,
+                    local_only_requested=local_only_requested,
+                )
+            if self._has_forbidden_local_only_dependencies(code):
+                return ForgeResult(
+                    success=False,
+                    skill_name=spec.skill_name,
+                    input_type=ForgeInputType.UNKNOWN,
+                    code=code,
+                    error=(
+                        "Generated local-only skill still depended on network scaffolding "
+                        "(aiohttp, URLs, or HTTP capabilities)."
+                    ),
+                )
 
         findings = StaticAnalyzer.scan(code)
         high_risk = [f for f in findings if f.get("severity", 0) > 0.85]
@@ -644,15 +719,61 @@ class SkillForge:
         if not test_result.success and not test_result.timed_out:
             code = await self._attempt_fix(code, test_result.error or test_result.output, spec)
             if code:
+                code = self._finalize_generated_code(
+                    code,
+                    spec,
+                    local_only_requested=local_only_requested,
+                )
+                preflight_error = self._preflight_generated_code(code, spec)
+                if preflight_error:
+                    return ForgeResult(
+                        success=False,
+                        skill_name=spec.skill_name,
+                        input_type=ForgeInputType.UNKNOWN,
+                        code=code,
+                        static_analysis=findings,
+                        error=f"Preflight validation failed after fix: {preflight_error}",
+                    )
                 test_result = await self._sandbox_test(code, spec)
+
+        if not test_result.success:
+            return ForgeResult(
+                success=False,
+                skill_name=spec.skill_name,
+                input_type=ForgeInputType.UNKNOWN,
+                code=code,
+                test_output=test_result.output,
+                static_analysis=findings,
+                error=test_result.error or "Sandbox validation failed",
+            )
 
         # Final safety: ensure get_manifest() is always present before saving
         if "def get_manifest" not in code:
             code = self._append_manifest_function(code, spec)
 
         file_path = await self._persist_skill(code, spec.skill_name)
-        manifest = self._build_manifest_from_spec(spec, code)
-        self._registry.hot_register(manifest)
+        try:
+            manifest = self._build_manifest_from_spec(spec, code)
+        except Exception as e:
+            try:
+                quarantined = quarantine_skill_file(file_path, reason="invalid")
+                error = (
+                    f"Generated skill failed manifest validation and was quarantined to "
+                    f"{quarantined}: {e}"
+                )
+            except Exception:
+                error = f"Generated skill failed manifest validation: {e}"
+            return ForgeResult(
+                success=False,
+                skill_name=spec.skill_name,
+                input_type=ForgeInputType.UNKNOWN,
+                code=code,
+                file_path=str(file_path),
+                test_output=test_result.output,
+                static_analysis=findings,
+                error=error,
+            )
+        self._registry.hot_register(manifest, source="user")
 
         return ForgeResult(
             success=True,
@@ -666,6 +787,21 @@ class SkillForge:
             tools_generated=len(spec.tools),
         )
 
+    def _finalize_generated_code(
+        self,
+        code: str,
+        spec: UseCaseSpec,
+        local_only_requested: bool = False,
+    ) -> str:
+        """Normalize generated code into a deterministic, loadable module."""
+        code = self._harden_generated_code(
+            code,
+            spec,
+            local_only_requested=local_only_requested,
+        )
+        code = self._rewrite_manifest_function(code, spec)
+        return code.rstrip() + "\n"
+
     async def _run_use_case_interview(
         self,
         capability_description: str,
@@ -673,18 +809,30 @@ class SkillForge:
         base_url: str,
         auth_pattern: str,
         skill_name_hint: str,
+        local_only_requested: bool = False,
     ) -> UseCaseSpec:
         """The use-case interview is the heart of SkillForge."""
         use_case_section = (
             f"\n\nUSE CASE: {use_case}" if use_case else
             "\n\nUSE CASE: General purpose assistant"
         )
+        local_only_section = (
+            "\n\nLOCAL-ONLY CONSTRAINTS:\n"
+            "- The skill must not use external HTTP APIs.\n"
+            "- The skill must not require aiohttp or validate_url_with_dns.\n"
+            "- Prefer local Python libraries or stdlib only.\n"
+            "- base_url must be an empty string and auth_pattern must be 'none'.\n"
+            "- required_imports must not include network libraries.\n"
+            if local_only_requested else ""
+        )
+        required_imports_example = "[]" if local_only_requested else '["aiohttp"]'
 
         prompt = f"""You are designing NeuralClaw skill tools for an AI agent.
 
 CAPABILITY AVAILABLE:
 {capability_description[:3000]}
 {use_case_section}
+{local_only_section}
 
 Design the MINIMAL set of tools this agent actually needs for the use case.
 Rename parameters to match the domain (e.g. "patient_name" not "customer_id").
@@ -706,7 +854,7 @@ Return ONLY valid JSON matching this schema exactly:
       "example_output": "{{\\"result\\": \\"value\\"}}"
     }}
   ],
-  "required_imports": ["aiohttp"],
+  "required_imports": {required_imports_example},
   "auth_pattern": "bearer|api_key|none|custom",
   "base_url": "{base_url}",
   "clarifications": []
@@ -725,6 +873,20 @@ If you need more info to design good domain-specific tools, put questions in "cl
                 max_tokens=2000,
             )
             raw = response.content or ""
+
+            # Guard: empty LLM response — don't waste time parsing
+            if not raw.strip():
+                return UseCaseSpec(
+                    skill_name=skill_name_hint or "custom_skill",
+                    skill_description="",
+                    tools=[],
+                    required_imports=[],
+                    clarifications=[
+                        "The LLM returned an empty response. "
+                        "Please describe what you want this skill to do so I can design the right tools."
+                    ],
+                )
+
             if "```json" in raw:
                 raw = raw.split("```json")[1].split("```")[0].strip()
             elif "```" in raw:
@@ -753,20 +915,33 @@ If you need more info to design good domain-specific tools, put questions in "cl
                 clarifications=data.get("clarifications", []),
             )
 
+        except json.JSONDecodeError as e:
+            # LLM returned non-JSON — ask the user for clarification, don't create dummy tools
+            return UseCaseSpec(
+                skill_name=skill_name_hint or "custom_skill",
+                skill_description="",
+                tools=[],
+                required_imports=[],
+                clarifications=[
+                    f"Could not parse LLM response as JSON ({e}). "
+                    "Please describe specifically what tools you need and what they should do."
+                ],
+            )
         except Exception as e:
             return UseCaseSpec(
                 skill_name=skill_name_hint or "custom_skill",
                 skill_description="Custom skill",
-                tools=[ToolSpec(
-                    name=skill_name_hint or "execute",
-                    description=f"Execute {use_case or 'custom operation'}",
-                    parameters=[{"name": "input", "type": "string", "description": "Input", "required": True}],
-                )],
+                tools=[],
                 required_imports=["aiohttp"],
                 clarifications=[f"Could not auto-design tools: {e}. Describe what you want this skill to do."],
             )
 
-    def _harden_generated_code(self, code: str, spec: UseCaseSpec) -> str:
+    def _harden_generated_code(
+        self,
+        code: str,
+        spec: UseCaseSpec,
+        local_only_requested: bool = False,
+    ) -> str:
         """Fix common LLM code generation mistakes before sandbox testing.
 
         1. Add missing imports for referenced names
@@ -790,11 +965,15 @@ If you need more info to design good domain-specific tools, put questions in "cl
             )
 
         # Check for validate_url_with_dns without import
-        if "validate_url_with_dns" in code and "from neuralclaw.cortex.action.network import" not in code:
+        if (
+            not local_only_requested
+            and "validate_url_with_dns" in code
+            and "from neuralclaw.cortex.action.network import" not in code
+        ):
             needed_imports.append("from neuralclaw.cortex.action.network import validate_url_with_dns")
 
         # Check for aiohttp usage without import
-        if "aiohttp" in code and "import aiohttp" not in code:
+        if not local_only_requested and "aiohttp" in code and "import aiohttp" not in code:
             needed_imports.append("import aiohttp")
 
         # Check for json usage without import
@@ -838,6 +1017,7 @@ If you need more info to design good domain-specific tools, put questions in "cl
                     "NETWORK": "NETWORK_HTTP",
                     "HTTP": "NETWORK_HTTP",
                     "WEBSOCKET": "NETWORK_WEBSOCKET",
+                    "SYSTEM_INFO": "FILESYSTEM_READ",
                     "FILESYSTEM": "FILESYSTEM_READ",
                     "FILE_READ": "FILESYSTEM_READ",
                     "FILE_WRITE": "FILESYSTEM_WRITE",
@@ -851,6 +1031,19 @@ If you need more info to design good domain-specific tools, put questions in "cl
                 }
                 fixed_cap = _CAP_FIXES.get(cap_name, "NETWORK_HTTP")
                 code = code.replace(f"Capability.{cap_name}", f"Capability.{fixed_cap}")
+
+        if local_only_requested:
+            code = re.sub(r"^.*import aiohttp.*$\n?", "", code, flags=re.MULTILINE)
+            code = re.sub(
+                r"^.*from neuralclaw\.cortex\.action\.network import validate_url_with_dns.*$\n?",
+                "",
+                code,
+                flags=re.MULTILINE,
+            )
+            code = re.sub(r"^_BASE_URL\s*=.*$\n?", "", code, flags=re.MULTILINE)
+            code = re.sub(r"^_API_KEY_ENV\s*=.*$\n?", "", code, flags=re.MULTILINE)
+            code = code.replace("Capability.NETWORK_HTTP", "Capability.FILESYSTEM_READ")
+            code = code.replace("Capability.NETWORK_WEBSOCKET", "Capability.FILESYSTEM_READ")
 
         # --- Fix 3: Replace hardcoded placeholder URLs with env var pattern ---
         code = re.sub(
@@ -867,11 +1060,48 @@ If you need more info to design good domain-specific tools, put questions in "cl
             match = re.search(pattern, code)
             if match:
                 sig = match.group(1)
-                if "**kwargs" not in sig and "**kw" not in sig:
+                if "**" not in sig:
                     # Add **kwargs before closing paren
                     code = code.replace(sig, sig.rstrip() + ", **_extra")
 
+        # --- Fix 5: Fix string handler references in get_manifest() ---
+        # LLMs often write handler="func_name" instead of handler=func_name
+        code = re.sub(
+            r'handler\s*=\s*"(\w+)"',
+            r'handler=\1',
+            code,
+        )
+        code = re.sub(
+            r"handler\s*=\s*'(\w+)'",
+            r'handler=\1',
+            code,
+        )
+
+        # --- Fix 6: Strip invalid kwargs from ToolDefinition ---
+        # LLMs often put capabilities=[...] on ToolDefinition (it belongs on SkillManifest)
+        code = re.sub(
+            r',?\s*capabilities\s*=\s*\[[^\]]*\]\s*,?',
+            '',
+            code,
+        )
+
         return code
+
+    def _preflight_generated_code(self, code: str, spec: UseCaseSpec) -> str | None:
+        """Catch deterministic generation failures before sandbox execution."""
+        syntax_error = self._validate_python_syntax(code)
+        if syntax_error:
+            return syntax_error
+
+        actual_funcs = re.findall(r"^async\s+def\s+(\w+)\s*\(", code, re.MULTILINE)
+        if not actual_funcs:
+            return "Generated code did not define any async tool handlers."
+        if len(actual_funcs) < len(spec.tools):
+            return (
+                f"Generated code only defined {len(actual_funcs)} async handlers for "
+                f"{len(spec.tools)} requested tools."
+            )
+        return None
 
     async def _generate_skill_code(
         self,
@@ -880,6 +1110,7 @@ If you need more info to design good domain-specific tools, put questions in "cl
         auth_pattern: str,
         extra_imports: list[str],
         existing_code: str,
+        local_only_requested: bool = False,
     ) -> str:
         """Generate the full Python skill file from a UseCaseSpec."""
         tools_desc = "\n".join(
@@ -895,6 +1126,73 @@ If you need more info to design good domain-specific tools, put questions in "cl
         )
 
         first_tool = spec.tools[0].name if spec.tools else "execute"
+        requirements_block = (
+            "1. Each tool function must be async and return dict[str, Any]\n"
+            "2. Never raise exceptions â€” catch all errors, return {\"error\": str(e)}\n"
+            "3. Do not make any HTTP calls or use network-only libraries like aiohttp\n"
+            "4. Include a get_manifest() function at the bottom\n"
+            "5. Import from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParameter\n"
+            "6. Wire each function as a handler in its ToolDefinition\n"
+            "7. Add a brief docstring to each function\n"
+            "8. Do not require API keys or external URLs for this skill\n"
+            "9. Use only local Python libraries or the stdlib to satisfy the request\n"
+            "10. Use the exact SKILL name and exact tool names shown below; do not rename them\n"
+            if local_only_requested else
+            "1. Each tool function must be async and return dict[str, Any]\n"
+            "2. Never raise exceptions â€” catch all errors, return {\"error\": str(e)}\n"
+            "3. All HTTP calls must use aiohttp (no requests/urllib)\n"
+            "4. Include a get_manifest() function at the bottom\n"
+            "5. Import from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParameter\n"
+            "6. Wire each function as a handler in its ToolDefinition\n"
+            "7. Add a brief docstring to each function\n"
+            "8. Handle API keys via os.getenv() â€” never hardcode credentials\n"
+            "9. Include retry logic for transient network failures (max 2 retries)\n"
+            "10. Use the exact SKILL name and exact tool names shown below; do not rename them\n"
+        )
+        local_only_rules = (
+            "F. This is a local-only skill. Do NOT import aiohttp or validate_url_with_dns.\n"
+            "G. Do NOT define or use _BASE_URL, API-key env vars, or external URLs.\n"
+            "H. If you are unsure about metadata, prioritize correct tool implementations; the runtime will rebuild get_manifest().\n"
+            if local_only_requested else ""
+        )
+        skill_template = f"""```python
+from __future__ import annotations
+from typing import Any
+from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParameter
+
+async def {first_tool}(...) -> dict[str, Any]:
+    \"\"\"...\"\"\"\n    ...
+
+def get_manifest() -> SkillManifest:
+    return SkillManifest(
+        name="{spec.skill_name}",
+        description="{spec.skill_description}",
+        tools=[...],
+    )
+```
+""" if local_only_requested else f"""```python
+from __future__ import annotations
+import os
+from typing import Any
+import aiohttp
+from neuralclaw.cortex.action.capabilities import Capability
+from neuralclaw.cortex.action.network import validate_url_with_dns
+from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParameter
+
+_BASE_URL = "{spec.base_url or base_url}"
+_API_KEY_ENV = "YOUR_API_KEY_ENV_VAR"
+
+async def {first_tool}(...) -> dict[str, Any]:
+    \"\"\"...\"\"\"\n    ...
+
+def get_manifest() -> SkillManifest:
+    return SkillManifest(
+        name="{spec.skill_name}",
+        description="{spec.skill_description}",
+        tools=[...],
+    )
+```
+"""
 
         prompt = f"""Write a complete NeuralClaw skill Python file.
 
@@ -958,6 +1256,15 @@ Without get_manifest(), the skill cannot load. This is NON-NEGOTIABLE.
 
 Return ONLY the Python code. No markdown fences. No explanation.
 """
+        prompt = self._build_generation_prompt(
+            spec=spec,
+            base_url=base_url,
+            auth_pattern=auth_pattern,
+            tools_desc=tools_desc,
+            existing_section=existing_section,
+            first_tool=first_tool,
+            local_only_requested=local_only_requested,
+        )
 
         try:
             response = await self._provider.complete(
@@ -1052,6 +1359,22 @@ def get_manifest() -> SkillManifest:
 """
         return code + manifest_code
 
+    def _rewrite_manifest_function(self, code: str, spec: UseCaseSpec) -> str:
+        """Replace any LLM-authored manifest with one derived from the spec."""
+        code_without_manifest = self._remove_trailing_manifest_function(code)
+        return self._append_manifest_function(code_without_manifest.rstrip(), spec)
+
+    def _remove_trailing_manifest_function(self, code: str) -> str:
+        """Drop the final get_manifest block so metadata always comes from the spec."""
+        pattern = re.compile(
+            r"\n*(?:async\s+)?def\s+get_manifest\s*\([^)]*\)\s*(?:->\s*[^:]+)?\s*:[\s\S]*$",
+            re.MULTILINE,
+        )
+        matches = list(pattern.finditer(code))
+        if not matches:
+            return code
+        return code[:matches[-1].start()].rstrip()
+
     async def _sandbox_test(self, code: str, spec: UseCaseSpec) -> SandboxResult:
         """Run the generated skill through sandbox with deep validation.
 
@@ -1116,7 +1439,8 @@ print("MANIFEST_OK:", manifest.name, "tools:", len(manifest.tools))
 
 print("FORGE_TEST_OK:", manifest.name, "tools:", len(manifest.tools))
 """
-        return await self._sandbox.execute_python(test_code)
+        extra_env = self._build_sandbox_python_env()
+        return await self._sandbox.execute_python(test_code, extra_env=extra_env)
 
     async def _attempt_fix(self, code: str, error: str, spec: UseCaseSpec) -> str:
         """One attempt to auto-fix a failing skill."""
@@ -1162,79 +1486,288 @@ print("FORGE_TEST_OK:", manifest.name, "tools:", len(manifest.tools))
 
     def _build_manifest_from_spec(self, spec: UseCaseSpec, code: str) -> SkillManifest:
         """Build a SkillManifest by executing the generated code's get_manifest()."""
-        # Try loading from the persisted skill file first (more reliable)
         skill_file = self.USER_SKILLS_DIR / f"{spec.skill_name}.py"
-        load_sources: list[tuple[str, str]] = []
-        if skill_file.exists():
-            load_sources.append((f"_forge_{spec.skill_name}", str(skill_file)))
-        load_sources.append(("_forge_temp_inline", ""))  # fallback to temp file
+        if not skill_file.exists():
+            raise FileNotFoundError(f"Persisted skill file not found: {skill_file}")
+        return load_skill_manifest(skill_file, module_prefix="_forge")
 
-        for mod_name, file_path in load_sources:
-            try:
-                if not file_path:
-                    # Write code to temp file
-                    with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w") as f:
-                        f.write(code)
-                        file_path = f.name
-
-                spec_mod = importlib.util.spec_from_file_location(mod_name, file_path)
-                if spec_mod is None or spec_mod.loader is None:
-                    continue
-                module = importlib.util.module_from_spec(spec_mod)
-                spec_mod.loader.exec_module(module)
-                # Keep module alive so handlers don't get garbage collected
-                if not hasattr(self, "_loaded_modules"):
-                    self._loaded_modules: dict[str, Any] = {}
-                self._loaded_modules[spec.skill_name] = module
-                if hasattr(module, "get_manifest"):
-                    return module.get_manifest()
-            except Exception:
-                continue
-
-        # Last resort: create tools with wrapper handlers that load the skill file on demand
-        def _make_lazy_handler(skill_name: str, tool_name: str):
-            async def _lazy_call(**kwargs):
-                path = self.USER_SKILLS_DIR / f"{skill_name}.py"
-                if not path.exists():
-                    return {"error": f"Skill file not found: {path}"}
-                spec_m = importlib.util.spec_from_file_location(f"_lazy_{skill_name}", path)
-                if spec_m is None or spec_m.loader is None:
-                    return {"error": f"Cannot load skill module: {path}"}
-                mod = importlib.util.module_from_spec(spec_m)
-                spec_m.loader.exec_module(mod)
-                self._loaded_modules[skill_name] = mod
-                manifest = mod.get_manifest() if hasattr(mod, "get_manifest") else None
-                if not manifest:
-                    return {"error": "Skill has no get_manifest()"}
-                handler = next((t.handler for t in manifest.tools if t.name == tool_name), None)
-                if not handler:
-                    return {"error": f"Tool '{tool_name}' not found in loaded manifest"}
-                return await handler(**kwargs)
-            return _lazy_call
-
-        tools = [
-            ToolDefinition(
-                name=t.name,
-                description=t.description,
-                parameters=[
-                    ToolParameter(
-                        name=p["name"],
-                        type=p.get("type", "string"),
-                        description=p.get("description", ""),
-                        required=p.get("required", True),
-                    )
-                    for p in t.parameters
-                ],
-                handler=_make_lazy_handler(spec.skill_name, t.name),
-            )
-            for t in spec.tools
-        ]
-        return SkillManifest(
-            name=spec.skill_name,
-            description=spec.skill_description,
-            capabilities=[Capability.NETWORK_HTTP] if spec.base_url else [],
-            tools=tools,
+    def _build_generation_prompt(
+        self,
+        spec: UseCaseSpec,
+        base_url: str,
+        auth_pattern: str,
+        tools_desc: str,
+        existing_section: str,
+        first_tool: str,
+        local_only_requested: bool,
+    ) -> str:
+        """Build the LLM prompt used to generate a skill implementation."""
+        requirements_block = (
+            "1. Each tool function must be async and return dict[str, Any]\n"
+            "2. Never raise exceptions - catch all errors and return {\"error\": str(e)}\n"
+            "3. Do not make any HTTP calls or use network-only libraries like aiohttp\n"
+            "4. Include a get_manifest() function at the bottom\n"
+            "5. Import from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParameter\n"
+            "6. Wire each function as a handler in its ToolDefinition\n"
+            "7. Add a brief docstring to each function\n"
+            "8. Do not require API keys or external URLs for this skill\n"
+            "9. Use only local Python libraries or the stdlib to satisfy the request\n"
+            if local_only_requested else
+            "1. Each tool function must be async and return dict[str, Any]\n"
+            "2. Never raise exceptions - catch all errors and return {\"error\": str(e)}\n"
+            "3. All HTTP calls must use aiohttp (no requests/urllib)\n"
+            "4. Include a get_manifest() function at the bottom\n"
+            "5. Import from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParameter\n"
+            "6. Wire each function as a handler in its ToolDefinition\n"
+            "7. Add a brief docstring to each function\n"
+            "8. Handle API keys via os.getenv() - never hardcode credentials\n"
+            "9. Include retry logic for transient network failures (max 2 retries)\n"
         )
+        local_only_rules = (
+            "F. This is a local-only skill. Do NOT import aiohttp or validate_url_with_dns.\n"
+            "G. Do NOT define or use _BASE_URL, API-key env vars, or external URLs.\n"
+            if local_only_requested else ""
+        )
+        skill_template = f"""```python
+from __future__ import annotations
+from typing import Any
+from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParameter
+
+async def {first_tool}(...) -> dict[str, Any]:
+    \"\"\"...\"\"\"
+    ...
+
+def get_manifest() -> SkillManifest:
+    return SkillManifest(
+        name="{spec.skill_name}",
+        description="{spec.skill_description}",
+        tools=[...],
+    )
+```
+""" if local_only_requested else f"""```python
+from __future__ import annotations
+import os
+from typing import Any
+import aiohttp
+from neuralclaw.cortex.action.capabilities import Capability
+from neuralclaw.cortex.action.network import validate_url_with_dns
+from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParameter
+
+_BASE_URL = "{spec.base_url or base_url}"
+_API_KEY_ENV = "YOUR_API_KEY_ENV_VAR"
+
+async def {first_tool}(...) -> dict[str, Any]:
+    \"\"\"...\"\"\"
+    ...
+
+def get_manifest() -> SkillManifest:
+    return SkillManifest(
+        name="{spec.skill_name}",
+        description="{spec.skill_description}",
+        tools=[...],
+    )
+```
+"""
+        return f"""Write a complete NeuralClaw skill Python file.
+
+SKILL: {spec.skill_name}
+DESCRIPTION: {spec.skill_description}
+BASE URL: {spec.base_url or base_url or 'N/A'}
+AUTH: {spec.auth_pattern or auth_pattern or 'none'}
+
+TOOLS TO IMPLEMENT:
+{tools_desc}
+{existing_section}
+
+Requirements:
+{requirements_block}
+
+CRITICAL RULES (violations = broken skill):
+A. Each async def MUST accept EXACTLY the parameters listed in TOOLS above
+   e.g. if tool has params (name, age), the function must be: async def tool_name(name: str, age: int, **_extra)
+B. ALWAYS add **_extra to function signatures for forward compatibility
+C. If BASE URL is "N/A" or empty, the skill MUST work WITHOUT any external API
+   - use Python stdlib (hashlib, socket, platform, zipfile, json, etc.)
+   - do NOT invent URLs or assume an API exists
+D. NEVER reference variables that are not defined in the same file
+E. The function name MUST match the tool name exactly
+{local_only_rules}
+
+Skill file template:
+{skill_template}
+
+CRITICAL: The file MUST end with a get_manifest() function that returns a SkillManifest.
+Without get_manifest(), the skill cannot load. This is NON-NEGOTIABLE.
+
+Return ONLY the Python code. No markdown fences. No explanation.
+"""
+
+    def _build_sandbox_python_env(self) -> dict[str, str]:
+        """Expose the local repo package to sandboxed forge validation."""
+        project_root = str(self.PROJECT_ROOT)
+        existing = os.environ.get("PYTHONPATH", "")
+        pythonpath = project_root if not existing else os.pathsep.join([project_root, existing])
+        return {"PYTHONPATH": pythonpath}
+
+    def _is_local_only_request(
+        self,
+        capability_description: str,
+        use_case: str,
+        base_url: str,
+        auth_pattern: str,
+    ) -> bool:
+        """Detect requests that should stay fully local to this machine."""
+        if base_url.strip():
+            return False
+        if auth_pattern.strip() and auth_pattern.strip().lower() not in {"none"}:
+            return False
+        haystack = f"{capability_description}\n{use_case}".lower()
+        indicators = (
+            "local-only",
+            "local only",
+            "local python",
+            "local python only",
+            "stdlib",
+            "standard library",
+            "no network",
+            "no external api",
+            "on this machine",
+            "current machine",
+            "local machine",
+            "machine-local",
+            "psutil",
+        )
+        return any(token in haystack for token in indicators)
+
+    def _normalize_spec_for_generation(
+        self,
+        spec: UseCaseSpec,
+        local_only_requested: bool,
+        forced_skill_name: str = "",
+    ) -> UseCaseSpec:
+        """Remove network assumptions from specs that must remain local-only."""
+        spec.skill_name = self._to_python_identifier(
+            forced_skill_name or spec.skill_name or "custom_skill",
+            fallback="skill",
+        )
+        spec.skill_description = spec.skill_description.strip() or spec.skill_name.replace("_", " ")
+
+        seen_tool_names: set[str] = set()
+        normalized_tools: list[ToolSpec] = []
+        allowed_param_types = {"string", "integer", "boolean", "number", "array", "object"}
+        for index, tool in enumerate(spec.tools, start=1):
+            tool_name = self._to_python_identifier(tool.name or f"tool_{index}", fallback="tool")
+            tool_name = self._dedupe_identifier(tool_name, seen_tool_names)
+            seen_tool_names.add(tool_name)
+
+            seen_params: set[str] = set()
+            normalized_params: list[dict[str, Any]] = []
+            for param_index, param in enumerate(tool.parameters, start=1):
+                raw_param = dict(param)
+                param_name = self._to_python_identifier(
+                    raw_param.get("name") or f"param_{param_index}",
+                    fallback="param",
+                )
+                param_name = self._dedupe_identifier(param_name, seen_params)
+                seen_params.add(param_name)
+                raw_param["name"] = param_name
+                raw_param["type"] = (
+                    raw_param.get("type", "string")
+                    if raw_param.get("type", "string") in allowed_param_types
+                    else "string"
+                )
+                raw_param["description"] = raw_param.get("description", "") or param_name.replace("_", " ")
+                raw_param["required"] = raw_param.get("required", True)
+                normalized_params.append(raw_param)
+
+            normalized_tools.append(
+                ToolSpec(
+                    name=tool_name,
+                    description=tool.description.strip() or tool_name.replace("_", " "),
+                    parameters=normalized_params,
+                    example_call=tool.example_call,
+                    example_output=tool.example_output,
+                )
+            )
+
+        spec.tools = normalized_tools
+        if not local_only_requested:
+            return spec
+        network_imports = {
+            "aiohttp",
+            "requests",
+            "urllib",
+            "urllib3",
+            "httpx",
+            "validate_url_with_dns",
+        }
+        spec.base_url = ""
+        spec.auth_pattern = "none"
+        spec.required_imports = [
+            item for item in spec.required_imports
+            if item.strip().lower() not in network_imports
+        ]
+        return spec
+
+    def _has_forbidden_local_only_dependencies(self, code: str) -> bool:
+        """Detect network scaffolding that must not appear in local-only skills."""
+        forbidden_tokens = (
+            "aiohttp",
+            "validate_url_with_dns",
+            "ClientSession",
+            "_API_KEY_ENV",
+            "http://",
+            "https://",
+            "Capability.NETWORK_HTTP",
+            "Capability.NETWORK_WEBSOCKET",
+        )
+        return any(token in code for token in forbidden_tokens)
+
+    def _extract_explicit_skill_name(self, capability_description: str, use_case: str) -> str:
+        """Honor user-provided skill names instead of trusting generated metadata."""
+        combined = f"{capability_description}\n{use_case}"
+        patterns = (
+            r"\bskill\s+named\s+[`\"']?([a-zA-Z][a-zA-Z0-9_ -]{0,60}?)[`\"']?(?=\s+(?:that|which|with|using|for|to)\b|[.,]|$)",
+            r"\bcreate\s+a\s+skill\s+named\s+[`\"']?([a-zA-Z][a-zA-Z0-9_ -]{0,60}?)[`\"']?(?=\s+(?:that|which|with|using|for|to)\b|[.,]|$)",
+            r"\bname\s+it\s+[`\"']?([a-zA-Z][a-zA-Z0-9_ -]{0,60}?)[`\"']?(?=\s+(?:that|which|with|using|for|to)\b|[.,]|$)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, combined, flags=re.IGNORECASE)
+            if match:
+                return self._to_python_identifier(match.group(1), fallback="skill")
+        return ""
+
+    def _validate_python_syntax(self, code: str) -> str | None:
+        """Return a readable syntax error message or None when the module parses."""
+        try:
+            ast.parse(code)
+        except SyntaxError as exc:
+            bad_line = (exc.text or "").strip()
+            location = f"line {exc.lineno}, column {exc.offset}"
+            if bad_line:
+                return f"Python syntax error at {location}: {exc.msg}. Offending line: {bad_line}"
+            return f"Python syntax error at {location}: {exc.msg}"
+        return None
+
+    def _to_python_identifier(self, text: str, fallback: str) -> str:
+        """Convert free-form LLM output into a safe snake_case Python identifier."""
+        ident = self._slugify(text)
+        if not ident:
+            ident = fallback
+        if ident[0].isdigit():
+            ident = f"{fallback}_{ident}"
+        return ident
+
+    def _dedupe_identifier(self, name: str, seen: set[str]) -> str:
+        """Keep identifiers unique while preserving a readable base name."""
+        if name not in seen:
+            return name
+        suffix = 2
+        candidate = f"{name}_{suffix}"
+        while candidate in seen:
+            suffix += 1
+            candidate = f"{name}_{suffix}"
+        return candidate
 
     # -- Utility helpers --
 

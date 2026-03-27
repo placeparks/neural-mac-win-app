@@ -221,6 +221,11 @@ Run the full release validation path:
 pytest -q
 python -m compileall neuralclaw
 python -m build --sdist --wheel
+python -m twine check dist/*
 ```
 
 If build artifacts look stale, delete `build/`, the extracted `neuralclaw-*` source tree, and old `dist/` files, then rebuild.
+
+For PyPI publishing, make sure the version in `pyproject.toml`, `neuralclaw/__init__.py`,
+and `CHANGELOG.md` all match before pushing the release tag or triggering the
+publish workflow manually.

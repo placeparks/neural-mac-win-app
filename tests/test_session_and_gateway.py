@@ -13,6 +13,7 @@ from neuralclaw.gateway import NeuralClawGateway
 from neuralclaw.health import ReadinessProbe
 from neuralclaw.providers.app_session import AppSessionProvider
 from neuralclaw.session.runtime import ManagedBrowserSession, SessionRuntimeConfig
+from neuralclaw.skills.manifest import SkillManifest, ToolDefinition
 
 
 class DummyProvider:
@@ -198,6 +199,52 @@ async def test_gateway_routes_slack_reply_with_thread_ts(monkeypatch):
     await gateway._on_channel_message(msg)
 
     assert adapter.calls == [("C123", "paired response", {"thread_ts": "12345.67"})]
+
+
+@pytest.mark.asyncio
+async def test_gateway_lists_active_user_skills_authoritatively(tmp_path):
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
+    )
+    gateway = NeuralClawGateway(config)
+    gateway._config.forge.user_skills_dir = str(tmp_path)
+    (tmp_path / "user_monitor.py").write_text("# stub\n", encoding="utf-8")
+
+    gateway._skills.hot_register(
+        SkillManifest(
+            name="user_monitor",
+            description="User monitor",
+            tools=[ToolDefinition(name="list_processes", description="List", handler=None)],
+        ),
+        source="user",
+    )
+
+    payload = await gateway._list_active_user_skills_tool()
+
+    assert payload["ok"] is True
+    assert payload["count"] == 1
+    assert payload["skills"][0]["name"] == "user_monitor"
+    assert payload["skills"][0]["file_exists"] is True
+    assert payload["ghost_skills"] == []
+
+
+def test_gateway_builds_dedicated_forge_provider_with_relaxed_timeouts():
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
+    )
+    config.forge.provider_request_timeout_seconds = 360
+    config.forge.provider_max_retries = 0
+    config.forge.provider_circuit_timeout_seconds = 12
+    config.forge.provider_slow_call_threshold_ms = 240000
+
+    gateway = NeuralClawGateway(config)
+    router = gateway._build_forge_provider()
+
+    assert router is not None
+    assert getattr(router._primary, "_request_timeout_seconds", None) == 360
+    assert router._max_retries == 0
+    assert router._breaker_config.timeout_seconds == 12
+    assert router._breaker_config.slow_call_threshold_ms == 240000
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,35 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
+## [1.2.6] - 2026-03-27
+
+### Fixed - SkillForge Runtime Integrity
+- Fail-closed forge pipeline now normalizes generated skill names, tool names,
+  and parameter identifiers before registration.
+- Generated code is syntax-checked before sandbox validation, with one repair
+  attempt before the forge is rejected.
+- Runtime now rewrites generated `get_manifest()` metadata from the validated
+  use-case spec, preventing drifted manifest names and ghost tool metadata.
+- Sandbox forge validation now injects the local repo `PYTHONPATH`, so generated
+  skills can import `neuralclaw.skills.manifest` reliably during validation.
+- Added a live `list_active_user_skills` tool so runtime skill state can be
+  queried from the registry instead of inferred from memory.
+
+### Fixed - Repo Install and Execution
+- Repo dependency installation now respects `pyproject.toml` test/dev extras
+  when present, instead of only installing the base editable package.
+- `run_repo_command` now binds `python`, `pip`, and `pytest` to the repo venv
+  explicitly, fixing Windows cases where commands leaked to the global Python.
+- Node repo installs use `npm ci` when a lockfile exists, otherwise `npm install`,
+  while preserving dev dependencies needed for repo execution and test flows.
+
+### Changed - Release Readiness
+- Package version bumped to `1.2.6`.
+- README and docs now include explicit release validation and PyPI publish steps.
+- Added build metadata refinements for PyPI, including changelog URL and release
+  tooling in the `dev` extra.
+- Added a dedicated GitHub Actions publish workflow for trusted PyPI releases.
+
 ## [1.2.0] - 2026-03-20
 
 ### Added — SkillScout (Discovery Layer)

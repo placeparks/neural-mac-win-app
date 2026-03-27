@@ -32,11 +32,13 @@ class ProxyProvider(OpenAIProvider):
         base_url: str,
         model: str = "gpt-5.4",
         api_key: str = "",
+        request_timeout_seconds: float = 120.0,
     ) -> None:
         super().__init__(
             api_key=api_key or "proxy",
             model=model,
             base_url=base_url,
+            request_timeout_seconds=request_timeout_seconds,
         )
 
     async def is_available(self) -> bool:

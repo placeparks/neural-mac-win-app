@@ -106,7 +106,21 @@ neuralclaw session status
 neuralclaw doctor
 pytest -q
 python -m build --sdist --wheel
+python -m twine check dist/*
 ```
+
+## Prepare a PyPI Release
+
+```bash
+pip install -e ".[dev]"
+pytest -q
+python -m compileall neuralclaw
+python -m build --sdist --wheel
+python -m twine check dist/*
+```
+
+Publish from GitHub Actions by pushing a version tag such as `v1.2.6`, or run
+the manual publish workflow after validating the generated artifacts.
 
 ## Forge Your First Skill
 

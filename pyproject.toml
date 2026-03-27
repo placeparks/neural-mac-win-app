@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neuralclaw"
-version = "1.2.0"
+version = "1.2.6"
 description = "The Self-Evolving Cognitive Agent Framework"
 readme = "README.md"
 license = "MIT"
@@ -20,6 +20,7 @@ keywords = [
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -47,11 +48,13 @@ dependencies = [
 telegram = ["python-telegram-bot>=21.0"]
 discord = ["discord.py>=2.3"]
 slack = ["slack-bolt>=1.18"]
+whatsapp = ["qrcode>=7.4"]
 sessions = ["playwright>=1.52"]
 all-channels = [
     "python-telegram-bot>=21.0",
     "discord.py>=2.3",
     "slack-bolt>=1.18",
+    "qrcode>=7.4",
 ]
 vector = ["sqlite-vec>=0.1"]
 desktop = ["mss>=9.0", "pyautogui>=0.9", "pillow>=10.0"]
@@ -79,9 +82,11 @@ all = [
     "pystray>=0.19",
 ]
 dev = [
+    "build>=1.2",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.3",
+    "twine>=5.1",
 ]
 
 [project.urls]
@@ -89,6 +94,7 @@ Homepage = "https://github.com/placeparks/neuralclaw"
 Repository = "https://github.com/placeparks/neuralclaw"
 Issues = "https://github.com/placeparks/neuralclaw/issues"
 Documentation = "https://github.com/placeparks/neuralclaw/tree/main/docs"
+Changelog = "https://github.com/placeparks/neuralclaw/blob/main/CHANGELOG.md"
 
 [project.scripts]
 neuralclaw = "neuralclaw.cli:main"

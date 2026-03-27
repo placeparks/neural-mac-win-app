@@ -19,5 +19,11 @@ class OpenRouterProvider(OpenAIProvider):
         api_key: str,
         model: str = "anthropic/claude-sonnet-4-6",
         base_url: str = "https://openrouter.ai/api/v1",
+        request_timeout_seconds: float = 120.0,
     ) -> None:
-        super().__init__(api_key=api_key, model=model, base_url=base_url)
+        super().__init__(
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+            request_timeout_seconds=request_timeout_seconds,
+        )

@@ -1,5 +1,7 @@
 # NeuralClaw
 
+Version: `1.2.6`
+
 NeuralClaw is a Python agent framework built around a five-cortex runtime:
 Perception, Memory, Reasoning, Action, and Evolution. The current repository
 state now covers the full `AGENT.md` roadmap, including vector memory,
@@ -208,4 +210,18 @@ neuralclaw/
 pytest -q
 python -m compileall neuralclaw
 python -m build
+python -m twine check dist/*
 ```
+
+## PyPI Release
+
+```bash
+pip install -e ".[dev]"
+pytest -q
+python -m compileall neuralclaw
+python -m build
+python -m twine check dist/*
+```
+
+Publish from GitHub Actions by pushing a tag like `v1.2.6`, or run the manual
+publish workflow after validating the changelog and built artifacts.

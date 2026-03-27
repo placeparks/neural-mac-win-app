@@ -136,6 +136,7 @@ class Sandbox:
         self,
         code: str,
         working_dir: str | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> SandboxResult:
         """Execute Python code in an isolated subprocess."""
         import time as _time
@@ -165,6 +166,8 @@ class Sandbox:
         try:
             # Build clean environment
             clean_env = self._build_clean_env()
+            if extra_env:
+                clean_env.update(extra_env)
 
             start = _time.time()
 

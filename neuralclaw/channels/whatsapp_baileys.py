@@ -318,6 +318,9 @@ async function start() {
     const sock = makeWASocket({
         auth: state,
         printQRInTerminal: false,
+        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        syncFullHistory: false,
+        generateHighQualityLinkPreview: true,
     });
 
     sock.ev.on('creds.update', saveCreds);
