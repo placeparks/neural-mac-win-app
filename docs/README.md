@@ -1,6 +1,6 @@
 # NeuralClaw Documentation
 
-Version: `1.2.6`
+Version: `1.2.9`
 
 This doc set reflects the current repo state after the full `AGENT.md`
 roadmap implementation.

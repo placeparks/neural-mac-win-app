@@ -4,7 +4,8 @@ NeuralClaw CLI — Beautiful terminal interface.
 Commands:
     neuralclaw init     Interactive setup wizard
     neuralclaw chat     Interactive terminal chat session
-    neuralclaw gateway  Start the full agent with all configured channels
+    neuralclaw gateway  Start the full agent in the foreground
+    neuralclaw daemon   Start the gateway detached in the background
     neuralclaw status   Show current configuration and status
 """
 
@@ -220,7 +221,9 @@ def init() -> None:
         "  [cyan]neuralclaw config provider[/cyan]  Switch AI provider\n"
         "  [cyan]neuralclaw config channels[/cyan]  Set up messaging channels\n"
         "  [cyan]neuralclaw chat[/cyan]             Start interactive chat\n"
-        "  [cyan]neuralclaw run[/cyan]              Start gateway (auto-restarts)\n"
+        "  [cyan]neuralclaw run[/cyan]              Start gateway in foreground (auto-restarts)\n"
+        "  [cyan]neuralclaw daemon[/cyan]           Run gateway detached in background\n"
+        "  [cyan]neuralclaw startup install[/cyan]  Auto-start on login (Windows)\n"
         "  [cyan]neuralclaw doctor[/cyan]           Check system health",
         title="What's Next",
         style="bold",
@@ -493,7 +496,8 @@ def channels_setup() -> None:
 
     console.print(Panel(
         "[green]Channel setup complete![/green]\n\n"
-        "Run [cyan]neuralclaw gateway[/cyan] to start with all configured channels.",
+        "Run [cyan]neuralclaw gateway[/cyan] for a foreground session, or "
+        "[cyan]neuralclaw daemon[/cyan] to keep channels running in the background.",
         style="bold",
     ))
 
@@ -730,7 +734,8 @@ async def _connect_whatsapp() -> None:
         console.print(f"  [green]✓[/green] Auth saved to keychain")
         console.print(f"  [green]✓[/green] WhatsApp enabled in config")
         console.print(
-            "\n[dim]Run [cyan]neuralclaw gateway[/cyan] to start receiving messages.[/dim]\n"
+            "\n[dim]Run [cyan]neuralclaw daemon[/cyan] to keep receiving messages in the background,[/dim]\n"
+            "[dim]or [cyan]neuralclaw gateway[/cyan] for a foreground terminal session.[/dim]\n"
         )
 
     finally:
@@ -840,7 +845,8 @@ async def _proxy_setup() -> None:
         "[green]Proxy configured![/green]\n\n"
         "  [cyan]neuralclaw proxy status[/cyan]  Check proxy status\n"
         "  [cyan]neuralclaw chat -p proxy[/cyan]  Chat using proxy\n"
-        "  [cyan]neuralclaw gateway[/cyan]        Start with all channels",
+        "  [cyan]neuralclaw gateway[/cyan]        Foreground gateway with all channels\n"
+        "  [cyan]neuralclaw daemon[/cyan]         Background gateway with all channels",
         title="What's Next",
         style="bold",
     ))
@@ -1597,7 +1603,10 @@ def repair(dry_run: bool, backup: bool) -> None:
 def gateway(federation_port, dashboard_port, web_port, name, seed, dev, watchdog, max_restarts, restart_delay) -> None:
     """Start the full agent with all configured channels.
 
-    Use --watchdog to keep the gateway running forever with automatic crash recovery.
+    This command runs in the foreground. Use `neuralclaw daemon`,
+    `neuralclaw startup install`, or `neuralclaw service start` for a
+    background/on-login/on-boot process. Use --watchdog to keep the foreground
+    gateway alive with automatic crash recovery.
     """
     console.print(BANNER)
 

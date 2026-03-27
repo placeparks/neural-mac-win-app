@@ -2,6 +2,22 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
+## [1.2.9] - 2026-03-27
+
+### Fixed - Background Gateway Lifecycle
+- `neuralclaw stop` now preserves the stopped gateway PID in
+  `~/.neuralclaw/gateway.status` instead of overwriting it with the helper
+  process PID.
+- Added regression coverage for explicit status PID writes and the daemon stop
+  path.
+
+### Changed - Docs and Release Metadata
+- Package version bumped to `1.2.9`.
+- CLI guidance now clearly distinguishes foreground `gateway` from detached
+  `daemon`, login persistence via `startup install`, and managed service mode.
+- README and getting-started docs now document the supported always-on startup
+  commands and release tag/version examples for `1.2.9`.
+
 ## [1.2.6] - 2026-03-27
 
 ### Fixed - SkillForge Runtime Integrity

@@ -165,12 +165,13 @@ def _is_running(pid: int | None = None) -> bool:
         return False
 
 
-def _write_status(status: str, **extra: str) -> None:
+def _write_status(status: str, **extra: object) -> None:
     """Write status JSON for tray/dashboard to read."""
     _ensure_data_dir()
+    pid = extra.pop("pid", os.getpid())
     data = {
         "status": status,
-        "pid": os.getpid(),
+        "pid": pid,
         "timestamp": time.time(),
         **extra,
     }
@@ -348,7 +349,7 @@ def stop_daemon() -> bool:
         pass
 
     _clear_pid()
-    _write_status("stopped", reason="daemon_stop")
+    _write_status("stopped", pid=pid, reason="daemon_stop")
     return True
 
 

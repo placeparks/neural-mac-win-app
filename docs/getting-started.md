@@ -86,7 +86,8 @@ neuralclaw chat -p claude_app
 neuralclaw channels setup
 neuralclaw channels list
 neuralclaw channels test
-neuralclaw gateway
+neuralclaw gateway     # foreground
+neuralclaw daemon      # background
 ```
 
 Private routes typically behave like `pair`; shared routes typically behave like `bound`.
@@ -109,6 +110,20 @@ python -m build --sdist --wheel
 python -m twine check dist/*
 ```
 
+## Keep It Running
+
+Use one of these depending on how persistent you want the gateway to be:
+
+```bash
+neuralclaw gateway          # foreground terminal session
+neuralclaw daemon           # detached background process
+neuralclaw startup install  # auto-start on login (Windows, no admin)
+neuralclaw service install  # install managed service
+neuralclaw service start    # start managed service
+neuralclaw alive            # check if background gateway is running
+neuralclaw logs             # inspect gateway logs
+```
+
 ## Prepare a PyPI Release
 
 ```bash
@@ -119,7 +134,7 @@ python -m build --sdist --wheel
 python -m twine check dist/*
 ```
 
-Publish from GitHub Actions by pushing a version tag such as `v1.2.6`, or run
+Publish from GitHub Actions by pushing a version tag such as `v1.2.9`, or run
 the manual publish workflow after validating the generated artifacts.
 
 ## Forge Your First Skill

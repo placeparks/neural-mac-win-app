@@ -181,7 +181,7 @@ skill_forge = true
 ```
 
 ```bash
-neuralclaw gateway --restart
+neuralclaw restart
 ```
 
 ## SkillScout Issues

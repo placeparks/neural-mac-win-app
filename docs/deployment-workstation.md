@@ -46,9 +46,18 @@ Dev mode features:
 ## Production Mode
 
 ```bash
-# Background service
-neuralclaw service install
+# Foreground terminal session
 neuralclaw gateway
+
+# Detached background process
+neuralclaw daemon
+
+# Auto-start on login (Windows, no admin)
+neuralclaw startup install
+
+# Managed service
+neuralclaw service install
+neuralclaw service start
 ```
 
 ## Verify
