@@ -2,8 +2,23 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
-## [1.2.9] - 2026-03-27
+## [1.3.1] - 2026-03-28
 
+### Fixed - Windows Service Runtime Stability
+- Windows service installs now pin `NEURALCLAW_HOME` into the NSSM service
+  environment so the service uses the same `.neuralclaw` directory as the
+  working user profile instead of `systemprofile`.
+- `neuralclaw alive` now detects Windows service mode and reports service-backed
+  gateway health from the service runtime directory instead of stale daemon
+  PID/status files.
+- `neuralclaw logs` now prefers the configured Windows service log path when a
+  managed service is installed.
+
+### Changed - Release Metadata
+- Package version bumped to `1.3.1`.
+- Release/docs references now target the `1.3.1` PyPI build and upgrade path.
+
+## [1.2.9] - 2026-03-27
 ### Fixed - Background Gateway Lifecycle
 - `neuralclaw stop` now preserves the stopped gateway PID in
   `~/.neuralclaw/gateway.status` instead of overwriting it with the helper

@@ -2939,7 +2939,43 @@ def restart() -> None:
 @main.command()
 def alive() -> None:
     """Check if the gateway is running."""
-    from neuralclaw.service import _read_pid, _is_running, _read_status
+    from neuralclaw.service import (
+        _read_pid,
+        _is_running,
+        _read_status,
+        _read_pid_file,
+        _read_status_file,
+        get_windows_service_data_dir,
+        service_status,
+    )
+
+    if sys.platform == "win32" and service_status() == "running":
+        service_dir = get_windows_service_data_dir()
+        status_path = service_dir / "gateway.status"
+        pid_path = service_dir / "gateway.pid"
+        service_status_payload = _read_status_file(status_path)
+        service_pid = _read_pid_file(pid_path)
+
+        if service_pid and _is_running(service_pid):
+            console.print(f"[bold green]Gateway is running[/bold green] as a Windows service (PID {service_pid})")
+            restarts = service_status_payload.get("restarts", "0")
+            if restarts != "0":
+                console.print(f"[dim]Restarts: {restarts}[/dim]")
+            console.print(f"[dim]Runtime dir: {service_dir}[/dim]")
+            return
+
+        if service_status_payload.get("status") == "crashed":
+            console.print("[red]Gateway service is installed, but the gateway is crashed.[/red]")
+            console.print(f"[dim]Reason: {service_status_payload.get('reason', 'unknown')}[/dim]")
+            if service_status_payload.get("error"):
+                console.print(f"[dim]Last error: {service_status_payload['error']}[/dim]")
+            console.print(f"[dim]Runtime dir: {service_dir}[/dim]")
+            console.print("[dim]Check: neuralclaw logs -n 100[/dim]")
+            return
+
+        console.print("[yellow]Windows service is running, but gateway runtime state is unavailable.[/yellow]")
+        console.print(f"[dim]Runtime dir: {service_dir}[/dim]")
+        return
 
     pid = _read_pid()
     status = _read_status()
@@ -2963,6 +2999,14 @@ def alive() -> None:
 def logs(lines: int, follow: bool) -> None:
     """View gateway logs."""
     log_file = Path.home() / ".neuralclaw" / "gateway.log"
+
+    if sys.platform == "win32":
+        from neuralclaw.service import get_windows_service_log_file, service_status
+
+        if service_status() in {"running", "stopped", "unknown"}:
+            service_log = get_windows_service_log_file()
+            if service_log.exists():
+                log_file = service_log
 
     if not log_file.exists():
         console.print("[dim]No logs yet. Start the gateway first.[/dim]")

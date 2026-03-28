@@ -20,7 +20,16 @@ import toml
 # ---------------------------------------------------------------------------
 
 APP_NAME = "neuralclaw"
-CONFIG_DIR = Path.home() / f".{APP_NAME}"
+
+
+def _resolve_config_dir() -> Path:
+    override = os.environ.get("NEURALCLAW_HOME") or os.environ.get("NEURALCLAW_CONFIG_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / f".{APP_NAME}"
+
+
+CONFIG_DIR = _resolve_config_dir()
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 DATA_DIR = CONFIG_DIR / "data"
 LOG_DIR = CONFIG_DIR / "logs"

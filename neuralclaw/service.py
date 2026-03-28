@@ -30,12 +30,21 @@ import traceback
 from pathlib import Path
 
 log = logging.getLogger("neuralclaw.service")
+WINDOWS_SERVICE_NAME = "NeuralClaw"
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
-DATA_DIR = Path.home() / ".neuralclaw"
+
+def _resolve_data_dir() -> Path:
+    override = os.environ.get("NEURALCLAW_HOME") or os.environ.get("NEURALCLAW_CONFIG_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".neuralclaw"
+
+
+DATA_DIR = _resolve_data_dir()
 PID_FILE = DATA_DIR / "gateway.pid"
 LOG_FILE = DATA_DIR / "gateway.log"
 STATUS_FILE = DATA_DIR / "gateway.status"
@@ -183,6 +192,72 @@ def _read_status() -> dict:
         return json.loads(STATUS_FILE.read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         return {"status": "stopped", "pid": None}
+
+
+def _read_pid_file(path: Path) -> int | None:
+    try:
+        return int(path.read_text().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _read_status_file(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"status": "stopped", "pid": None}
+
+
+def _parse_nssm_environment(raw: str) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for line in raw.splitlines():
+        item = line.strip()
+        if not item or "=" not in item:
+            continue
+        key, value = item.split("=", 1)
+        env[key.strip()] = value.strip()
+    return env
+
+
+def _get_nssm_setting(name: str) -> str | None:
+    nssm = _find_nssm()
+    if not nssm:
+        return None
+    try:
+        result = subprocess.run(
+            [nssm, "get", WINDOWS_SERVICE_NAME, name],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    value = (result.stdout or "").strip()
+    return value or None
+
+
+def get_windows_service_data_dir() -> Path:
+    override = os.environ.get("NEURALCLAW_HOME") or os.environ.get("NEURALCLAW_CONFIG_DIR")
+    if override:
+        return Path(override).expanduser()
+
+    env_block = _get_nssm_setting("AppEnvironmentExtra")
+    if env_block:
+        parsed = _parse_nssm_environment(env_block)
+        service_home = parsed.get("NEURALCLAW_HOME") or parsed.get("NEURALCLAW_CONFIG_DIR")
+        if service_home:
+            return Path(service_home).expanduser()
+
+    return DATA_DIR
+
+
+def get_windows_service_log_file() -> Path:
+    configured = _get_nssm_setting("AppStdout")
+    if configured:
+        return Path(configured)
+    return get_windows_service_data_dir() / "gateway.log"
 
 
 # ---------------------------------------------------------------------------
@@ -610,19 +685,22 @@ def install_windows_service() -> bool:
     # Use NSSM if available (more reliable), otherwise sc.exe
     nssm = _find_nssm()
     if nssm:
+        service_home = str(DATA_DIR.resolve())
         cmd = [
-            nssm, "install", "NeuralClaw",
+            nssm, "install", WINDOWS_SERVICE_NAME,
             python, str(script), "--service",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
             # Configure service
-            subprocess.run([nssm, "set", "NeuralClaw", "DisplayName", "NeuralClaw Agent Gateway"], capture_output=True)
-            subprocess.run([nssm, "set", "NeuralClaw", "Description", "NeuralClaw AI Agent - keeps the gateway running"], capture_output=True)
-            subprocess.run([nssm, "set", "NeuralClaw", "Start", "SERVICE_AUTO_START"], capture_output=True)
-            subprocess.run([nssm, "set", "NeuralClaw", "AppStdout", str(LOG_FILE)], capture_output=True)
-            subprocess.run([nssm, "set", "NeuralClaw", "AppStderr", str(LOG_FILE)], capture_output=True)
-            subprocess.run([nssm, "set", "NeuralClaw", "AppRestartDelay", "5000"], capture_output=True)
+            subprocess.run([nssm, "set", WINDOWS_SERVICE_NAME, "DisplayName", "NeuralClaw Agent Gateway"], capture_output=True)
+            subprocess.run([nssm, "set", WINDOWS_SERVICE_NAME, "Description", "NeuralClaw AI Agent - keeps the gateway running"], capture_output=True)
+            subprocess.run([nssm, "set", WINDOWS_SERVICE_NAME, "Start", "SERVICE_AUTO_START"], capture_output=True)
+            subprocess.run([nssm, "set", WINDOWS_SERVICE_NAME, "AppDirectory", service_home], capture_output=True)
+            subprocess.run([nssm, "set", WINDOWS_SERVICE_NAME, "AppEnvironmentExtra", f"NEURALCLAW_HOME={service_home}"], capture_output=True)
+            subprocess.run([nssm, "set", WINDOWS_SERVICE_NAME, "AppStdout", str(LOG_FILE)], capture_output=True)
+            subprocess.run([nssm, "set", WINDOWS_SERVICE_NAME, "AppStderr", str(LOG_FILE)], capture_output=True)
+            subprocess.run([nssm, "set", WINDOWS_SERVICE_NAME, "AppRestartDelay", "5000"], capture_output=True)
             print("Service installed successfully (via NSSM).")
             print("  Start:  neuralclaw service start")
             print("  It will auto-start on boot.")
@@ -686,7 +764,7 @@ def stop_windows_service() -> bool:
 
 def service_status() -> str:
     if sys.platform == "win32":
-        result = subprocess.run(["sc", "query", "NeuralClaw"], capture_output=True, text=True)
+        result = subprocess.run(["sc", "query", WINDOWS_SERVICE_NAME], capture_output=True, text=True)
         if "RUNNING" in result.stdout:
             return "running"
         if "STOPPED" in result.stdout:
