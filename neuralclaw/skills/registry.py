@@ -129,6 +129,17 @@ class SkillRegistry:
                 handler=tool.handler,
             ))
 
+    def unregister_skill(self, name: str) -> None:
+        """Remove a registered skill and all of its tool definitions."""
+        existing = self._skills.pop(name, None)
+        self._skill_sources.pop(name, None)
+        self._user_skills.discard(name)
+        if not existing:
+            return
+
+        old_names = {t.name for t in existing.tools}
+        self._tool_defs = [td for td in self._tool_defs if td.name not in old_names]
+
     def load_user_skills(
         self,
         policy_config: Any = None,

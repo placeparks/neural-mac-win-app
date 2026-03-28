@@ -2,6 +2,30 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
+## [1.4.0] - 2026-03-28
+
+### Added - Controlled Capability Self-Improvement
+- Added a persistent evolution orchestrator that records repeated capability
+  failures, clusters them by task fingerprint, and turns them into candidate
+  initiatives instead of one-off ad hoc synth attempts.
+- New initiatives now acquire candidate skills through the real SkillForge /
+  SkillScout pipeline, keep those candidates off the live user-skill path, and
+  activate them in runtime-only probation first.
+- Probationary skills are now promoted only after successful real tool calls,
+  and are quarantined plus unregistered automatically if they fail repeatedly.
+- Added regression coverage for candidate persistence without activation and
+  the full probation -> promote / probation -> quarantine lifecycle.
+
+### Fixed - Forge Candidate Safety
+- SkillForge now supports non-activating candidate persistence into a separate
+  target directory while still validating the generated manifest.
+- SkillScout can now drive candidate acquisition without immediately live-loading
+  discovered skills.
+
+### Changed - Release Metadata
+- Package version bumped to `1.4.0`.
+- Release/docs references now target the `1.4.0` PyPI build and upgrade path.
+
 ## [1.3.1] - 2026-03-28
 
 ### Fixed - Windows Service Runtime Stability

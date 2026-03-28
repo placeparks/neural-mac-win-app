@@ -1,6 +1,6 @@
 # NeuralClaw Documentation
 
-Version: `1.3.1`
+Version: `1.4.0`
 
 This doc set reflects the current repo state after the full `AGENT.md`
 roadmap implementation.
@@ -40,6 +40,10 @@ roadmap implementation.
 - **SkillScout**: discovery layer on top of SkillForge — searches PyPI, GitHub,
   npm, and MCP registries, ranks by stars/maintenance/license/relevance, and
   auto-forges the best match into a ready-to-use skill
+
+- **Controlled self-improvement**: repeated capability gaps are persisted,
+  transformed into candidate skills, and only promoted after probationary
+  tool calls succeed in live use
 
 ## Repo-local Handoff
 

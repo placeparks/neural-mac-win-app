@@ -84,7 +84,13 @@ class SkillScout:
     # Public API
     # ------------------------------------------------------------------
 
-    async def scout(self, query: str) -> ScoutResult:
+    async def scout(
+        self,
+        query: str,
+        activate: bool = True,
+        skills_dir: str | None = None,
+        registry_source: str = "user",
+    ) -> ScoutResult:
         """End-to-end: search → rank → forge → return live skill."""
         start = time.monotonic()
         result = ScoutResult(query=query)
@@ -109,7 +115,11 @@ class SkillScout:
                 chosen.source, chosen.registry, query,
             )
             forge_result = await self._forge.steal(
-                chosen.source, use_case=query,
+                chosen.source,
+                use_case=query,
+                activate=activate,
+                skills_dir=skills_dir,
+                registry_source=registry_source,
             )
             result.forge_result = forge_result
             result.success = forge_result.success

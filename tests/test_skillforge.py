@@ -439,3 +439,47 @@ async def test_forge_attempts_fix_on_syntax_error_before_sandbox(tmp_path, mock_
     assert result.success is True
     assert mock_forge._attempt_fix.await_count == 1
     assert mock_forge._sandbox_test.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_forge_candidate_mode_persists_without_activation(tmp_path, mock_forge):
+    from neuralclaw.cortex.action.sandbox import SandboxResult
+    from neuralclaw.skills.forge import ToolSpec, UseCaseSpec
+    from neuralclaw.skills.manifest import SkillManifest, ToolDefinition
+
+    candidate_dir = tmp_path / "candidates"
+    candidate_dir.mkdir()
+    mock_forge.USER_SKILLS_DIR = tmp_path / "live"
+    mock_forge._run_use_case_interview = AsyncMock(return_value=UseCaseSpec(
+        skill_name="candidate_skill",
+        skill_description="Candidate skill",
+        tools=[ToolSpec(name="candidate_tool", description="Candidate tool", parameters=[])],
+        required_imports=[],
+    ))
+    mock_forge._generate_skill_code = AsyncMock(return_value=(
+        "from typing import Any\n"
+        "from neuralclaw.skills.manifest import SkillManifest, ToolDefinition\n"
+        "async def candidate_tool(**_extra) -> dict[str, Any]:\n"
+        "    return {\"ok\": True}\n"
+    ))
+    mock_forge._sandbox_test = AsyncMock(return_value=SandboxResult(
+        success=True,
+        output="ok",
+        error=None,
+    ))
+    mock_forge._build_manifest_from_spec = MagicMock(return_value=SkillManifest(
+        name="candidate_skill",
+        description="Candidate skill",
+        tools=[ToolDefinition(name="candidate_tool", description="Candidate tool")],
+    ))
+
+    result = await mock_forge._interview_then_generate(
+        "Create a skill named candidate_skill",
+        activate=False,
+        skills_dir=candidate_dir,
+        registry_source="candidate",
+    )
+
+    assert result.success is True
+    assert Path(result.file_path).parent == candidate_dir
+    assert mock_forge._registry.hot_register.call_count == 0

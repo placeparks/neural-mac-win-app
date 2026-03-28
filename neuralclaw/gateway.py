@@ -55,7 +55,7 @@ from neuralclaw.cortex.perception.intake import ChannelType, PerceptionIntake, S
 from neuralclaw.cortex.perception.output_filter import OutputThreatFilter
 from neuralclaw.cortex.perception.threat_screen import ThreatScreener
 from neuralclaw.cortex.perception.vision import VisionPerception
-from neuralclaw.cortex.reasoning.deliberate import DeliberativeReasoner
+from neuralclaw.cortex.reasoning.deliberate import ConfidenceEnvelope, DeliberativeReasoner
 from neuralclaw.cortex.reasoning.fast_path import FastPathReasoner
 from neuralclaw.cortex.reasoning.reflective import ReflectiveReasoner
 from neuralclaw.cortex.reasoning.meta import MetaCognitive
@@ -63,6 +63,7 @@ from neuralclaw.cortex.reasoning.structured import StructuredReasoner
 from neuralclaw.cortex.observability.traceline import Traceline
 from neuralclaw.cortex.evolution.calibrator import BehavioralCalibrator
 from neuralclaw.cortex.evolution.distiller import ExperienceDistiller
+from neuralclaw.cortex.evolution.orchestrator import EvolutionOrchestrator
 from neuralclaw.cortex.evolution.synthesizer import SkillSynthesizer
 from neuralclaw.errors import ChannelError, ConfigurationError, ProviderError, SecurityError
 from neuralclaw.health import HealthChecker, ReadinessProbe, ReadinessState
@@ -263,6 +264,7 @@ class NeuralClawGateway:
             structured=self._structured,
         ) if feat.evolution else None
         self._synthesizer = SkillSynthesizer(bus=self._bus, structured=self._structured) if feat.evolution else None
+        self._evolution_orchestrator = None
 
         # Phase 3: Meta-cognitive reasoning
         self._meta_cognitive = MetaCognitive(bus=self._bus) if feat.evolution else None
@@ -549,6 +551,17 @@ class NeuralClawGateway:
                 # Allowlist scout_skill in policy
                 if "scout_skill" not in self._config.policy.allowed_tools:
                     self._config.policy.allowed_tools.append("scout_skill")
+
+                if feat.evolution:
+                    self._evolution_orchestrator = EvolutionOrchestrator(
+                        bus=self._bus,
+                        registry=self._skills,
+                        forge=self._forge,
+                        scout=self._scout,
+                        policy_config=self._config.policy,
+                        user_skills_dir=skills_dir,
+                    )
+                    await self._evolution_orchestrator.initialize()
         else:
             configured = self._config.primary_provider.name if self._config.primary_provider else "none"
             raise ProviderError(
@@ -1172,6 +1185,14 @@ class NeuralClawGateway:
                 msg.author_name,
                 user_id=result["user_id"],
             )
+            await self._record_evolution_outcome(
+                msg.content,
+                envelope if result.get("memory_ctx") is not None else ConfidenceEnvelope(
+                    response=final_response,
+                    confidence=confidence,
+                    source="llm",
+                ),
+            )
             await self._bus.publish(
                 EventType.RESPONSE_READY,
                 {
@@ -1434,6 +1455,14 @@ class NeuralClawGateway:
                 )
             except Exception:
                 pass
+            await self._record_evolution_outcome(
+                content,
+                ConfidenceEnvelope(
+                    response=filtered_response,
+                    confidence=fast_result.confidence,
+                    source=getattr(fast_result, "source", "fast_path"),
+                ),
+            )
             try:
                 await self._bus.publish(
                     EventType.RESPONSE_READY,
@@ -1541,6 +1570,7 @@ class NeuralClawGateway:
             )
         except Exception as e:
             print(f"[Gateway] Post-process error (non-fatal): {e}")
+        await self._record_evolution_outcome(content, envelope)
 
         # Publish response event — never block response
         try:
@@ -2140,6 +2170,23 @@ class NeuralClawGateway:
                         source="gateway",
                     )
 
+    async def _record_evolution_outcome(
+        self,
+        user_msg: str,
+        envelope: ConfidenceEnvelope,
+    ) -> None:
+        """Let the evolution orchestrator observe live capability gaps."""
+        if not self._evolution_orchestrator:
+            return
+        try:
+            await self._evolution_orchestrator.record_response(user_msg, envelope)
+        except Exception as e:
+            await self._bus.publish(
+                EventType.ERROR,
+                {"error": f"Evolution orchestration failed: {e}", "component": "evolution"},
+                source="gateway",
+            )
+
     # -- Lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
@@ -2224,6 +2271,8 @@ class NeuralClawGateway:
             await self._procedural.close()
         if self._calibrator:
             await self._calibrator.close()
+        if self._evolution_orchestrator:
+            await self._evolution_orchestrator.close()
         await self._audit.close()
         await self._idempotency.close()
         await self._memory_db_pool.close()

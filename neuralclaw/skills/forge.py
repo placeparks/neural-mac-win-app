@@ -165,6 +165,9 @@ class SkillForge:
         source: str,
         use_case: str = "",
         session: ForgeSession | None = None,
+        activate: bool = True,
+        skills_dir: str | Path | None = None,
+        registry_source: str = "user",
     ) -> ForgeResult:
         """Auto-detect source type and route to the right forge method."""
         start = time.monotonic()
@@ -183,7 +186,14 @@ class SkillForge:
         }
 
         handler = handlers.get(input_type, self.forge_from_description)
-        result = await handler(source, use_case=use_case, session=session)
+        result = await handler(
+            source,
+            use_case=use_case,
+            session=session,
+            activate=activate,
+            skills_dir=skills_dir,
+            registry_source=registry_source,
+        )
         result.elapsed_seconds = round(time.monotonic() - start, 2)
         result.input_type = input_type
 
@@ -202,7 +212,13 @@ class SkillForge:
         return result
 
     async def forge_from_url(
-        self, url: str, use_case: str = "", session: ForgeSession | None = None
+        self,
+        url: str,
+        use_case: str = "",
+        session: ForgeSession | None = None,
+        activate: bool = True,
+        skills_dir: str | Path | None = None,
+        registry_source: str = "user",
     ) -> ForgeResult:
         """Probe an HTTP endpoint, infer its interface, generate a skill."""
         try:
@@ -218,7 +234,13 @@ class SkillForge:
             async with aiohttp.ClientSession() as session_http:
                 openapi_url = await self._probe_for_openapi(session_http, url)
                 if openapi_url:
-                    return await self.forge_from_openapi_url(openapi_url, use_case=use_case)
+                    return await self.forge_from_openapi_url(
+                        openapi_url,
+                        use_case=use_case,
+                        activate=activate,
+                        skills_dir=skills_dir,
+                        registry_source=registry_source,
+                    )
 
                 async with session_http.get(
                     url, timeout=aiohttp.ClientTimeout(total=15),
@@ -237,7 +259,12 @@ class SkillForge:
 
             interface_desc = self._describe_api_from_response(url, status, raw)
             return await self.forge_from_description(
-                interface_desc, use_case=use_case, base_url=url,
+                interface_desc,
+                use_case=use_case,
+                base_url=url,
+                activate=activate,
+                skills_dir=skills_dir,
+                registry_source=registry_source,
             )
 
         except Exception as e:
@@ -247,7 +274,13 @@ class SkillForge:
             )
 
     async def forge_from_openapi_url(
-        self, url: str, use_case: str = "", session: ForgeSession | None = None
+        self,
+        url: str,
+        use_case: str = "",
+        session: ForgeSession | None = None,
+        activate: bool = True,
+        skills_dir: str | Path | None = None,
+        registry_source: str = "user",
     ) -> ForgeResult:
         """Fetch an OpenAPI spec from a URL and forge a skill from it."""
         try:
@@ -261,7 +294,13 @@ class SkillForge:
             except Exception:
                 import yaml
                 spec = yaml.safe_load(text)
-            return await self.forge_from_openapi_spec(spec, use_case=use_case)
+            return await self.forge_from_openapi_spec(
+                spec,
+                use_case=use_case,
+                activate=activate,
+                skills_dir=skills_dir,
+                registry_source=registry_source,
+            )
         except Exception as e:
             return ForgeResult(
                 success=False, skill_name="", input_type=ForgeInputType.OPENAPI,
@@ -269,7 +308,12 @@ class SkillForge:
             )
 
     async def forge_from_openapi_spec(
-        self, spec: dict[str, Any], use_case: str = ""
+        self,
+        spec: dict[str, Any],
+        use_case: str = "",
+        activate: bool = True,
+        skills_dir: str | Path | None = None,
+        registry_source: str = "user",
     ) -> ForgeResult:
         """Parse an OpenAPI 3.x / Swagger 2.0 spec and generate a full skill."""
         title = spec.get("info", {}).get("title", "api")
@@ -296,10 +340,19 @@ class SkillForge:
             base_url=base_url,
             auth_pattern=auth,
             skill_name_hint=self._slugify(title),
+            activate=activate,
+            skills_dir=skills_dir,
+            registry_source=registry_source,
         )
 
     async def forge_from_graphql(
-        self, endpoint_or_schema: str, use_case: str = "", session: ForgeSession | None = None
+        self,
+        endpoint_or_schema: str,
+        use_case: str = "",
+        session: ForgeSession | None = None,
+        activate: bool = True,
+        skills_dir: str | Path | None = None,
+        registry_source: str = "user",
     ) -> ForgeResult:
         """Parse a GraphQL endpoint (introspection) or schema string."""
         is_url = endpoint_or_schema.startswith("http")
@@ -347,10 +400,19 @@ class SkillForge:
             use_case=use_case,
             base_url=endpoint_or_schema if is_url else "",
             skill_name_hint="graphql_api",
+            activate=activate,
+            skills_dir=skills_dir,
+            registry_source=registry_source,
         )
 
     async def forge_from_library(
-        self, library_name: str, use_case: str = "", session: ForgeSession | None = None
+        self,
+        library_name: str,
+        use_case: str = "",
+        session: ForgeSession | None = None,
+        activate: bool = True,
+        skills_dir: str | Path | None = None,
+        registry_source: str = "user",
     ) -> ForgeResult:
         """Introspect an installed Python library and generate async wrappers."""
         try:
@@ -397,6 +459,9 @@ class SkillForge:
             use_case=use_case,
             skill_name_hint=self._slugify(library_name),
             extra_imports=[library_name],
+            activate=activate,
+            skills_dir=skills_dir,
+            registry_source=registry_source,
         )
 
     async def forge_from_description(
@@ -405,6 +470,9 @@ class SkillForge:
         use_case: str = "",
         base_url: str = "",
         session: ForgeSession | None = None,
+        activate: bool = True,
+        skills_dir: str | Path | None = None,
+        registry_source: str = "user",
     ) -> ForgeResult:
         """Pure LLM synthesis from natural language."""
         return await self._interview_then_generate(
@@ -412,10 +480,19 @@ class SkillForge:
             use_case=use_case,
             base_url=base_url,
             skill_name_hint=self._slugify(description[:40]),
+            activate=activate,
+            skills_dir=skills_dir,
+            registry_source=registry_source,
         )
 
     async def forge_from_code(
-        self, code: str, use_case: str = "", session: ForgeSession | None = None
+        self,
+        code: str,
+        use_case: str = "",
+        session: ForgeSession | None = None,
+        activate: bool = True,
+        skills_dir: str | Path | None = None,
+        registry_source: str = "user",
     ) -> ForgeResult:
         """Analyze existing Python code and wrap it as a NeuralClaw skill."""
         func_pattern = re.compile(
@@ -437,10 +514,19 @@ class SkillForge:
             capability_description=capability_description,
             use_case=use_case,
             existing_code=code,
+            activate=activate,
+            skills_dir=skills_dir,
+            registry_source=registry_source,
         )
 
     async def forge_from_file(
-        self, path: str, use_case: str = "", session: ForgeSession | None = None
+        self,
+        path: str,
+        use_case: str = "",
+        session: ForgeSession | None = None,
+        activate: bool = True,
+        skills_dir: str | Path | None = None,
+        registry_source: str = "user",
     ) -> ForgeResult:
         """Read a local file and forge based on its content."""
         p = Path(path)
@@ -457,20 +543,50 @@ class SkillForge:
             try:
                 spec = json.loads(content) if suffix == ".json" else __import__("yaml").safe_load(content)
                 if "openapi" in spec or "swagger" in spec:
-                    return await self.forge_from_openapi_spec(spec, use_case=use_case)
+                    return await self.forge_from_openapi_spec(
+                        spec,
+                        use_case=use_case,
+                        activate=activate,
+                        skills_dir=skills_dir,
+                        registry_source=registry_source,
+                    )
             except Exception:
                 pass
 
         if suffix == ".graphql":
-            return await self.forge_from_graphql(content, use_case=use_case)
+            return await self.forge_from_graphql(
+                content,
+                use_case=use_case,
+                activate=activate,
+                skills_dir=skills_dir,
+                registry_source=registry_source,
+            )
 
         if suffix == ".py":
-            return await self.forge_from_code(content, use_case=use_case)
+            return await self.forge_from_code(
+                content,
+                use_case=use_case,
+                activate=activate,
+                skills_dir=skills_dir,
+                registry_source=registry_source,
+            )
 
-        return await self.forge_from_description(content, use_case=use_case)
+        return await self.forge_from_description(
+            content,
+            use_case=use_case,
+            activate=activate,
+            skills_dir=skills_dir,
+            registry_source=registry_source,
+        )
 
     async def forge_from_github(
-        self, repo_url: str, use_case: str = "", session: ForgeSession | None = None
+        self,
+        repo_url: str,
+        use_case: str = "",
+        session: ForgeSession | None = None,
+        activate: bool = True,
+        skills_dir: str | Path | None = None,
+        registry_source: str = "user",
     ) -> ForgeResult:
         """Analyze a GitHub repository and generate a skill from it."""
         match = re.match(r"https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$", repo_url)
@@ -512,7 +628,13 @@ class SkillForge:
                             if r.status == 200:
                                 text = await r.text()
                                 spec = json.loads(text) if spec_path.endswith(".json") else __import__("yaml").safe_load(text)
-                                return await self.forge_from_openapi_spec(spec, use_case=use_case)
+                                return await self.forge_from_openapi_spec(
+                                    spec,
+                                    use_case=use_case,
+                                    activate=activate,
+                                    skills_dir=skills_dir,
+                                    registry_source=registry_source,
+                                )
                     except Exception:
                         continue
 
@@ -529,6 +651,9 @@ class SkillForge:
                 capability_description=capability_description,
                 use_case=use_case,
                 skill_name_hint=self._slugify(repo),
+                activate=activate,
+                skills_dir=skills_dir,
+                registry_source=registry_source,
             )
 
         except Exception as e:
@@ -538,7 +663,13 @@ class SkillForge:
             )
 
     async def forge_from_mcp(
-        self, server_url: str, use_case: str = "", session: ForgeSession | None = None
+        self,
+        server_url: str,
+        use_case: str = "",
+        session: ForgeSession | None = None,
+        activate: bool = True,
+        skills_dir: str | Path | None = None,
+        registry_source: str = "user",
     ) -> ForgeResult:
         """Connect to an MCP server and generate a skill from its exposed tools."""
         try:
@@ -583,6 +714,9 @@ class SkillForge:
                 base_url=server_url,
                 auth_pattern="mcp",
                 skill_name_hint="mcp_" + self._slugify(server_url.split("/")[-1] or "server"),
+                activate=activate,
+                skills_dir=skills_dir,
+                registry_source=registry_source,
             )
 
         except Exception as e:
@@ -602,6 +736,9 @@ class SkillForge:
         skill_name_hint: str = "",
         extra_imports: list[str] | None = None,
         existing_code: str = "",
+        activate: bool = True,
+        skills_dir: str | Path | None = None,
+        registry_source: str = "user",
     ) -> ForgeResult:
         """Core pipeline: use-case interview -> code generation -> test -> register."""
         local_only_requested = self._is_local_only_request(
@@ -751,9 +888,17 @@ class SkillForge:
         if "def get_manifest" not in code:
             code = self._append_manifest_function(code, spec)
 
-        file_path = await self._persist_skill(code, spec.skill_name)
+        file_path = await self._persist_skill(
+            code,
+            spec.skill_name,
+            target_dir=skills_dir,
+        )
         try:
-            manifest = self._build_manifest_from_spec(spec, code)
+            manifest = self._build_manifest_from_spec(
+                spec,
+                code,
+                skill_file=file_path,
+            )
         except Exception as e:
             try:
                 quarantined = quarantine_skill_file(file_path, reason="invalid")
@@ -773,7 +918,8 @@ class SkillForge:
                 static_analysis=findings,
                 error=error,
             )
-        self._registry.hot_register(manifest, source="user")
+        if activate:
+            self._registry.hot_register(manifest, source=registry_source)
 
         return ForgeResult(
             success=True,
@@ -1473,9 +1619,16 @@ print("FORGE_TEST_OK:", manifest.name, "tools:", len(manifest.tools))
         except Exception:
             return ""
 
-    async def _persist_skill(self, code: str, skill_name: str) -> Path:
+    async def _persist_skill(
+        self,
+        code: str,
+        skill_name: str,
+        target_dir: str | Path | None = None,
+    ) -> Path:
         """Write the generated skill to ~/.neuralclaw/skills/{skill_name}.py"""
-        path = self.USER_SKILLS_DIR / f"{skill_name}.py"
+        skills_dir = resolve_user_skills_dir(target_dir or self.USER_SKILLS_DIR)
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        path = skills_dir / f"{skill_name}.py"
         header = (
             f"# Auto-generated by SkillForge — {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"# Skill: {skill_name}\n"
@@ -1484,12 +1637,17 @@ print("FORGE_TEST_OK:", manifest.name, "tools:", len(manifest.tools))
         path.write_text(header + code, encoding="utf-8")
         return path
 
-    def _build_manifest_from_spec(self, spec: UseCaseSpec, code: str) -> SkillManifest:
+    def _build_manifest_from_spec(
+        self,
+        spec: UseCaseSpec,
+        code: str,
+        skill_file: str | Path | None = None,
+    ) -> SkillManifest:
         """Build a SkillManifest by executing the generated code's get_manifest()."""
-        skill_file = self.USER_SKILLS_DIR / f"{spec.skill_name}.py"
-        if not skill_file.exists():
-            raise FileNotFoundError(f"Persisted skill file not found: {skill_file}")
-        return load_skill_manifest(skill_file, module_prefix="_forge")
+        skill_path = Path(skill_file) if skill_file is not None else self.USER_SKILLS_DIR / f"{spec.skill_name}.py"
+        if not skill_path.exists():
+            raise FileNotFoundError(f"Persisted skill file not found: {skill_path}")
+        return load_skill_manifest(skill_path, module_prefix="_forge")
 
     def _build_generation_prompt(
         self,

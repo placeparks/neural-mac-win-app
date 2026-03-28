@@ -134,7 +134,7 @@ python -m build --sdist --wheel
 python -m twine check dist/*
 ```
 
-Publish from GitHub Actions by pushing a version tag such as `v1.3.1`, or run
+Publish from GitHub Actions by pushing a version tag such as `v1.4.0`, or run
 the manual publish workflow after validating the generated artifacts.
 
 ## Forge Your First Skill

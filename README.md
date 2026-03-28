@@ -1,6 +1,6 @@
 # NeuralClaw
 
-Version: `1.3.1`
+Version: `1.4.0`
 
 NeuralClaw is a Python agent framework built around a five-cortex runtime:
 Perception, Memory, Reasoning, Action, and Evolution. The current repository
@@ -22,6 +22,9 @@ integrations, and A2A-compatible federation.
   npm, and MCP registries, ranks results by stars, maintenance, license, and
   relevance, then auto-forges the best match into a ready-to-use skill.
   Works from any channel (`/scout`, `!scout`, `scout:`)
+- **Controlled self-improvement**: Repeated capability failures are journaled,
+  converted into candidate initiatives, forged or scouted off the live path,
+  and only promoted after probationary tool calls succeed in real use
 - **Dynamic self-awareness**: Agent knows its own capabilities and active
   tools; never says "I can't" when it has a tool for the job
 - **Multi-provider routing**: `openai` (GPT-5.4), `anthropic` (Claude 4.6),
@@ -227,5 +230,5 @@ python -m build
 python -m twine check dist/*
 ```
 
-Publish from GitHub Actions by pushing a tag like `v1.3.1`, or run the manual
+Publish from GitHub Actions by pushing a tag like `v1.4.0`, or run the manual
 publish workflow after validating the changelog and built artifacts.
