@@ -1,6 +1,6 @@
 # NeuralClaw Documentation
 
-Version: `1.4.0`
+Version: `1.5.5`
 
 This doc set reflects the current repo state after the full `AGENT.md`
 roadmap implementation.
@@ -14,7 +14,7 @@ roadmap implementation.
 | [architecture.md](architecture.md) | gateway, cortices, bus, runtime wiring |
 | [memory.md](memory.md) | episodic, semantic, procedural, vector, identity |
 | [reasoning.md](reasoning.md) | fast-path, deliberative, reflective, structured |
-| [skills.md](skills.md) | built-ins, manifests, capability model, **SkillForge** |
+| [skills.md](skills.md) | built-ins, manifests, capability model, SkillForge, app workspaces |
 | [channels.md](channels.md) | adapters, trust, streaming, Discord voice |
 | [security.md](security.md) | threat screening, output filtering, audit, policy |
 | [swarm.md](swarm.md) | delegation, consensus, mesh |
@@ -24,7 +24,7 @@ roadmap implementation.
 
 ## Current Highlights
 
-- **computer use**: screenshot → vision analysis → click/type/hotkey with
+- **computer use**: screenshot -> vision analysis -> click/type/hotkey with
   remote control via Telegram (images sent as photos)
 - **dynamic self-awareness**: capability-driven system prompt, tool awareness
   injection, anti-refusal directives
@@ -36,11 +36,12 @@ roadmap implementation.
 - traceline observability, Prompt Armor v2, and audit replay
 - A2A-compatible federation agent cards and task APIs
 - **SkillForge**: proactive skill synthesis from URLs, APIs, repos, or plain
-  descriptions — works from CLI, channels, or mid-conversation
-- **SkillScout**: discovery layer on top of SkillForge — searches PyPI, GitHub,
+  descriptions; works from CLI, channels, or mid-conversation
+- **App Builder**: dedicated `build_app` project provisioning under the managed
+  apps workspace root, so agents stop inventing output directories
+- **SkillScout**: discovery layer on top of SkillForge; searches PyPI, GitHub,
   npm, and MCP registries, ranks by stars/maintenance/license/relevance, and
   auto-forges the best match into a ready-to-use skill
-
 - **Controlled self-improvement**: repeated capability gaps are persisted,
   transformed into candidate skills, and only promoted after probationary
   tool calls succeed in live use

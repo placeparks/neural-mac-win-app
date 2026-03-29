@@ -13,7 +13,7 @@ from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParame
 _sandbox = Sandbox(timeout_seconds=30)
 
 
-async def execute_python(code: str) -> dict[str, Any]:
+async def execute_python(code: str, **kwargs: Any) -> dict[str, Any]:
     """Execute Python code in a sandboxed environment."""
     result = await _sandbox.execute_python(code)
     return {

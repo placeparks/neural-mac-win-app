@@ -168,6 +168,16 @@ class SkillRegistry:
         """Get all registered tool definitions."""
         return self._tool_defs.copy()
 
+    # Alias used by MCP server and workflow engine
+    get_all_tool_defs = get_all_tools
+
+    def get_handler(self, tool_name: str) -> Any | None:
+        """Look up a tool handler by name. Returns the async callable or None."""
+        for td in self._tool_defs:
+            if td.name == tool_name:
+                return td.handler
+        return None
+
     def get_skill(self, name: str) -> SkillManifest | None:
         """Look up a skill by name."""
         return self._skills.get(name)

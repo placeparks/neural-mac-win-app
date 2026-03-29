@@ -41,6 +41,8 @@ and output filtering.
 - `browser.py`: Playwright browser cortex
 - `desktop.py`: desktop automation
 - `sandbox.py`: restricted execution environment
+- managed workspace tools: app scaffolding via `build_app`, repo lifecycle via
+  `clone_repo` / `run_repo_*`
 
 ### Evolution and Observability
 
@@ -56,6 +58,7 @@ and output filtering.
 - initializes feature-gated subsystems lazily
 - loads built-in skills
 - binds providers and channels
+- configures managed workspace roots for app creation and repo execution
 - injects memory, identity, and prompt-armor context into reasoning
 - manages streaming, response filtering, audit, and post-processing
 - starts federation, dashboard, and bridge loops when enabled
@@ -114,6 +117,15 @@ Key implementation details:
 - Forge commands (`/forge ...`) are intercepted early in
   `gateway._on_channel_message()` before normal message processing, so they
   bypass the standard perception-reasoning pipeline.
+
+## Managed Workspace Routing
+
+Project creation and repository execution are intentionally split:
+
+- `build_app` provisions fresh projects under `workspace.apps_dir`
+- `github_repos` and `repo_exec` stay under `workspace.repos_dir`
+- policy allowlists include both managed roots so bounded file operations can
+  continue after a project directory has been allocated
 
 ## Bus and Telemetry
 

@@ -131,7 +131,13 @@
       "Bash(python -m pytest tests/test_integration_matrix.py::test_evolution_synthesizer_produces_valid_skill -v --no-header)",
       "Bash(python -m pytest tests/test_memory.py -v --no-header)",
       "Bash(python -m pytest tests/test_memory.py -v --no-header -q)",
-      "Bash(python -m pytest tests/test_skillscout.py -v --no-header)"
+      "Bash(python -m pytest tests/test_skillscout.py -v --no-header)",
+      "Bash(python -m pytest tests/test_knowledge_base.py tests/test_workflow_engine.py tests/test_mcp_server.py -v)",
+      "Bash(python -m pytest tests/test_knowledge_base.py -v)",
+      "Bash(python -m pytest tests/test_knowledge_base.py tests/test_mcp_server.py tests/test_workflow_engine.py -v --timeout=30)",
+      "Bash(python -m pytest tests/test_knowledge_base.py tests/test_mcp_server.py tests/test_workflow_engine.py -v)",
+      "Bash(python -m pytest tests/ -v --tb=no -q)",
+      "Bash(python -m pytest tests/ -v --timeout=30)"
     ]
   }
 }

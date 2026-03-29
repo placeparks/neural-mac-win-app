@@ -21,6 +21,11 @@ from neuralclaw.cortex.memory.episodic import EpisodicMemory, Episode, EpisodeSe
 from neuralclaw.cortex.memory.semantic import SemanticMemory, Entity, KnowledgeTriple
 from neuralclaw.cortex.memory.vector import VectorMemory
 
+try:
+    from neuralclaw.cortex.memory.knowledge_base import KnowledgeBase
+except ImportError:
+    KnowledgeBase = None  # type: ignore[misc,assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,6 +46,9 @@ class MemoryContext:
     # Known facts (subject–predicate–object triples)
     facts: list[KnowledgeTriple] = field(default_factory=list)
 
+    # Knowledge base search results (RAG)
+    kb_results: list[Any] = field(default_factory=list)
+
     # Formatted string for injection into LLM prompt
     formatted: str = ""
 
@@ -49,7 +57,7 @@ class MemoryContext:
     budget_hit: bool = False
 
     def is_empty(self) -> bool:
-        return not self.episodes and not self.entities and not self.facts
+        return not self.episodes and not self.entities and not self.facts and not self.kb_results
 
     def to_prompt_section(self, max_chars: int = 0) -> str:
         """
@@ -69,6 +77,15 @@ class MemoryContext:
                 for f in self.facts[:15]
             )
             parts.append(f"### Known Facts\n{facts_str}")
+
+        if self.kb_results:
+            kb_str = "\n".join(
+                f"  - [KB:{getattr(r, 'score', 0):.2f}] {r.chunk.content[:300]}"
+                for r in self.kb_results[:5]
+                if hasattr(r, "chunk")
+            )
+            if kb_str:
+                parts.append(f"### Knowledge Base\n{kb_str}")
 
         if self.episodes:
             eps_str = "\n".join(
@@ -129,19 +146,23 @@ class MemoryRetriever:
         semantic: SemanticMemory,
         bus: NeuralBus,
         vector_memory: VectorMemory | None = None,
+        knowledge_base: Any | None = None,
         max_episodes: int = 10,
         max_facts: int = 10,
         max_memory_chars: int = 4000,
         vector_top_k: int = 10,
+        kb_top_k: int = 5,
     ) -> None:
         self._episodic = episodic
         self._semantic = semantic
         self._bus = bus
         self._vector_memory = vector_memory
+        self._knowledge_base = knowledge_base
         self._max_episodes = max_episodes
         self._max_facts = max_facts
         self._max_memory_chars = max_memory_chars
         self._vector_top_k = vector_top_k
+        self._kb_top_k = kb_top_k
 
     async def retrieve(
         self,
@@ -184,6 +205,14 @@ class MemoryRetriever:
                     if episode:
                         ctx.episodes.append(episode)
                         existing_ids.add(episode.id)
+            except Exception:
+                pass
+
+        # 1c. Knowledge base RAG search
+        if self._knowledge_base:
+            try:
+                kb_results = await self._knowledge_base.search(query, top_k=self._kb_top_k)
+                ctx.kb_results = kb_results
             except Exception:
                 pass
 

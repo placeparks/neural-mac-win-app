@@ -46,7 +46,15 @@ config.primary_provider        # ProviderConfig
 config.fallback_providers      # list[ProviderConfig]
 config.memory                  # MemoryConfig
 config.security                # SecurityConfig
+config.workspace               # WorkspaceConfig
 config.channels                # list[ChannelConfig]
+```
+
+Important workspace fields:
+
+```python
+config.workspace.apps_dir      # app scaffolds root
+config.workspace.repos_dir     # cloned repo root
 ```
 
 ---

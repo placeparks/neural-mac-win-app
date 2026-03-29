@@ -110,6 +110,19 @@ python -m build --sdist --wheel
 python -m twine check dist/*
 ```
 
+## Create a First Project Workspace
+
+For app-building tasks, NeuralClaw now uses a dedicated `build_app` workflow
+instead of guessing where files should go. New projects are created under
+`~/.neuralclaw/workspace/apps/` by default, while cloned repositories continue
+to live under `~/.neuralclaw/workspace/repos/`.
+
+Safe coding flow:
+
+1. `build_app` provisions the project directory.
+2. The agent writes files inside the returned path.
+3. Repo tools remain scoped to the managed repo root.
+
 ## Keep It Running
 
 Use one of these depending on how persistent you want the gateway to be:
@@ -134,7 +147,7 @@ python -m build --sdist --wheel
 python -m twine check dist/*
 ```
 
-Publish from GitHub Actions by pushing a version tag such as `v1.4.0`, or run
+Publish from GitHub Actions by pushing a version tag such as `v1.5.5`, or run
 the manual publish workflow after validating the generated artifacts.
 
 ## Forge Your First Skill

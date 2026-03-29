@@ -1,5 +1,7 @@
 """Tests for config validation."""
 
+from pathlib import Path
+
 import toml
 
 from neuralclaw.config import (
@@ -140,6 +142,7 @@ class TestConfigValidation:
         config = NeuralClawConfig(
             primary_provider=ProviderConfig(name="local", model="", base_url=""),
         )
+        config.workspace.apps_dir = ""
         config.tts.max_tts_chars = 0
         config.tts.speed = 0
         config.google_workspace.max_email_results = 0
@@ -153,6 +156,7 @@ class TestConfigValidation:
         assert not result.valid
         assert any("tts.max_tts_chars" in e for e in result.errors)
         assert any("tts.speed" in e for e in result.errors)
+        assert any("workspace.apps_dir" in e for e in result.errors)
         assert any("google_workspace.max_email_results" in e for e in result.errors)
         assert any("google_workspace.max_drive_results" in e for e in result.errors)
         assert any("google_workspace.response_body_limit" in e for e in result.errors)
@@ -306,6 +310,9 @@ class TestConfigValidation:
         assert config.security.output_prompt_leak_check
         assert not config.security.canary_tokens
         assert config.security.pii_patterns == ["employee-[0-9]+"]
+        assert str(Path(config.workspace.apps_dir).expanduser()) in config.policy.allowed_filesystem_roots
+        assert "build_app" in config.policy.allowed_tools
+        assert "build_app" in config.policy.mutating_tools
         assert "speak" in config.policy.allowed_tools
         assert "desktop_screenshot" in config.policy.allowed_tools
         assert "browser_navigate" in config.policy.allowed_tools

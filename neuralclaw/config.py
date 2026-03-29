@@ -239,6 +239,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             # Built-in tools (safe defaults; unknown tools are denied)
             "web_search",
             "fetch_url",
+            "build_app",
             "read_file",
             "write_file",
             "list_directory",
@@ -260,6 +261,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "list_api_configs",
         ],
         "mutating_tools": [
+            "build_app",
             "write_file",
             "create_event",
             "delete_event",
@@ -268,7 +270,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "remove_repo",
             "save_api_config",
         ],
-        "allowed_filesystem_roots": ["~/workspace", "~/.neuralclaw/workspace/repos"],
+        "allowed_filesystem_roots": [
+            "~/workspace",
+            "~/.neuralclaw/workspace/repos",
+            "~/projects",
+        ],
         "deny_private_networks": True,
         "deny_shell_execution": True,
         "parallel_tool_execution": True,
@@ -291,6 +297,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "workspace": {
         "repos_dir": "~/.neuralclaw/workspace/repos",
+        "apps_dir": "~/projects",
         "max_repo_size_mb": 500,
         "allowed_git_hosts": ["github.com", "gitlab.com", "bitbucket.org"],
         "max_clone_timeout_seconds": 120,
@@ -310,6 +317,30 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "allow_network_skills": True,
         "allow_filesystem_skills": False,
         "require_use_case": False,
+    },
+    "rag": {
+        "enabled": True,
+        "db_path": str(DATA_DIR / "knowledge.db"),
+        "chunk_size": 1024,
+        "overlap": 128,
+        "retrieval_top_k": 5,
+        "max_doc_size_mb": 50,
+    },
+    "workflow": {
+        "enabled": True,
+        "db_path": str(DATA_DIR / "workflows.db"),
+        "max_concurrent_workflows": 5,
+        "max_steps_per_workflow": 50,
+        "step_timeout_seconds": 120,
+    },
+    "mcp_server": {
+        "enabled": False,
+        "port": 3001,
+        "bind_host": "127.0.0.1",
+        "auth_token": "",
+        "expose_tools": True,
+        "expose_resources": True,
+        "expose_prompts": True,
     },
     "apis": {},  # User-saved API configs: [apis.myapi] = {base_url = "...", auth_type = "bearer"}
     "channels": {
@@ -571,11 +602,18 @@ class PolicyConfig:
     allowed_tools: list[str] = field(default_factory=list)
     # Tools that are considered mutating (side-effectful). Used for idempotency.
     mutating_tools: list[str] = field(default_factory=lambda: [
+        "build_app",
         "write_file",
         "create_event",
         "delete_event",
     ])
-    allowed_filesystem_roots: list[str] = field(default_factory=lambda: ["~/workspace"])
+    allowed_filesystem_roots: list[str] = field(
+        default_factory=lambda: [
+            "~/workspace",
+            "~/.neuralclaw/workspace/repos",
+            "~/projects",
+        ]
+    )
     deny_private_networks: bool = True
     deny_shell_execution: bool = True
     parallel_tool_execution: bool = True
@@ -623,6 +661,9 @@ class FeaturesConfig:
     semantic_memory: bool = True
     a2a_federation: bool = False
     skill_forge: bool = True
+    rag: bool = True
+    workflow_engine: bool = True
+    mcp_server: bool = False
 
     @classmethod
     def lite(cls) -> "FeaturesConfig":
@@ -646,6 +687,9 @@ class FeaturesConfig:
             semantic_memory=False,
             a2a_federation=False,
             skill_forge=False,
+            rag=False,
+            workflow_engine=False,
+            mcp_server=False,
         )
 
 
@@ -667,9 +711,43 @@ class ForgeConfig:
 
 
 @dataclass
+class RAGConfig:
+    """RAG / Knowledge Base configuration."""
+    enabled: bool = True
+    db_path: str = str(DATA_DIR / "knowledge.db")
+    chunk_size: int = 1024
+    overlap: int = 128
+    retrieval_top_k: int = 5
+    max_doc_size_mb: int = 50
+
+
+@dataclass
+class WorkflowConfig:
+    """Workflow engine configuration."""
+    enabled: bool = True
+    db_path: str = str(DATA_DIR / "workflows.db")
+    max_concurrent_workflows: int = 5
+    max_steps_per_workflow: int = 50
+    step_timeout_seconds: int = 120
+
+
+@dataclass
+class MCPServerConfig:
+    """MCP Server configuration."""
+    enabled: bool = False
+    port: int = 3001
+    bind_host: str = "127.0.0.1"
+    auth_token: str = ""
+    expose_tools: bool = True
+    expose_resources: bool = True
+    expose_prompts: bool = True
+
+
+@dataclass
 class WorkspaceConfig:
     """Workspace settings for GitHub repo management and script execution."""
     repos_dir: str = "~/.neuralclaw/workspace/repos"
+    apps_dir: str = "~/projects"
     max_repo_size_mb: int = 500
     allowed_git_hosts: list[str] = field(default_factory=lambda: ["github.com", "gitlab.com", "bitbucket.org"])
     max_clone_timeout_seconds: int = 120
@@ -716,6 +794,9 @@ class NeuralClawConfig:
     federation: FederationConfig = field(default_factory=FederationConfig)
     workspace: WorkspaceConfig = field(default_factory=WorkspaceConfig)
     forge: ForgeConfig = field(default_factory=ForgeConfig)
+    rag: RAGConfig = field(default_factory=RAGConfig)
+    workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
+    mcp_server: MCPServerConfig = field(default_factory=MCPServerConfig)
     apis: dict[str, dict[str, Any]] = field(default_factory=dict)
     channels: list[ChannelConfig] = field(default_factory=list)
     dashboard_port: int = 8080
@@ -770,6 +851,9 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
     fed_section = merged.get("federation", {})
     ws_section = merged.get("workspace", {})
     forge_section = merged.get("forge", {})
+    rag_section = merged.get("rag", {})
+    wf_section = merged.get("workflow", {})
+    mcp_section = merged.get("mcp_server", {})
     apis_section = merged.get("apis", {})
     chan_section = merged.get("channels", {})
 
@@ -859,6 +943,9 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
         federation=FederationConfig(**_filter_fields(FederationConfig, fed_section)) if fed_section else FederationConfig(),
         workspace=WorkspaceConfig(**_filter_fields(WorkspaceConfig, ws_section)) if ws_section else WorkspaceConfig(),
         forge=ForgeConfig(**_filter_fields(ForgeConfig, forge_section)) if forge_section else ForgeConfig(),
+        rag=RAGConfig(**_filter_fields(RAGConfig, rag_section)) if rag_section else RAGConfig(),
+        workflow=WorkflowConfig(**_filter_fields(WorkflowConfig, wf_section)) if wf_section else WorkflowConfig(),
+        mcp_server=MCPServerConfig(**_filter_fields(MCPServerConfig, mcp_section)) if mcp_section else MCPServerConfig(),
         apis=apis_section if isinstance(apis_section, dict) else {},
         channels=channels,
         _raw=merged,
@@ -941,6 +1028,36 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
     if config.features.skill_forge:
         if "forge_skill" not in config.policy.allowed_tools:
             config.policy.allowed_tools.append("forge_skill")
+
+    apps_root = str(Path(config.workspace.apps_dir).expanduser())
+    if apps_root and apps_root not in config.policy.allowed_filesystem_roots:
+        config.policy.allowed_filesystem_roots.append(apps_root)
+    if "build_app" not in config.policy.allowed_tools:
+        config.policy.allowed_tools.append("build_app")
+    if "build_app" not in config.policy.mutating_tools:
+        config.policy.mutating_tools.append("build_app")
+
+    if config.features.rag:
+        rag_tools = ["kb_ingest", "kb_ingest_text", "kb_search", "kb_list", "kb_delete"]
+        for tool_name in rag_tools:
+            if tool_name not in config.policy.allowed_tools:
+                config.policy.allowed_tools.append(tool_name)
+        for tool_name in ["kb_ingest", "kb_ingest_text", "kb_delete"]:
+            if tool_name not in config.policy.mutating_tools:
+                config.policy.mutating_tools.append(tool_name)
+
+    if config.features.workflow_engine:
+        wf_tools = [
+            "create_workflow", "run_workflow", "pause_workflow",
+            "resume_workflow", "workflow_status", "list_workflows", "delete_workflow",
+        ]
+        for tool_name in wf_tools:
+            if tool_name not in config.policy.allowed_tools:
+                config.policy.allowed_tools.append(tool_name)
+        for tool_name in ["create_workflow", "run_workflow", "pause_workflow",
+                          "resume_workflow", "delete_workflow"]:
+            if tool_name not in config.policy.mutating_tools:
+                config.policy.mutating_tools.append(tool_name)
 
     return config
 
@@ -1143,6 +1260,8 @@ def validate_config(config: NeuralClawConfig) -> ConfigValidationResult:
             "policy.security_block_cooldown_seconds must be >= 0, "
             f"got {config.policy.security_block_cooldown_seconds}"
         )
+    if not str(config.workspace.apps_dir).strip():
+        errors.append("workspace.apps_dir must not be empty")
     if config.google_workspace.max_email_results <= 0:
         errors.append(
             "google_workspace.max_email_results must be > 0, "

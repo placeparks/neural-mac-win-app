@@ -21,7 +21,7 @@ from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParame
 _DUCKDUCKGO_API = "https://api.duckduckgo.com/"
 
 
-async def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
+async def web_search(query: str, max_results: int = 5, **kwargs: Any) -> dict[str, Any]:
     """Search the web using DuckDuckGo Instant Answer API."""
 
     # Validate the API URL (static, but defense-in-depth)
@@ -76,7 +76,7 @@ async def web_search(query: str, max_results: int = 5) -> dict[str, Any]:
         return {"error": f"Search failed: {str(e)}"}
 
 
-async def fetch_url(url: str) -> dict[str, Any]:
+async def fetch_url(url: str, **kwargs: Any) -> dict[str, Any]:
     """
     Fetch content from a URL with SSRF protection.
 

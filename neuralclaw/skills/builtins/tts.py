@@ -132,19 +132,19 @@ class TTSService:
 _service = TTSService()
 
 
-async def speak(text: str, voice: str = "", speed: float = 1.0, output_format: str = "mp3") -> dict[str, Any]:
+async def speak(text: str, voice: str = "", speed: float = 1.0, output_format: str = "mp3", **kwargs: Any) -> dict[str, Any]:
     global _service
     _service = TTSService(_config)
     return await _service.speak(text=text, voice=voice, speed=speed, output_format=output_format)
 
 
-async def list_voices(provider: str = "") -> dict[str, Any]:
+async def list_voices(provider: str = "", **kwargs: Any) -> dict[str, Any]:
     global _service
     _service = TTSService(_config)
     return await _service.list_voices(provider=provider)
 
 
-async def speak_and_play(text: str, channel_id: str, platform: str = "discord") -> dict[str, Any]:
+async def speak_and_play(text: str, channel_id: str, platform: str = "discord", **kwargs: Any) -> dict[str, Any]:
     global _service
     _service = TTSService(_config)
     return await _service.speak_and_play(text=text, channel_id=channel_id, platform=platform)

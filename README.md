@@ -1,6 +1,6 @@
 # NeuralClaw
 
-Version: `1.4.0`
+Version: `1.5.5`
 
 NeuralClaw is a Python agent framework built around a five-cortex runtime:
 Perception, Memory, Reasoning, Action, and Evolution. The current repository
@@ -22,6 +22,9 @@ integrations, and A2A-compatible federation.
   npm, and MCP registries, ranks results by stars, maintenance, license, and
   relevance, then auto-forges the best match into a ready-to-use skill.
   Works from any channel (`/scout`, `!scout`, `scout:`)
+- **App Builder**: Dedicated `build_app` workflow that provisions new projects
+  under the approved apps workspace root and returns the exact directory for
+  follow-up writes
 - **Controlled self-improvement**: Repeated capability failures are journaled,
   converted into candidate initiatives, forged or scouted off the live path,
   and only promoted after probationary tool calls succeed in real use
@@ -33,6 +36,7 @@ integrations, and A2A-compatible federation.
 - token-backed session auth: `chatgpt_token`, `claude_token`
 - episodic, semantic, procedural, vector, and identity memory with smart
   importance scoring
+- managed workspaces for app scaffolds and cloned repos
 - fast-path, deliberative, reflective, structured, and meta-cognitive reasoning
 - vision perception, browser automation, and desktop automation
 - streaming responses and Discord voice playback
@@ -161,6 +165,17 @@ neuralclaw service install    # install managed service
 neuralclaw service start      # start managed service
 ```
 
+## Workspace-Constrained Project Creation
+
+For fresh coding projects, NeuralClaw now uses `build_app` instead of
+inventing output directories. By default:
+
+- app scaffolds are created under `~/.neuralclaw/workspace/apps/`
+- cloned repositories live under `~/.neuralclaw/workspace/repos/`
+
+This keeps file writes inside approved roots and gives the agent an exact
+project path to use for the rest of the task.
+
 ## Providers
 
 | Provider | Purpose | Setup |
@@ -230,5 +245,5 @@ python -m build
 python -m twine check dist/*
 ```
 
-Publish from GitHub Actions by pushing a tag like `v1.4.0`, or run the manual
+Publish from GitHub Actions by pushing a tag like `v1.5.5`, or run the manual
 publish workflow after validating the changelog and built artifacts.

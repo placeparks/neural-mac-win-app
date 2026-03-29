@@ -64,6 +64,22 @@ class EventType(Enum):
     SKILL_SYNTHESIZED = auto()
     EXPERIENCE_DISTILLED = auto()
 
+    # RAG / Knowledge Base events
+    RAG_INGESTED = auto()
+    RAG_SEARCHED = auto()
+
+    # Workflow engine events
+    WORKFLOW_CREATED = auto()
+    WORKFLOW_STARTED = auto()
+    WORKFLOW_STEP_STARTED = auto()
+    WORKFLOW_STEP_COMPLETED = auto()
+    WORKFLOW_COMPLETED = auto()
+    WORKFLOW_PAUSED = auto()
+
+    # MCP server events
+    MCP_CLIENT_CONNECTED = auto()
+    MCP_TOOL_CALLED = auto()
+
     # Response events
     RESPONSE_READY = auto()
     RESPONSE_SENT = auto()

@@ -13,6 +13,8 @@ keychain or local fallback secret file managed by `config.py`.
 | `~/.neuralclaw/logs/audit.jsonl` | audit replay log |
 | `~/.neuralclaw/data/channel_bindings.json` | trusted route bindings |
 | `~/.neuralclaw/sessions/` | managed ChatGPT / Claude browser profiles |
+| `~/.neuralclaw/workspace/apps/` | approved root for `build_app` project scaffolds |
+| `~/.neuralclaw/workspace/repos/` | managed git clone workspace |
 
 ## Important Sections
 
@@ -37,6 +39,9 @@ Feature-gates optional subsystems:
 - `semantic_memory`
 - `a2a_federation`
 - `skill_forge`
+- `rag` — RAG knowledge base document ingestion and retrieval
+- `workflow_engine` — DAG-based multi-step task pipelines
+- `mcp_server` — Expose NeuralClaw as an MCP provider (opt-in, default false)
 
 ### `[memory]`
 
@@ -154,6 +159,12 @@ Feature-gates optional subsystems:
 - `desktop_allowed_apps`
 - `desktop_blocked_regions`
 
+Default production-safe behavior:
+
+- `build_app` is allowlisted as a mutating tool.
+- `allowed_filesystem_roots` includes the managed apps workspace root so files
+  created after `build_app` stay inside an approved path.
+
 ### `[forge]` — SkillForge & SkillScout Settings
 
 > **Note:** SkillScout reuses the `[forge]` configuration section. No additional
@@ -181,6 +192,69 @@ Feature-gates optional subsystems:
 - `node_name`
 - `a2a_enabled`
 - `a2a_auth_required`
+
+### `[workspace]`
+
+Workspace roots for repo execution and app scaffolding:
+
+- `repos_dir`
+- `apps_dir`
+- `max_repo_size_mb`
+- `allowed_git_hosts`
+- `max_clone_timeout_seconds`
+- `max_install_timeout_seconds`
+- `max_exec_timeout_seconds`
+
+`build_app` always provisions new projects under `workspace.apps_dir` and
+returns the exact created path, so agents do not need to guess output paths.
+
+### `[rag]`
+
+RAG knowledge base for document ingestion and semantic retrieval:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `true` | Enable the knowledge base subsystem |
+| `db_path` | string | `~/.neuralclaw/data/knowledge.db` | SQLite database for KB storage |
+| `chunk_size` | int | `1024` | Max characters per document chunk |
+| `overlap` | int | `128` | Character overlap between consecutive chunks |
+| `retrieval_top_k` | int | `5` | Number of chunks returned per search |
+| `max_doc_size_mb` | int | `50` | Maximum ingested file size in MB |
+
+Supported file types: `.txt`, `.md`, `.html`, `.csv`, `.json`, `.pdf` (requires `pypdf`).
+
+Tools: `kb_ingest`, `kb_ingest_text`, `kb_search`, `kb_list`, `kb_delete`.
+
+### `[workflow]`
+
+DAG-based workflow engine for multi-step task pipelines:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `true` | Enable the workflow engine |
+| `db_path` | string | `~/.neuralclaw/data/workflows.db` | SQLite database for workflow state |
+| `max_concurrent_workflows` | int | `5` | Max workflows running in parallel |
+| `max_steps_per_workflow` | int | `50` | Max steps allowed per workflow |
+| `step_timeout_seconds` | int | `120` | Default timeout per step |
+
+Tools: `create_workflow`, `run_workflow`, `pause_workflow`, `resume_workflow`,
+`workflow_status`, `list_workflows`, `delete_workflow`.
+
+### `[mcp_server]`
+
+MCP (Model Context Protocol) server exposing NeuralClaw to external agents/IDEs:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `false` | Enable MCP server (opt-in) |
+| `port` | int | `3001` | HTTP port for MCP endpoint |
+| `bind_host` | string | `"127.0.0.1"` | Bind address (localhost-only by default) |
+| `auth_token` | string | `""` | Bearer token for authentication (empty = no auth) |
+| `expose_tools` | bool | `true` | Expose registered tools via `tools/list` and `tools/call` |
+| `expose_resources` | bool | `true` | Expose KB documents via `resources/list` and `resources/read` |
+| `expose_prompts` | bool | `true` | Expose agent persona via `prompts/list` and `prompts/get` |
+
+Endpoints: `POST /mcp` (JSON-RPC 2.0), `GET /mcp/sse` (Server-Sent Events), `GET /mcp/health`.
 
 ## Example
 

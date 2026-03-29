@@ -40,7 +40,7 @@ def _validate_path(path: str) -> tuple[Path | None, dict[str, Any] | None]:
     return resolved, None
 
 
-async def read_file(path: str) -> dict[str, Any]:
+async def read_file(path: str, **kwargs: Any) -> dict[str, Any]:
     """Read the contents of a file."""
     try:
         p, err = _validate_path(path)
@@ -60,7 +60,7 @@ async def read_file(path: str) -> dict[str, Any]:
         return {"error": str(e)}
 
 
-async def write_file(path: str, content: str, idempotency_key: str | None = None) -> dict[str, Any]:
+async def write_file(path: str, content: str, idempotency_key: str | None = None, **kwargs: Any) -> dict[str, Any]:
     """Write content to a file."""
     try:
         p, err = _validate_path(path)
@@ -74,7 +74,7 @@ async def write_file(path: str, content: str, idempotency_key: str | None = None
         return {"error": str(e)}
 
 
-async def list_directory(path: str = ".") -> dict[str, Any]:
+async def list_directory(path: str = ".", **kwargs: Any) -> dict[str, Any]:
     """List files and directories in a path."""
     try:
         p, err = _validate_path(path)

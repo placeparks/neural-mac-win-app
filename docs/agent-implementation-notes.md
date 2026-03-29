@@ -461,6 +461,25 @@ the current state from scratch.
 - This was required for identity prompt injection and should be reused by future
   slices such as traceline or output filtering.
 
+## Managed app workspace provisioning
+
+- Added `neuralclaw/skills/builtins/app_builder.py`.
+- New built-in tool:
+  - `build_app`
+- Behavior:
+  - provisions fresh projects under `workspace.apps_dir`
+  - returns the exact created directory instead of relying on guessed paths
+  - writes a `.neuralclaw-app.json` marker so the workspace is self-describing
+- Config wiring:
+  - `workspace.apps_dir`
+  - `policy.allowed_filesystem_roots` now includes the apps root
+  - `build_app` is allowlisted and marked mutating by default
+- Gateway wiring:
+  - initializes `app_builder` with runtime workspace config
+- Tests:
+  - `tests/test_app_builder.py`
+  - config loading coverage extended in `tests/test_config_validation.py`
+
 ## Verification commands last run successfully
 
 ```powershell

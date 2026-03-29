@@ -2,6 +2,31 @@
 
 All notable changes to NeuralClaw will be documented in this file.
 
+## [1.5.5] - 2026-03-29
+
+### Changed - Release Refresh
+- Rolled up the latest in-repo updates into the `1.5.5` package release.
+- Refreshed package metadata, version banners, and release references for the
+  `1.5.5` PyPI build and upgrade path.
+
+## [1.5.0] - 2026-03-29
+
+### Added - Managed App Workspace Provisioning
+- Added a dedicated `build_app` workflow that provisions fresh projects under
+  the approved apps workspace root instead of relying on guessed output paths.
+- New app scaffolds now carry a `.neuralclaw-app.json` marker so the allocated
+  workspace is self-describing for follow-up file operations.
+
+### Changed - Workspace and Release Docs
+- Workspace documentation now distinguishes `workspace.apps_dir` for app
+  scaffolds from `workspace.repos_dir` for cloned repositories.
+- README, getting-started, architecture, skills, API reference, and config docs
+  now document the managed app workspace flow and the `1.5.0` release path.
+
+### Changed - Release Metadata
+- Package version bumped to `1.5.0`.
+- Release/docs references now target the `1.5.0` PyPI build and upgrade path.
+
 ## [1.4.0] - 2026-03-28
 
 ### Added - Controlled Capability Self-Improvement

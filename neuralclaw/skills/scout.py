@@ -9,6 +9,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -114,9 +115,9 @@ class SkillScout:
                 "SCOUT_FORGING: source=%s, registry=%s, query=%r",
                 chosen.source, chosen.registry, query,
             )
-            forge_result = await self._forge.steal(
+            forge_result = await self._invoke_forge(
                 chosen.source,
-                use_case=query,
+                query,
                 activate=activate,
                 skills_dir=skills_dir,
                 registry_source=registry_source,
@@ -138,6 +139,40 @@ class SkillScout:
             result.elapsed_seconds = round(time.monotonic() - start, 2)
 
         return result
+
+    async def _invoke_forge(
+        self,
+        source: str,
+        use_case: str,
+        activate: bool,
+        skills_dir: str | None,
+        registry_source: str,
+    ) -> Any:
+        """
+        Call ``forge.steal()`` with backward-compatible kwargs.
+
+        Some tests and alternate forge implementations still expose an older
+        signature that only accepts ``source`` and ``use_case``.
+        """
+        steal = self._forge.steal
+        kwargs = {
+            "use_case": use_case,
+            "activate": activate,
+            "skills_dir": skills_dir,
+            "registry_source": registry_source,
+        }
+        signature = inspect.signature(steal)
+        accepts_kwargs = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in signature.parameters.values()
+        )
+        if not accepts_kwargs:
+            kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key in signature.parameters
+            }
+        return await steal(source, **kwargs)
 
     # ------------------------------------------------------------------
     # Registry searches (all return list[ScoutCandidate])

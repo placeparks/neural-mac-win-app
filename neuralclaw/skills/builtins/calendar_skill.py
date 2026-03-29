@@ -49,6 +49,7 @@ async def create_event(
     description: str = "",
     location: str = "",
     idempotency_key: str | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Create a new calendar event."""
     try:
@@ -71,7 +72,7 @@ async def create_event(
         return {"error": str(e)}
 
 
-async def list_events(date: str | None = None) -> dict[str, Any]:
+async def list_events(date: str | None = None, **kwargs: Any) -> dict[str, Any]:
     """List calendar events, optionally filtered by date (YYYY-MM-DD)."""
     try:
         db = await _get_db()
@@ -95,7 +96,7 @@ async def list_events(date: str | None = None) -> dict[str, Any]:
         return {"error": str(e)}
 
 
-async def delete_event(event_id: str, idempotency_key: str | None = None) -> dict[str, Any]:
+async def delete_event(event_id: str, idempotency_key: str | None = None, **kwargs: Any) -> dict[str, Any]:
     """Delete a calendar event by ID."""
     try:
         db = await _get_db()

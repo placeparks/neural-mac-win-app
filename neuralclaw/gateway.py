@@ -203,9 +203,25 @@ class NeuralClawGateway:
             semantic=self._semantic,
             db_pool=self._memory_db_pool,
         ) if feat.identity and self._config.identity.enabled else None
+
+        # Knowledge Base (RAG)
+        self._knowledge_base = None
+        if feat.rag and self._config.rag.enabled:
+            from neuralclaw.cortex.memory.knowledge_base import KnowledgeBase
+            self._knowledge_base = KnowledgeBase(
+                db_path=self._config.rag.db_path,
+                vector_memory=self._vector_memory,
+                bus=self._bus,
+                chunk_size=self._config.rag.chunk_size,
+                overlap=self._config.rag.overlap,
+                retrieval_top_k=self._config.rag.retrieval_top_k,
+                max_doc_size_mb=self._config.rag.max_doc_size_mb,
+            )
+
         self._retriever = MemoryRetriever(
             self._episodic, self._semantic, self._bus,
             vector_memory=self._vector_memory,
+            knowledge_base=self._knowledge_base,
             max_episodes=self._config.memory.max_episodic_results,
             max_facts=self._config.memory.max_semantic_results,
             vector_top_k=self._config.memory.vector_similarity_top_k,
@@ -316,6 +332,32 @@ class NeuralClawGateway:
         else:
             self._dashboard = None
 
+        # Workflow Engine
+        self._workflow_engine = None
+        if feat.workflow_engine and self._config.workflow.enabled:
+            from neuralclaw.cortex.reasoning.workflow import WorkflowEngine
+            self._workflow_engine = WorkflowEngine(
+                db_path=self._config.workflow.db_path,
+                bus=self._bus,
+                skill_registry=self._skills,
+                max_concurrent=self._config.workflow.max_concurrent_workflows,
+                max_steps=self._config.workflow.max_steps_per_workflow,
+                step_timeout=self._config.workflow.step_timeout_seconds,
+            )
+
+        # MCP Server
+        self._mcp_server = None
+        if feat.mcp_server and self._config.mcp_server.enabled:
+            from neuralclaw.mcp_server import MCPServer
+            self._mcp_server = MCPServer(
+                port=self._config.mcp_server.port,
+                bind_host=self._config.mcp_server.bind_host,
+                auth_token=self._config.mcp_server.auth_token or "",
+                expose_tools=self._config.mcp_server.expose_tools,
+                expose_resources=self._config.mcp_server.expose_resources,
+                expose_prompts=self._config.mcp_server.expose_prompts,
+            )
+
         # Channels
         self._channels: dict[str, ChannelAdapter] = {}
         self._trust = ChannelTrustController()
@@ -353,6 +395,20 @@ class NeuralClawGateway:
                 check=self._ping_federation,
             )
         )
+        self._health.register_probe(
+            ReadinessProbe(
+                name="knowledge_base",
+                required=False,
+                check=self._ping_knowledge_base,
+            )
+        )
+        self._health.register_probe(
+            ReadinessProbe(
+                name="workflow_engine",
+                required=False,
+                check=self._ping_workflow_engine,
+            )
+        )
 
     async def initialize(self) -> None:
         """Initialize all subsystems."""
@@ -373,6 +429,10 @@ class NeuralClawGateway:
             await self._traceline.initialize()
         if self._procedural:
             await self._procedural.initialize()
+        if self._knowledge_base:
+            await self._knowledge_base.initialize()
+        if self._workflow_engine:
+            await self._workflow_engine.initialize()
 
         # Initialize idempotency store
         await self._idempotency.initialize()
@@ -410,6 +470,39 @@ class NeuralClawGateway:
             _github_repos.set_workspace_config(self._config.workspace)
         except Exception as e:
             self._logger.debug("Failed to configure github_repos skill: %s", e)
+
+        # Configure app_builder skill with workspace settings
+        try:
+            from neuralclaw.skills.builtins import app_builder as _app_builder
+
+            _app_builder.set_workspace_config(self._config.workspace)
+        except Exception as e:
+            self._logger.debug("Failed to configure app_builder skill: %s", e)
+
+        # Configure knowledge base skill
+        if self._knowledge_base:
+            try:
+                from neuralclaw.skills.builtins import knowledge_base as _kb_skill
+
+                _kb_skill.set_knowledge_base(self._knowledge_base)
+            except Exception as e:
+                self._logger.debug("Failed to configure knowledge_base skill: %s", e)
+
+        # Configure workflow skill
+        if self._workflow_engine:
+            try:
+                from neuralclaw.skills.builtins import workflow_skill as _wf_skill
+
+                _wf_skill.set_workflow_engine(self._workflow_engine)
+            except Exception as e:
+                self._logger.debug("Failed to configure workflow skill: %s", e)
+
+        # Wire MCP Server
+        if self._mcp_server:
+            self._mcp_server.set_skill_registry(self._skills)
+            self._mcp_server.set_knowledge_base(self._knowledge_base)
+            self._mcp_server.set_bus(self._bus)
+            self._mcp_server.set_persona(self._config.persona)
 
         # Configure repo_exec skill with workspace timeout
         try:
@@ -953,6 +1046,16 @@ class NeuralClawGateway:
         if not self._federation:
             return True
         return await self._federation.ping()
+
+    async def _ping_knowledge_base(self) -> bool:
+        if not self._knowledge_base:
+            return True
+        return await self._knowledge_base.ping()
+
+    async def _ping_workflow_engine(self) -> bool:
+        if not self._workflow_engine:
+            return True
+        return await self._workflow_engine.ping()
 
     def _get_send_limiter(self, platform: str) -> TokenBucketRateLimiter:
         limiter = self._send_limiters.get(platform)
@@ -2203,6 +2306,13 @@ class NeuralClawGateway:
             except Exception as e:
                 self._logger.error("Dashboard failed to start: %s", e)
 
+        # Start MCP Server
+        if self._mcp_server:
+            try:
+                await self._mcp_server.start()
+            except Exception as e:
+                self._logger.error("MCP Server failed to start: %s", e)
+
         if self._dev_mode and self._config_path:
             self._config_watch_task = asyncio.create_task(self._watch_config())
 
@@ -2223,6 +2333,10 @@ class NeuralClawGateway:
             print(f"   Federation: port {fed_cfg.port}, seeds: {seeds}")
         else:
             print(f"   Federation: disabled")
+        print(f"   RAG: {'enabled' if feat.rag else 'disabled'}")
+        print(f"   Workflow Engine: {'enabled' if feat.workflow_engine else 'disabled'}")
+        if self._mcp_server:
+            print(f"   MCP Server: port {self._config.mcp_server.port}")
         if self._spawner:
             print(f"   Spawner: {self._spawner.count} agents")
         print()
@@ -2253,6 +2367,8 @@ class NeuralClawGateway:
             await self._federation_bridge.stop()
         if self._federation:
             await self._federation.stop()
+        if self._mcp_server:
+            await self._mcp_server.stop()
         if self._dashboard:
             await self._dashboard.stop()
         await self._telemetry.stop()
@@ -2265,6 +2381,10 @@ class NeuralClawGateway:
             await self._traceline.close()
         if self._vector_memory:
             await self._vector_memory.close()
+        if self._knowledge_base:
+            await self._knowledge_base.close()
+        if self._workflow_engine:
+            await self._workflow_engine.close()
         if self._browser:
             await self._browser.stop()
         if self._procedural:

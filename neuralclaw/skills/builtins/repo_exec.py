@@ -249,6 +249,7 @@ async def run_repo_script(
     script_path: str,
     args: str = "",
     timeout_seconds: int = 60,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Run a script from a cloned repository."""
     repo_dir, err = _resolve_repo(repo_name)
@@ -300,6 +301,7 @@ async def run_repo_command(
     command: str,
     subdir: str = "",
     timeout_seconds: int = 60,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Run a command within a repo's environment."""
     repo_dir, err = _resolve_repo(repo_name)

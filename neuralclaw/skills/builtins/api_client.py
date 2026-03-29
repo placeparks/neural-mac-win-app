@@ -94,6 +94,7 @@ async def api_request(
     query_params: dict[str, str] | None = None,
     api_name: str | None = None,
     timeout_seconds: int = 30,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Make an authenticated HTTP request."""
     method = method.upper()
@@ -241,7 +242,7 @@ async def save_api_config(
     }
 
 
-async def list_api_configs() -> dict[str, Any]:
+async def list_api_configs(**kwargs: Any) -> dict[str, Any]:
     """List saved API configurations (keys are never exposed)."""
     apis: list[dict[str, Any]] = []
     for name, config in _api_configs.items():

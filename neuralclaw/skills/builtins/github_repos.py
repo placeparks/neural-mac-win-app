@@ -359,7 +359,7 @@ async def install_repo_deps(repo_name: str, **_kwargs: Any) -> dict[str, Any]:
     }
 
 
-async def list_repos() -> dict[str, Any]:
+async def list_repos(**kwargs: Any) -> dict[str, Any]:
     """List all cloned repositories."""
     if not REPOS_DIR.exists():
         return {"repos": []}

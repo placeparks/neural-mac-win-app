@@ -8,6 +8,7 @@ NeuralClaw exposes tools through `SkillManifest`, `ToolDefinition`, and the
 | Skill | Purpose | Example tools |
 |---|---|---|
 | `web_search` | search and fetch | `web_search`, `fetch_url` |
+| `app_builder` | approved app workspace provisioning | `build_app` |
 | `file_ops` | bounded filesystem access | `read_file`, `write_file`, `list_directory` |
 | `code_exec` | sandboxed execution | `execute_python` |
 | `calendar_skill` | local calendar operations | `create_event`, `list_events`, `delete_event` |
@@ -22,6 +23,18 @@ Dynamic tool groups are registered by the gateway only when enabled:
 
 - browser tools
 - desktop tools
+
+## Managed Workspaces
+
+NeuralClaw now separates two common write targets:
+
+- `build_app` provisions projects under `workspace.apps_dir`
+  default: `~/.neuralclaw/workspace/apps/`
+- repo management and repo execution operate under `workspace.repos_dir`
+  default: `~/.neuralclaw/workspace/repos/`
+
+Use `build_app` when the agent needs to start a fresh project. Use repo tools
+when the task is about cloning or running an existing repository.
 
 ## Manifest Model
 
@@ -65,6 +78,7 @@ Builtin skill handlers should:
 - catch failures and return `{"error": "..."}`
 - validate outbound URLs through `validate_url_with_dns()`
 - rely on policy and idempotency for side-effect safety
+- avoid inventing arbitrary project paths when a dedicated workspace tool exists
 
 ## SkillScout — Intelligent Skill Discovery
 
