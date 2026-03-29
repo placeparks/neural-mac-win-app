@@ -49,3 +49,5 @@ htmlcov/
 # Node.js (for WhatsApp bridge)
 node_modules/
 package-lock.json
+
+tmp/
