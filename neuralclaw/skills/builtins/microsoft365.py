@@ -98,7 +98,7 @@ def _get_service() -> Microsoft365Service:
     return _service
 
 
-async def outlook_search(query: str, max_results: int = 10) -> dict[str, Any]:
+async def outlook_search(query: str, max_results: int = 10, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     result = await service._request(
         "GET",
@@ -109,7 +109,7 @@ async def outlook_search(query: str, max_results: int = 10) -> dict[str, Any]:
     return result if result.get("error") else {"messages": result.get("value", []), "count": len(result.get("value", []))}
 
 
-async def outlook_send(to: str, subject: str, body: str) -> dict[str, Any]:
+async def outlook_send(to: str, subject: str, body: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     payload = {
         "message": {
@@ -123,12 +123,12 @@ async def outlook_send(to: str, subject: str, body: str) -> dict[str, Any]:
     return result if result.get("error") else {"sent": True, "to": to}
 
 
-async def outlook_get(message_id: str) -> dict[str, Any]:
+async def outlook_get(message_id: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     return await service._request("GET", f"/users/{_config.default_user}/messages/{message_id}")
 
 
-async def ms_cal_list(start_time: str = "", end_time: str = "") -> dict[str, Any]:
+async def ms_cal_list(start_time: str = "", end_time: str = "", **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     params = {}
     if start_time:
@@ -140,7 +140,7 @@ async def ms_cal_list(start_time: str = "", end_time: str = "") -> dict[str, Any
     return result if result.get("error") else {"events": result.get("value", []), "count": len(result.get("value", []))}
 
 
-async def ms_cal_create(subject: str, start_time: str, end_time: str) -> dict[str, Any]:
+async def ms_cal_create(subject: str, start_time: str, end_time: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     return await service._request(
         "POST",
@@ -153,37 +153,37 @@ async def ms_cal_create(subject: str, start_time: str, end_time: str) -> dict[st
     )
 
 
-async def ms_cal_delete(event_id: str) -> dict[str, Any]:
+async def ms_cal_delete(event_id: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     result = await service._request("DELETE", f"/users/{_config.default_user}/events/{event_id}")
     return result if result.get("error") else {"deleted": True, "id": event_id}
 
 
-async def teams_send(chat_or_channel_id: str, text: str) -> dict[str, Any]:
+async def teams_send(chat_or_channel_id: str, text: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     payload = {"body": {"contentType": "html", "content": text}}
     return await service._request("POST", f"/chats/{chat_or_channel_id}/messages", json_body=payload)
 
 
-async def teams_list_channels(team_id: str) -> dict[str, Any]:
+async def teams_list_channels(team_id: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     result = await service._request("GET", f"/teams/{team_id}/channels")
     return result if result.get("error") else {"channels": result.get("value", []), "count": len(result.get("value", []))}
 
 
-async def onedrive_search(query: str, max_results: int = 10) -> dict[str, Any]:
+async def onedrive_search(query: str, max_results: int = 10, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     result = await service._request("GET", f"/users/{_config.default_user}/drive/root/search(q='{query}')")
     files = result.get("value", []) if not result.get("error") else []
     return result if result.get("error") else {"files": files[: min(max_results, _config.max_file_results)], "count": len(files[: min(max_results, _config.max_file_results)])}
 
 
-async def onedrive_read(item_id: str) -> dict[str, Any]:
+async def onedrive_read(item_id: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     return await service._request("GET", f"/users/{_config.default_user}/drive/items/{item_id}/content")
 
 
-async def onedrive_upload(file_path: str, remote_name: str = "") -> dict[str, Any]:
+async def onedrive_upload(file_path: str, remote_name: str = "", **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     guard = service._guard()
     if guard:
@@ -202,12 +202,12 @@ async def onedrive_upload(file_path: str, remote_name: str = "") -> dict[str, An
     return result if result.get("error") else {"uploaded": True, "name": name, "id": result.get("id", "")}
 
 
-async def sharepoint_search(query: str) -> dict[str, Any]:
+async def sharepoint_search(query: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     return await service._request("POST", "/search/query", json_body={"requests": [{"entityTypes": ["driveItem", "listItem"], "query": {"queryString": query}}]})
 
 
-async def sharepoint_read(item_path: str) -> dict[str, Any]:
+async def sharepoint_read(item_path: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     return await service._request("GET", item_path if item_path.startswith("/") else f"/{item_path}")
 

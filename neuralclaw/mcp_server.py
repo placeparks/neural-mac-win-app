@@ -21,7 +21,7 @@ log = logging.getLogger("neuralclaw.mcp_server")
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "neuralclaw"
-SERVER_VERSION = "1.5.6"
+SERVER_VERSION = "1.5.7"
 
 
 class MCPServer:
@@ -143,13 +143,23 @@ class MCPServer:
         from aiohttp import web
 
         auth_token = self._auth_token
+        _warned_no_auth = False
 
         @web.middleware
         async def middleware(request: Any, handler: Any) -> Any:
+            nonlocal _warned_no_auth
             # Skip auth for health endpoint
             if request.path == "/mcp/health":
                 return await handler(request)
-            if auth_token:
+            if not auth_token:
+                # No token configured — log warning once and allow (local-only default)
+                if not _warned_no_auth:
+                    log.warning(
+                        "MCP server has no auth_token configured — endpoints are unprotected. "
+                        "Set [mcp_server] auth_token in config.toml for production use."
+                    )
+                    _warned_no_auth = True
+            elif auth_token:
                 auth_header = request.headers.get("Authorization", "")
                 if auth_header != f"Bearer {auth_token}":
                     return web.json_response(
@@ -420,7 +430,7 @@ class MCPServer:
             while self._running:
                 await asyncio.sleep(30)
                 await response.write(b": keepalive\n\n")
-        except (asyncio.CancelledError, ConnectionResetError):
+        except (asyncio.CancelledError, ConnectionResetError, ConnectionError, OSError):
             pass
         finally:
             if response in self._sse_clients:
@@ -434,12 +444,20 @@ class MCPServer:
 
     async def _handle_health(self, request: Any) -> Any:
         from aiohttp import web
-        return web.json_response({
-            "status": "ok" if self._running else "stopped",
+
+        initialized = bool(self._skill_registry and self._bus)
+        status = "ok" if (self._running and initialized) else "degraded" if self._running else "stopped"
+        resp = {
+            "status": status,
             "server": SERVER_NAME,
             "version": SERVER_VERSION,
+            "initialized": initialized,
             "tools_count": len(self._skill_registry.get_all_tool_defs()) if self._skill_registry else 0,
-        })
+            "knowledge_base": self._knowledge_base is not None,
+            "sse_clients": len(self._sse_clients),
+        }
+        code = 200 if status == "ok" else 503
+        return web.json_response(resp, status=code)
 
 
 # ---------------------------------------------------------------------------

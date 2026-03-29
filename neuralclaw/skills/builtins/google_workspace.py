@@ -103,7 +103,7 @@ def _get_service() -> GoogleWorkspaceService:
     return _service
 
 
-async def gmail_search(query: str, max_results: int = 10) -> dict[str, Any]:
+async def gmail_search(query: str, max_results: int = 10, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     result = await service._request(
         "GET",
@@ -115,19 +115,19 @@ async def gmail_search(query: str, max_results: int = 10) -> dict[str, Any]:
     return {"messages": result.get("messages", []), "count": len(result.get("messages", []))}
 
 
-async def gmail_send(to: str, subject: str, body: str) -> dict[str, Any]:
+async def gmail_send(to: str, subject: str, body: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     raw = base64.urlsafe_b64encode(f"To: {to}\r\nSubject: {subject}\r\n\r\n{body}".encode("utf-8")).decode("ascii")
     result = await service._request("POST", f"{service.BASE_GMAIL}/messages/send", json_body={"raw": raw})
     return result if result.get("error") else {"sent": True, "id": result.get("id", "")}
 
 
-async def gmail_get(message_id: str) -> dict[str, Any]:
+async def gmail_get(message_id: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     return await service._request("GET", f"{service.BASE_GMAIL}/messages/{message_id}", params={"format": "full"})
 
 
-async def gmail_label(message_id: str, add_labels: list[str] | None = None, remove_labels: list[str] | None = None) -> dict[str, Any]:
+async def gmail_label(message_id: str, add_labels: list[str] | None = None, remove_labels: list[str] | None = None, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     result = await service._request(
         "POST",
@@ -137,14 +137,14 @@ async def gmail_label(message_id: str, add_labels: list[str] | None = None, remo
     return result if result.get("error") else {"updated": True, "id": message_id}
 
 
-async def gmail_draft(to: str, subject: str, body: str) -> dict[str, Any]:
+async def gmail_draft(to: str, subject: str, body: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     raw = base64.urlsafe_b64encode(f"To: {to}\r\nSubject: {subject}\r\n\r\n{body}".encode("utf-8")).decode("ascii")
     result = await service._request("POST", f"{service.BASE_GMAIL}/drafts", json_body={"message": {"raw": raw}})
     return result if result.get("error") else {"draft_id": result.get("id", "")}
 
 
-async def gcal_list_events(time_min: str = "", time_max: str = "", calendar_id: str = "") -> dict[str, Any]:
+async def gcal_list_events(time_min: str = "", time_max: str = "", calendar_id: str = "", **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     result = await service._request(
         "GET",
@@ -154,7 +154,7 @@ async def gcal_list_events(time_min: str = "", time_max: str = "", calendar_id: 
     return result if result.get("error") else {"events": result.get("items", []), "count": len(result.get("items", []))}
 
 
-async def gcal_create_event(summary: str, start_time: str, end_time: str, calendar_id: str = "") -> dict[str, Any]:
+async def gcal_create_event(summary: str, start_time: str, end_time: str, calendar_id: str = "", **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     return await service._request(
         "POST",
@@ -163,7 +163,7 @@ async def gcal_create_event(summary: str, start_time: str, end_time: str, calend
     )
 
 
-async def gcal_update_event(event_id: str, updates: dict[str, Any], calendar_id: str = "") -> dict[str, Any]:
+async def gcal_update_event(event_id: str, updates: dict[str, Any], calendar_id: str = "", **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     return await service._request(
         "PATCH",
@@ -172,7 +172,7 @@ async def gcal_update_event(event_id: str, updates: dict[str, Any], calendar_id:
     )
 
 
-async def gcal_delete_event(event_id: str, calendar_id: str = "") -> dict[str, Any]:
+async def gcal_delete_event(event_id: str, calendar_id: str = "", **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     result = await service._request(
         "DELETE",
@@ -181,18 +181,18 @@ async def gcal_delete_event(event_id: str, calendar_id: str = "") -> dict[str, A
     return result if result.get("error") else {"deleted": True, "id": event_id}
 
 
-async def gdrive_search(query: str, max_results: int = 10) -> dict[str, Any]:
+async def gdrive_search(query: str, max_results: int = 10, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     result = await service._request("GET", service.BASE_DRIVE + "/files", params={"q": query, "pageSize": min(max_results, _config.max_drive_results)})
     return result if result.get("error") else {"files": result.get("files", []), "count": len(result.get("files", []))}
 
 
-async def gdrive_read(file_id: str) -> dict[str, Any]:
+async def gdrive_read(file_id: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     return await service._request("GET", f"{service.BASE_DRIVE}/files/{file_id}", params={"alt": "media"})
 
 
-async def gdrive_upload(file_path: str, name: str = "", mime_type: str = "application/octet-stream") -> dict[str, Any]:
+async def gdrive_upload(file_path: str, name: str = "", mime_type: str = "application/octet-stream", **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     guard = service._guard()
     if guard:
@@ -211,12 +211,12 @@ async def gdrive_upload(file_path: str, name: str = "", mime_type: str = "applic
     return result if result.get("error") else {"uploaded": True, "name": name or path.name, "id": result.get("id", "")}
 
 
-async def gdocs_read(document_id: str) -> dict[str, Any]:
+async def gdocs_read(document_id: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     return await service._request("GET", f"{service.BASE_DOCS}/documents/{document_id}")
 
 
-async def gdocs_append(document_id: str, text: str) -> dict[str, Any]:
+async def gdocs_append(document_id: str, text: str, **kwargs: Any) -> dict[str, Any]:
     doc = await gdocs_read(document_id)
     if doc.get("error"):
         return doc
@@ -229,12 +229,12 @@ async def gdocs_append(document_id: str, text: str) -> dict[str, Any]:
     )
 
 
-async def gsheets_read(spreadsheet_id: str, range_name: str) -> dict[str, Any]:
+async def gsheets_read(spreadsheet_id: str, range_name: str, **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     return await service._request("GET", f"{service.BASE_SHEETS}/{spreadsheet_id}/values/{range_name}")
 
 
-async def gsheets_write(spreadsheet_id: str, range_name: str, values: list[list[Any]]) -> dict[str, Any]:
+async def gsheets_write(spreadsheet_id: str, range_name: str, values: list[list[Any]], **kwargs: Any) -> dict[str, Any]:
     service = _get_service()
     return await service._request(
         "PUT",
@@ -244,7 +244,7 @@ async def gsheets_write(spreadsheet_id: str, range_name: str, values: list[list[
     )
 
 
-async def gmeet_create(summary: str = "NeuralClaw Meeting") -> dict[str, Any]:
+async def gmeet_create(summary: str = "NeuralClaw Meeting", **kwargs: Any) -> dict[str, Any]:
     event = await gcal_create_event(
         summary=summary,
         start_time="2030-01-01T09:00:00Z",

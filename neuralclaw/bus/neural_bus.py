@@ -79,6 +79,13 @@ class EventType(Enum):
     # MCP server events
     MCP_CLIENT_CONNECTED = auto()
     MCP_TOOL_CALLED = auto()
+    MCP_SERVER_STARTED = auto()
+    MCP_SERVER_STOPPED = auto()
+
+    # Gateway lifecycle events
+    GATEWAY_STARTED = auto()
+    GATEWAY_STOPPED = auto()
+    CONFIG_RELOADED = auto()
 
     # Response events
     RESPONSE_READY = auto()
