@@ -9,6 +9,7 @@ workspace apps root.
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,20 @@ from neuralclaw.cortex.action.capabilities import Capability
 from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParameter
 
 
-APPS_DIR = Path.home() / "projects"
+def _default_projects_dir() -> Path:
+    """Resolve the default projects directory.
+
+    Checks ``NEURALCLAW_PROJECTS_DIR`` first so services running under
+    SYSTEM or another account can override ``~`` which would otherwise
+    resolve to the system profile directory.
+    """
+    env = os.environ.get("NEURALCLAW_PROJECTS_DIR")
+    if env:
+        return Path(env)
+    return Path.home() / "projects"
+
+
+APPS_DIR = _default_projects_dir()
 
 SUPPORTED_TEMPLATES = {"generic", "web", "python", "node"}
 
@@ -26,7 +40,13 @@ def set_workspace_config(config: Any) -> None:
     """Configure the apps workspace root from ``WorkspaceConfig``."""
     global APPS_DIR
     if hasattr(config, "apps_dir") and config.apps_dir:
-        APPS_DIR = Path(str(config.apps_dir)).expanduser()
+        resolved = Path(str(config.apps_dir)).expanduser()
+        # If running as a service, expanduser may resolve to the system
+        # profile.  Prefer the env var override when it looks suspicious.
+        env = os.environ.get("NEURALCLAW_PROJECTS_DIR")
+        if env:
+            resolved = Path(env)
+        APPS_DIR = resolved
 
 
 def _slugify_project_name(project_name: str) -> str:

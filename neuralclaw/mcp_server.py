@@ -21,7 +21,7 @@ log = logging.getLogger("neuralclaw.mcp_server")
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "neuralclaw"
-SERVER_VERSION = "1.4.0"
+SERVER_VERSION = "1.5.6"
 
 
 class MCPServer:

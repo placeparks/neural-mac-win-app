@@ -13,7 +13,7 @@ keychain or local fallback secret file managed by `config.py`.
 | `~/.neuralclaw/logs/audit.jsonl` | audit replay log |
 | `~/.neuralclaw/data/channel_bindings.json` | trusted route bindings |
 | `~/.neuralclaw/sessions/` | managed ChatGPT / Claude browser profiles |
-| `~/.neuralclaw/workspace/apps/` | approved root for `build_app` project scaffolds |
+| `~/projects/` | approved root for `build_app` project scaffolds |
 | `~/.neuralclaw/workspace/repos/` | managed git clone workspace |
 
 ## Important Sections
@@ -208,6 +208,17 @@ Workspace roots for repo execution and app scaffolding:
 `build_app` always provisions new projects under `workspace.apps_dir` and
 returns the exact created path, so agents do not need to guess output paths.
 
+> **Running as a service:** When NeuralClaw runs as a Windows service or under
+> a system account, `~` may resolve to the system profile directory
+> (e.g. `C:\Windows\System32\config\systemprofile`). Set the
+> `NEURALCLAW_PROJECTS_DIR` environment variable to an absolute path to
+> override this, or use an absolute path for `apps_dir` in your config:
+>
+> ```toml
+> [workspace]
+> apps_dir = "C:/Users/youruser/projects"
+> ```
+
 ### `[rag]`
 
 RAG knowledge base for document ingestion and semantic retrieval:
@@ -281,6 +292,9 @@ procedural_memory = true
 semantic_memory = true
 a2a_federation = false
 skill_forge = true
+rag = true
+workflow_engine = true
+mcp_server = false
 
 [providers]
 primary = "openai"
