@@ -139,7 +139,24 @@
       "Bash(python -m pytest tests/ -v --tb=no -q)",
       "Bash(python -m pytest tests/ -v --timeout=30)",
       "Bash(python -m build --sdist --wheel)",
-      "Bash(python -m twine check dist/neuralclaw-1.5.6*)"
+      "Bash(python -m twine check dist/neuralclaw-1.5.6*)",
+      "Bash(find \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(2\\)\\\\clawnick-main\" -path \"*/build\" -prune -o -type f -name \"*.py\")",
+      "Bash(grep -E \"\\(^\\\\.\\\\/[^/]+\\\\.py$|src/|tests/|clawnick/\\)\")",
+      "Bash(find \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(2\\)\\\\clawnick-main/neuralclaw/cortex\" -name \"*.py\" -type f)",
+      "Bash(wc -l ./tests/test_*.py)",
+      "Bash(done)",
+      "Bash(ls -la \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(2\\)\\\\clawnick-main/neuralclaw/security\")",
+      "Read(//tmp/**)",
+      "Bash(python:*)",
+      "Bash(grep -l \"test_\" ./tests/*.py)",
+      "Bash(grep -r \"os.path\\\\|pathlib\\\\|Path\\\\|platform\" tests/test_*.py)",
+      "Bash(grep -l \"os.path.sep\\\\|platform\\\\|win32\" tests/test_*.py)",
+      "Bash(find ./neuralclaw -name \"*.py\" -exec grep -l \"import.*whatsapp\\\\|from.*whatsapp\" {})",
+      "Bash(grep -l \"RAG\\\\|knowledge_base\\\\|MCP\" docs/*.md)",
+      "Bash(grep -r \"sleep\\\\|time.time\\\\|asyncio.wait\\\\|TODO\\\\|FIXME\\\\|XXX\\\\|HACK\" tests/test_*.py)",
+      "Bash(grep -r \"asyncio.sleep\\\\|time.sleep\" tests/test_*.py)",
+      "Bash(ls \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(2\\)\\\\clawnick-main\\\\neuralclaw\\\\security\"\")",
+      "Bash(ls \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(2\\)\\\\clawnick-main\\\\dist\"\")"
     ]
   }
 }
