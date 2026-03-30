@@ -1,4 +1,4 @@
-// NeuralClaw Desktop — Knowledge Base Page (Full Implementation)
+// NeuralClaw Desktop — Knowledge Base Page
 
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -29,6 +29,7 @@ export default function KnowledgePage() {
   const [ingestPath, setIngestPath] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [endpointAvailable, setEndpointAvailable] = useState(true);
 
   const loadDocuments = useCallback(async () => {
     try {
@@ -36,9 +37,11 @@ export default function KnowledgePage() {
       const parsed = JSON.parse(result);
       setDocuments(Array.isArray(parsed) ? parsed : parsed.documents || []);
       setError(null);
-    } catch (err) {
-      setError('Could not load documents. Is the backend running?');
+      setEndpointAvailable(true);
+    } catch {
+      // Endpoint may not exist — show empty state, not error
       setDocuments([]);
+      setEndpointAvailable(false);
     } finally {
       setLoading(false);
     }
@@ -54,8 +57,8 @@ export default function KnowledgePage() {
       const result = await invoke<string>('search_kb', { query: searchQuery });
       const parsed = JSON.parse(result);
       setSearchResults(Array.isArray(parsed) ? parsed : parsed.results || []);
-    } catch (err) {
-      setError('Search failed. Check backend connection.');
+    } catch {
+      setError('Search failed. Try using chat: "search knowledge base for..."');
     } finally {
       setSearching(false);
     }
@@ -69,8 +72,8 @@ export default function KnowledgePage() {
       await invoke<string>('ingest_kb_document', { filePath: ingestPath });
       setIngestPath('');
       await loadDocuments();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Ingestion failed.');
+    } catch {
+      setError('Ingest failed via REST. Try using chat: "ingest file ' + ingestPath + '"');
     } finally {
       setIngesting(false);
     }
@@ -80,8 +83,8 @@ export default function KnowledgePage() {
     try {
       await invoke<string>('delete_kb_document', { documentId: docId });
       await loadDocuments();
-    } catch (err) {
-      setError('Failed to delete document.');
+    } catch {
+      setError('Delete failed. Try using chat: "delete document..."');
     }
   };
 
@@ -99,6 +102,14 @@ export default function KnowledgePage() {
             <div className="info-box" style={{ background: 'var(--accent-red-muted)', borderColor: 'rgba(248,81,73,0.3)', marginBottom: 16 }}>
               <span className="info-icon">!</span>
               <span>{error}</span>
+            </div>
+          )}
+
+          {/* Quick Chat Commands Info */}
+          {!endpointAvailable && (
+            <div className="info-box" style={{ marginBottom: 16 }}>
+              <span className="info-icon">💡</span>
+              <span>Knowledge Base operations work through chat. Try these commands:</span>
             </div>
           )}
 
@@ -126,7 +137,7 @@ export default function KnowledgePage() {
               </button>
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
-              Supported: .txt, .md, .html, .csv, .pdf
+              Supported: .txt, .md, .html, .csv, .pdf — or use chat: "ingest file /path/to/doc.pdf"
             </div>
           </div>
 
@@ -176,7 +187,7 @@ export default function KnowledgePage() {
           </div>
 
           {/* Documents List */}
-          <div className="card">
+          <div className="card" style={{ marginBottom: 16 }}>
             <div className="card-header">
               <span className="card-title">Documents ({documents.length})</span>
               <button className="btn btn-ghost btn-sm" onClick={loadDocuments}>Refresh</button>
@@ -189,7 +200,7 @@ export default function KnowledgePage() {
               <div className="empty-state" style={{ padding: 24 }}>
                 <span className="empty-icon">📄</span>
                 <h3>No Documents</h3>
-                <p>Ingest documents above to build your knowledge base.</p>
+                <p>Ingest documents above or via chat to build your knowledge base.</p>
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -202,7 +213,7 @@ export default function KnowledgePage() {
                     <div>
                       <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)' }}>{doc.filename}</div>
                       <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', gap: 12 }}>
-                        <span>{doc.doc_type.toUpperCase()}</span>
+                        <span>{doc.doc_type?.toUpperCase()}</span>
                         <span>{doc.chunk_count} chunks</span>
                         <span>{new Date(doc.ingested_at).toLocaleDateString()}</span>
                       </div>
@@ -217,6 +228,26 @@ export default function KnowledgePage() {
                 ))}
               </div>
             )}
+          </div>
+
+          {/* Chat Commands Reference */}
+          <div className="card">
+            <div className="card-header">
+              <span className="card-title">Chat Commands</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 }}>
+              {[
+                ['ingest file /path/to/doc.pdf', 'Add a document to KB'],
+                ['search knowledge base for "topic"', 'Semantic search'],
+                ['list ingested documents', 'Show all documents'],
+                ['remove the last ingested file', 'Delete a document'],
+              ].map(([cmd, desc]) => (
+                <div key={cmd} style={{ display: 'flex', gap: 12, padding: '6px 0' }}>
+                  <code style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-blue)', minWidth: 280 }}>{cmd}</code>
+                  <span style={{ color: 'var(--text-muted)' }}>{desc}</span>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </div>

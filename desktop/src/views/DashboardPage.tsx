@@ -1,28 +1,74 @@
 // NeuralClaw Desktop — Dashboard Page
-// Uses Dashboard API at :8080/api/stats, /api/bus, /api/agents, etc.
+// Uses IPC commands for reliability
 
 import { useState, useEffect, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import Header from '../components/layout/Header';
-import { getStats, getBusEvents, getAgents, getTraces } from '../lib/api';
-import type { StatsResponse, BusEvent, Agent, Trace } from '../lib/api';
+
+interface Stats {
+  provider?: string;
+  interactions?: number;
+  success_rate?: number;
+  skills?: number;
+  channels?: string;
+  uptime?: string;
+}
+
+interface Trace {
+  category: string;
+  message: string;
+  timestamp: number;
+}
+
+interface BusEvent {
+  type: string;
+  source?: string;
+  data_preview?: string;
+  timestamp?: number;
+}
 
 export default function DashboardPage() {
-  const [stats, setStats] = useState<StatsResponse | null>(null);
-  const [events, setEvents] = useState<BusEvent[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
+  const [stats, setStats] = useState<Stats | null>(null);
   const [traces, setTraces] = useState<Trace[]>([]);
+  const [events, setEvents] = useState<BusEvent[]>([]);
+  const [health, setHealth] = useState<{ status: string; version?: string; uptime?: string } | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   const loadAll = useCallback(async () => {
+    setRefreshing(true);
+    const results = await Promise.allSettled([
+      invoke<string>('get_health'),
+      invoke<string>('get_dashboard_stats'),
+    ]);
+
+    if (results[0].status === 'fulfilled') {
+      try { setHealth(JSON.parse(results[0].value)); } catch { /* */ }
+    }
+    if (results[1].status === 'fulfilled') {
+      try { setStats(JSON.parse(results[1].value)); } catch { /* */ }
+    }
+
+    // Try traces and bus events (may not exist)
     try {
-      const [s, e, a, t] = await Promise.allSettled([getStats(), getBusEvents(), getAgents(), getTraces(20)]);
-      if (s.status === 'fulfilled') setStats(s.value);
-      if (e.status === 'fulfilled') setEvents(e.value);
-      if (a.status === 'fulfilled') setAgents(a.value);
-      if (t.status === 'fulfilled') setTraces(t.value);
+      const resp = await fetch('http://127.0.0.1:8080/api/traces?limit=20');
+      if (resp.ok) setTraces(await resp.json());
     } catch { /* */ }
+
+    try {
+      const resp = await fetch('http://127.0.0.1:8080/api/bus');
+      if (resp.ok) setEvents(await resp.json());
+    } catch { /* */ }
+
+    setRefreshing(false);
   }, []);
 
   useEffect(() => { loadAll(); }, [loadAll]);
+
+  // Auto-refresh every 10s
+  useEffect(() => {
+    const timer = setInterval(loadAll, 10000);
+    return () => clearInterval(timer);
+  }, [loadAll]);
 
   return (
     <>
@@ -34,6 +80,22 @@ export default function DashboardPage() {
         </div>
 
         <div className="page-body">
+          {/* Health Banner */}
+          {health && (
+            <div className="info-box" style={{
+              marginBottom: 16,
+              background: health.status === 'healthy' ? 'var(--accent-green-muted)' : 'var(--accent-red-muted)',
+              borderColor: health.status === 'healthy' ? 'rgba(63,185,80,0.3)' : 'rgba(248,81,73,0.3)',
+            }}>
+              <span className="info-icon">{health.status === 'healthy' ? '✅' : '⚠️'}</span>
+              <span>
+                Backend {health.status === 'healthy' ? 'online' : health.status}
+                {health.version && ` — v${health.version}`}
+                {health.uptime && ` — uptime ${health.uptime}`}
+              </span>
+            </div>
+          )}
+
           {/* Stats Grid */}
           <div className="stats-grid" style={{ marginBottom: 24 }}>
             <div className="stat-card">
@@ -42,7 +104,7 @@ export default function DashboardPage() {
             </div>
             <div className="stat-card">
               <div className="stat-label">Interactions</div>
-              <div className="stat-value">{stats?.interactions ?? '—'}</div>
+              <div className="stat-value">{stats?.interactions ?? 0}</div>
             </div>
             <div className="stat-card">
               <div className="stat-label">Success Rate</div>
@@ -60,23 +122,9 @@ export default function DashboardPage() {
             </div>
             <div className="stat-card">
               <div className="stat-label">Uptime</div>
-              <div className="stat-value" style={{ fontSize: 16 }}>{stats?.uptime ?? '—'}</div>
+              <div className="stat-value" style={{ fontSize: 16 }}>{stats?.uptime || health?.uptime || '—'}</div>
             </div>
           </div>
-
-          {/* Agents */}
-          {agents.length > 0 && (
-            <div style={{ marginBottom: 24 }}>
-              <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>Swarm Agents</h3>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {agents.map((ag) => (
-                  <div key={ag.name} className="badge badge-blue" style={{ padding: '6px 12px' }}>
-                    {ag.name} — {ag.status}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
 
           {/* Recent Traces */}
           <div style={{ marginBottom: 24 }}>
@@ -98,10 +146,10 @@ export default function DashboardPage() {
                 ))}
               </div>
             ) : (
-              <div className="empty-state" style={{ padding: 30 }}>
+              <div className="empty-state" style={{ padding: 24 }}>
                 <span className="empty-icon">📊</span>
                 <h3>No Traces Yet</h3>
-                <p>Traces will appear here as NeuralClaw processes requests.</p>
+                <p>Send a message in Chat — traces will appear here as NeuralClaw processes requests.</p>
               </div>
             )}
           </div>
@@ -127,12 +175,12 @@ export default function DashboardPage() {
                 ))}
               </div>
             ) : (
-              <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>No events yet</p>
+              <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>No events yet — they appear as NeuralClaw processes requests.</p>
             )}
           </div>
 
-          <button className="btn btn-secondary" onClick={loadAll}>
-            🔄 Refresh All
+          <button className="btn btn-secondary" onClick={loadAll} disabled={refreshing}>
+            {refreshing ? <><span className="spinner" style={{ width: 14, height: 14 }} /> Refreshing...</> : '🔄 Refresh All'}
           </button>
         </div>
       </div>

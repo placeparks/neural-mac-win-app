@@ -1,11 +1,49 @@
 // NeuralClaw Desktop — About Page
 
+import { useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import Header from '../components/layout/Header';
 import { APP_NAME, APP_VERSION, APP_DESCRIPTION } from '../lib/constants';
 import { useAppStore } from '../store/appStore';
 
 export default function AboutPage() {
-  const { backendVersion } = useAppStore();
+  const { backendVersion, connectionStatus } = useAppStore();
+  const [updateStatus, setUpdateStatus] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const handleCheckUpdates = async () => {
+    setChecking(true);
+    setUpdateStatus(null);
+    try {
+      // Use the Tauri updater plugin to check for updates
+      const { check } = await import('@tauri-apps/plugin-updater');
+      const update = await check();
+      if (update) {
+        setUpdateStatus(`Update v${update.version} available! Downloading...`);
+        await update.downloadAndInstall();
+        setUpdateStatus('Update installed. Restart the app to apply.');
+      } else {
+        setUpdateStatus('You are on the latest version.');
+      }
+    } catch (err) {
+      setUpdateStatus('Could not check for updates. Try again later.');
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  // Try to get backend version via health if not set
+  const [fetchedVersion, setFetchedVersion] = useState<string | null>(null);
+  if (!backendVersion && !fetchedVersion) {
+    invoke<string>('get_health').then(r => {
+      try {
+        const h = JSON.parse(r);
+        if (h.version) setFetchedVersion(h.version);
+      } catch { /* */ }
+    }).catch(() => {});
+  }
+
+  const displayVersion = backendVersion || fetchedVersion;
 
   return (
     <>
@@ -23,7 +61,9 @@ export default function AboutPage() {
             </div>
             <div className="summary-row">
               <span className="summary-label">Backend</span>
-              <span className="summary-value">{backendVersion ? `v${backendVersion}` : 'Not connected'}</span>
+              <span className="summary-value" style={{ color: displayVersion ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+                {displayVersion ? `v${displayVersion}` : connectionStatus === 'connected' ? 'Connected' : 'Not connected'}
+              </span>
             </div>
             <div className="summary-row">
               <span className="summary-label">Shell</span>
@@ -39,9 +79,21 @@ export default function AboutPage() {
             </div>
           </div>
 
+          {updateStatus && (
+            <div className="info-box" style={{
+              marginTop: 16, maxWidth: 360, width: '100%',
+              background: updateStatus.includes('latest') ? 'var(--accent-green-muted)' : updateStatus.includes('Could not') ? 'var(--accent-red-muted)' : 'var(--accent-blue-muted, rgba(56,139,253,0.1))',
+            }}>
+              <span className="info-icon">{updateStatus.includes('latest') ? '✅' : updateStatus.includes('Could not') ? '!' : '🔄'}</span>
+              <span>{updateStatus}</span>
+            </div>
+          )}
+
           <div style={{ marginTop: 32, display: 'flex', gap: 12 }}>
-            <button className="btn btn-primary">Check for Updates</button>
-            <button className="btn btn-secondary" onClick={() => window.open('https://github.com/placeparks/neuralclaw')}>
+            <button className="btn btn-primary" onClick={handleCheckUpdates} disabled={checking}>
+              {checking ? <><span className="spinner" style={{ width: 14, height: 14 }} /> Checking...</> : 'Check for Updates'}
+            </button>
+            <button className="btn btn-secondary" onClick={() => window.open('https://github.com/placeparks/neural-mac-win-app')}>
               GitHub ↗
             </button>
           </div>

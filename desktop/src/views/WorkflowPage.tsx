@@ -1,4 +1,4 @@
-// NeuralClaw Desktop — Workflow Page (Full Implementation)
+// NeuralClaw Desktop — Workflow Page
 
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -29,6 +29,7 @@ export default function WorkflowPage() {
   const [newName, setNewName] = useState('');
   const [newSteps, setNewSteps] = useState('');
   const [creating, setCreating] = useState(false);
+  const [endpointAvailable, setEndpointAvailable] = useState(true);
 
   const loadWorkflows = useCallback(async () => {
     try {
@@ -36,9 +37,10 @@ export default function WorkflowPage() {
       const parsed = JSON.parse(result);
       setWorkflows(Array.isArray(parsed) ? parsed : parsed.workflows || []);
       setError(null);
-    } catch (err) {
-      setError('Could not load workflows. Is the backend running?');
+      setEndpointAvailable(true);
+    } catch {
       setWorkflows([]);
+      setEndpointAvailable(false);
     } finally {
       setLoading(false);
     }
@@ -51,7 +53,6 @@ export default function WorkflowPage() {
     setCreating(true);
     setError(null);
     try {
-      // Parse steps from JSON textarea
       let steps: object[] = [];
       if (newSteps.trim()) {
         steps = JSON.parse(newSteps);
@@ -64,7 +65,7 @@ export default function WorkflowPage() {
       setShowCreate(false);
       await loadWorkflows();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create workflow.');
+      setError('Create failed. Try using chat: "create workflow ' + newName + '"');
     } finally {
       setCreating(false);
     }
@@ -75,34 +76,29 @@ export default function WorkflowPage() {
     try {
       await invoke<string>('run_workflow', { workflowId });
       await loadWorkflows();
-    } catch (err) {
-      setError('Failed to run workflow.');
+    } catch {
+      setError('Run failed. Try using chat: "run workflow..."');
     }
   };
 
   const handlePause = async (workflowId: string) => {
-    setError(null);
     try {
       await invoke<string>('pause_workflow', { workflowId });
       await loadWorkflows();
-    } catch (err) {
-      setError('Failed to pause workflow.');
-    }
+    } catch { /* */ }
   };
 
   const handleDelete = async (workflowId: string) => {
     try {
       await invoke<string>('delete_workflow', { workflowId });
       await loadWorkflows();
-    } catch (err) {
-      setError('Failed to delete workflow.');
-    }
+    } catch { /* */ }
   };
 
   const statusColor = (status: string) => {
     switch (status) {
       case 'running': return 'var(--accent-green)';
-      case 'paused': return 'var(--accent-yellow)';
+      case 'paused': return 'var(--accent-yellow, #e3b341)';
       case 'completed': return 'var(--accent-blue)';
       case 'failed': return 'var(--accent-red)';
       default: return 'var(--text-muted)';
@@ -123,6 +119,13 @@ export default function WorkflowPage() {
             <div className="info-box" style={{ background: 'var(--accent-red-muted)', borderColor: 'rgba(248,81,73,0.3)', marginBottom: 16 }}>
               <span className="info-icon">!</span>
               <span>{error}</span>
+            </div>
+          )}
+
+          {!endpointAvailable && (
+            <div className="info-box" style={{ marginBottom: 16 }}>
+              <span className="info-icon">💡</span>
+              <span>Workflow operations work through chat. See commands below.</span>
             </div>
           )}
 
@@ -168,7 +171,7 @@ export default function WorkflowPage() {
           </div>
 
           {/* Workflow List */}
-          <div className="card">
+          <div className="card" style={{ marginBottom: 16 }}>
             <div className="card-header">
               <span className="card-title">Workflows ({workflows.length})</span>
               <button className="btn btn-ghost btn-sm" onClick={loadWorkflows}>Refresh</button>
@@ -210,8 +213,6 @@ export default function WorkflowPage() {
                         <button className="btn btn-danger btn-sm" onClick={() => handleDelete(wf.id)}>Delete</button>
                       </div>
                     </div>
-
-                    {/* Steps visualization */}
                     {wf.steps && wf.steps.length > 0 && (
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                         {wf.steps.map((step, i) => (
@@ -226,7 +227,6 @@ export default function WorkflowPage() {
                         ))}
                       </div>
                     )}
-
                     <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6, display: 'flex', gap: 12 }}>
                       {wf.steps && <span>{wf.steps.length} step(s)</span>}
                       {wf.last_run && <span>Last run: {new Date(wf.last_run).toLocaleString()}</span>}
@@ -235,6 +235,27 @@ export default function WorkflowPage() {
                 ))}
               </div>
             )}
+          </div>
+
+          {/* Chat Commands Reference */}
+          <div className="card">
+            <div className="card-header">
+              <span className="card-title">Chat Commands</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 }}>
+              {[
+                ['create workflow "name" with steps...', 'Create a new workflow'],
+                ['run workflow "name"', 'Execute a workflow'],
+                ['pause workflow "name"', 'Pause a running workflow'],
+                ['show workflow status', 'Check workflow progress'],
+                ['list workflows', 'Show all workflows'],
+              ].map(([cmd, desc]) => (
+                <div key={cmd} style={{ display: 'flex', gap: 12, padding: '6px 0' }}>
+                  <code style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-blue)', minWidth: 300 }}>{cmd}</code>
+                  <span style={{ color: 'var(--text-muted)' }}>{desc}</span>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </div>
