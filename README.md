@@ -165,6 +165,40 @@ neuralclaw service install    # install managed service
 neuralclaw service start      # start managed service
 ```
 
+## Desktop App
+
+NeuralClaw includes a native desktop client built with **Tauri 2 + React 19 + TypeScript**.
+
+```
+┌──────────────────────────┐
+│   NeuralClaw Desktop     │
+│  ┌────────┐ ┌──────────┐ │
+│  │React UI│ │ Tauri/Rust│ │     ┌─────────────────────┐
+│  └───┬────┘ └────┬─────┘ │────▶│ NeuralClaw Gateway  │
+│      │    IPC    │       │     │ Dashboard :8080      │
+└──────┼───────────┼───────┘     │ WebChat   :8099      │
+       └───────────┘             └─────────────────────┘
+```
+
+**Features:**
+- Real-time chat via WebSocket with streaming responses
+- 7-step setup wizard for first-time configuration
+- Live dashboard with stats, traces, and event bus
+- Memory browser, settings panel, system tray
+- Cross-platform: Windows (.msi), macOS (.dmg), Linux (.AppImage)
+
+**Quick start:**
+
+```bash
+# Terminal 1: Start the backend
+python -m neuralclaw gateway --web-port 8099
+
+# Terminal 2: Launch the desktop app
+cd desktop && npm install && npm run tauri dev
+```
+
+See [desktop/README.md](desktop/README.md) for full documentation.
+
 ## Workspace-Constrained Project Creation
 
 For fresh coding projects, NeuralClaw now uses `build_app` instead of
@@ -216,6 +250,10 @@ neuralclaw/
   gateway.py   orchestration entrypoint
   cli.py       command-line interface
   config.py    config, keychain helpers, validation
+desktop/       Tauri 2 + React native desktop client
+  src/         React components, views, stores, hooks
+  src-tauri/   Rust backend (sidecar, IPC, tray)
+  scripts/     Sidecar build scripts
 ```
 
 ## Docs
