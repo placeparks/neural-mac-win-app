@@ -1,0 +1,82 @@
+name: Desktop Release
+on:
+  push:
+    tags: ['desktop-v*']
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Python dependencies
+        run: |
+          pip install pyinstaller
+          pip install -e .
+
+      - name: Build sidecar (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd desktop && chmod +x scripts/build-sidecar.sh && ./scripts/build-sidecar.sh
+
+      - name: Build sidecar (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd desktop
+          pwsh scripts/build-sidecar-win.ps1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install frontend dependencies
+        run: |
+          cd desktop && npm install
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Build Tauri
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: desktop
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: neuralclaw-desktop-${{ matrix.target }}
+          path: |
+            desktop/src-tauri/target/release/bundle/**/*.dmg
+            desktop/src-tauri/target/release/bundle/**/*.msi
+            desktop/src-tauri/target/release/bundle/**/*.AppImage
