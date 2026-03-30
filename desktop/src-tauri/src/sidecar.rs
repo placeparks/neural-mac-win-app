@@ -35,7 +35,7 @@ pub async fn start_sidecar_process(app: &tauri::AppHandle) -> Result<(), String>
             .shell()
             .sidecar("neuralclaw-sidecar")
             .map_err(|e| format!("Failed to create sidecar command: {}", e))?
-            .args(["gateway", "--port", &port.to_string(), "--no-banner"])
+            .args(["gateway", "--web-port", &port.to_string()])
             .spawn()
             .map_err(|e| format!("Failed to spawn sidecar: {}", e))?;
 
