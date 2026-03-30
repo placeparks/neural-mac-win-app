@@ -51,3 +51,6 @@ node_modules/
 package-lock.json
 
 tmp/
+
+# Tauri signing keys
+desktop/~/.tauri/
