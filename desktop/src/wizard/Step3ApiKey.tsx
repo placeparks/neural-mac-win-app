@@ -1,6 +1,7 @@
-// Step 3: API Key Entry (per selected provider)
+// Step 3: API Key Entry (per selected provider) — Real Validation
 
 import { useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useWizardStore } from '../store/wizardStore';
 import { PROVIDER_COLORS } from '../lib/theme';
 
@@ -13,6 +14,7 @@ export default function Step3ApiKey() {
   const [showKey, setShowKey] = useState(false);
   const [validating, setValidating] = useState(false);
   const [validated, setValidated] = useState<boolean | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const provider = selectedProviders[currentKeyProvider];
   if (!provider) return null;
@@ -23,16 +25,31 @@ export default function Step3ApiKey() {
 
   const handleValidate = async () => {
     setValidating(true);
-    // Simulate validation (real impl: test API call)
-    await new Promise((r) => setTimeout(r, 1200));
-    setValidated(key.length > 8);
-    setValidating(false);
+    setErrorMsg(null);
+    try {
+      const result = await invoke<string>('validate_api_key', {
+        provider,
+        apiKey: key,
+        endpoint: endpoint || null,
+      });
+      const parsed = JSON.parse(result);
+      setValidated(!!parsed.valid);
+      if (!parsed.valid) {
+        setErrorMsg('API key was rejected by the provider. Please check and try again.');
+      }
+    } catch (err) {
+      setValidated(false);
+      setErrorMsg(err instanceof Error ? err.message : 'Validation failed. Check your key and network.');
+    } finally {
+      setValidating(false);
+    }
   };
 
   const handleContinue = () => {
     if (currentKeyProvider < selectedProviders.length - 1) {
       setCurrentKeyProvider(currentKeyProvider + 1);
       setValidated(null);
+      setErrorMsg(null);
       setShowKey(false);
     } else {
       nextStep();
@@ -43,6 +60,7 @@ export default function Step3ApiKey() {
     if (currentKeyProvider > 0) {
       setCurrentKeyProvider(currentKeyProvider - 1);
       setValidated(null);
+      setErrorMsg(null);
     } else {
       prevStep();
     }
@@ -51,6 +69,8 @@ export default function Step3ApiKey() {
   const osName = navigator.userAgent.includes('Mac') ? 'macOS Keychain, protected by Touch ID'
     : navigator.userAgent.includes('Win') ? 'Windows Credential Manager, protected by Windows Hello'
     : 'GNOME Keyring / KDE Wallet, protected by login password';
+
+  const needsApiKey = provider !== 'local' && provider !== 'meta';
 
   return (
     <>
@@ -61,7 +81,9 @@ export default function Step3ApiKey() {
         <h2 className="wizard-title" style={{ margin: 0 }}>Configure {colors.label}</h2>
       </div>
       <p className="wizard-subtitle">
-        Enter your API key to connect NeuralClaw to {colors.label}.
+        {needsApiKey
+          ? `Enter your API key to connect NeuralClaw to ${colors.label}.`
+          : `Configure the endpoint for ${colors.label} (no API key needed).`}
         {selectedProviders.length > 1 && (
           <span style={{ color: 'var(--text-muted)', marginLeft: 8 }}>
             ({currentKeyProvider + 1} of {selectedProviders.length})
@@ -69,47 +91,49 @@ export default function Step3ApiKey() {
         )}
       </p>
 
-      <div className="input-group" style={{ marginBottom: '16px' }}>
-        <label className="input-label">API Key</label>
-        <div style={{ position: 'relative' }}>
-          <input
-            className="input-field input-mono"
-            type={showKey ? 'text' : 'password'}
-            placeholder="sk-..."
-            value={key}
-            onChange={(e) => { setApiKey(provider, e.target.value); setValidated(null); }}
-          />
-          <button
-            className="btn btn-ghost btn-sm"
-            style={{ position: 'absolute', right: 4, top: 4 }}
-            onClick={() => setShowKey(!showKey)}
-          >
-            {showKey ? '🙈' : '👁️'}
-          </button>
+      {needsApiKey && (
+        <div className="input-group" style={{ marginBottom: '16px' }}>
+          <label className="input-label">API Key</label>
+          <div style={{ position: 'relative' }}>
+            <input
+              className="input-field input-mono"
+              type={showKey ? 'text' : 'password'}
+              placeholder="sk-..."
+              value={key}
+              onChange={(e) => { setApiKey(provider, e.target.value); setValidated(null); setErrorMsg(null); }}
+            />
+            <button
+              className="btn btn-ghost btn-sm"
+              style={{ position: 'absolute', right: 4, top: 4 }}
+              onClick={() => setShowKey(!showKey)}
+            >
+              {showKey ? '🙈' : '👁️'}
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="input-group" style={{ marginBottom: '20px' }}>
-        <label className="input-label">API Endpoint (optional)</label>
+        <label className="input-label">API Endpoint {needsApiKey ? '(optional)' : ''}</label>
         <input
           className="input-field input-mono"
           type="text"
-          placeholder="https://api.example.com/v1"
+          placeholder={needsApiKey ? 'https://api.example.com/v1' : 'http://localhost:11434'}
           value={endpoint}
-          onChange={(e) => setApiEndpoint(provider, e.target.value)}
+          onChange={(e) => { setApiEndpoint(provider, e.target.value); setValidated(null); setErrorMsg(null); }}
         />
       </div>
 
       {validated === true && (
         <div className="info-box" style={{ background: 'var(--accent-green-muted)', borderColor: 'rgba(63,185,80,0.3)' }}>
           <span className="info-icon">✅</span>
-          <span>Connected! API key verified successfully.</span>
+          <span>Connected! {needsApiKey ? 'API key verified successfully.' : 'Endpoint is reachable.'}</span>
         </div>
       )}
       {validated === false && (
         <div className="info-box" style={{ background: 'var(--accent-red-muted)', borderColor: 'rgba(248,81,73,0.3)' }}>
           <span className="info-icon">❌</span>
-          <span>Invalid key. Please check and try again.</span>
+          <span>{errorMsg || 'Invalid key. Please check and try again.'}</span>
         </div>
       )}
       {validated === null && (
@@ -123,11 +147,11 @@ export default function Step3ApiKey() {
         <button className="btn btn-ghost" onClick={handleBack}>← Back</button>
         <div style={{ display: 'flex', gap: 8 }}>
           {validated !== true && (
-            <button className="btn btn-secondary" onClick={handleValidate} disabled={!key || validating}>
+            <button className="btn btn-secondary" onClick={handleValidate} disabled={(!key && needsApiKey) || validating}>
               {validating ? <><span className="spinner" style={{ width: 14, height: 14 }} /> Verifying...</> : 'Verify Key'}
             </button>
           )}
-          <button className="btn btn-primary" onClick={handleContinue} disabled={!key}>
+          <button className="btn btn-primary" onClick={handleContinue} disabled={needsApiKey && !key}>
             Continue →
           </button>
         </div>

@@ -40,12 +40,16 @@ export const ALL_PROVIDERS: { id: ProviderId; name: string; company: string }[] 
 
 export const DEFAULT_MODELS: Record<ProviderId, { name: string; description: string; icon: string }[]> = {
   openai: [
-    { name: 'gpt-4o', description: 'Most capable GPT-4 model', icon: '🚀' },
+    { name: 'gpt-5.4', description: 'Most capable GPT model', icon: '🚀' },
+    { name: 'gpt-4o', description: 'Powerful multimodal model', icon: '🧠' },
     { name: 'gpt-4o-mini', description: 'Fast & affordable', icon: '⚡' },
+    { name: 'gpt-nano', description: 'Ultra-fast edge model', icon: '🔬' },
+    { name: 'gpt-mini', description: 'Lightweight & efficient', icon: '💡' },
   ],
   anthropic: [
-    { name: 'claude-sonnet-4-20250514', description: 'Fast & capable (recommended)', icon: '⚡' },
-    { name: 'claude-opus-4-20250514', description: 'Most intelligent', icon: '🧠' },
+    { name: 'claude-opus-4-6', description: 'Most intelligent (flagship)', icon: '🧠' },
+    { name: 'claude-sonnet-4-6', description: 'Fast & capable (recommended)', icon: '⚡' },
+    { name: 'claude-haiku-4-5', description: 'Ultra-fast & affordable', icon: '🔬' },
   ],
   google: [
     { name: 'gemini-2.5-pro', description: 'Google flagship', icon: '🚀' },
@@ -55,12 +59,14 @@ export const DEFAULT_MODELS: Record<ProviderId, { name: string; description: str
     { name: 'grok-3', description: 'xAI flagship', icon: '🚀' },
   ],
   venice: [
-    { name: 'claude-sonnet-4-6', description: 'via Venice proxy', icon: '⚡' },
+    { name: 'claude-sonnet-4-6', description: 'Claude via Venice proxy', icon: '⚡' },
     { name: 'llama-3.3-70b', description: 'Open source via Venice', icon: '🦙' },
   ],
   openrouter: [
-    { name: 'anthropic/claude-sonnet-4-6', description: 'Claude via OpenRouter', icon: '⚡' },
-    { name: 'openai/gpt-4o', description: 'GPT-4o via OpenRouter', icon: '🚀' },
+    { name: 'anthropic/claude-opus-4-6', description: 'Claude Opus via OpenRouter', icon: '🧠' },
+    { name: 'anthropic/claude-sonnet-4-6', description: 'Claude Sonnet via OpenRouter', icon: '⚡' },
+    { name: 'openai/gpt-5.4', description: 'GPT-5.4 via OpenRouter', icon: '🚀' },
+    { name: 'openai/gpt-4o', description: 'GPT-4o via OpenRouter', icon: '💡' },
   ],
   meta: [
     { name: 'llama3.3:70b', description: 'Llama 3.3 via Ollama', icon: '🦙' },

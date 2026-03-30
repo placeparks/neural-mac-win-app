@@ -156,7 +156,16 @@
       "Bash(grep -r \"sleep\\\\|time.time\\\\|asyncio.wait\\\\|TODO\\\\|FIXME\\\\|XXX\\\\|HACK\" tests/test_*.py)",
       "Bash(grep -r \"asyncio.sleep\\\\|time.sleep\" tests/test_*.py)",
       "Bash(ls \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(2\\)\\\\clawnick-main\\\\neuralclaw\\\\security\"\")",
-      "Bash(ls \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(2\\)\\\\clawnick-main\\\\dist\"\")"
+      "Bash(ls \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(2\\)\\\\clawnick-main\\\\dist\"\")",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(2\\)/clawnick-main/desktop\")",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(2\\)/clawnick-main/desktop/src-tauri/src/\")",
+      "Bash(find \"/c/Users/Lenovo/Downloads/clawnick-main \\(2\\)/clawnick-main/desktop/src\" -type f \\\\\\( -name \"*.tsx\" -o -name \"*.ts\" \\\\\\))",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(2\\)/clawnick-main/desktop/scripts/\")",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(2\\)/clawnick-main/desktop/public/\")",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(2\\)/clawnick-main/desktop/src-tauri/\")",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(2\\)/clawnick-main/desktop/src-tauri/sidecar/\")",
+      "Bash(find \"/c/Users/Lenovo/Downloads/clawnick-main \\(2\\)/clawnick-main\" -maxdepth 2 -name \"AGENT.md\" -o -name \"agent.md\")",
+      "Bash(ls -la \"/c/Users/Lenovo/Downloads/clawnick-main \\(2\\)/clawnick-main/\")"
     ]
   }
 }

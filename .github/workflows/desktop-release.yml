@@ -3,6 +3,9 @@ on:
   push:
     tags: ['desktop-v*']
 
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -68,15 +71,13 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         with:
           projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: 'NeuralClaw Desktop ${{ github.ref_name }}'
+          releaseBody: 'See the assets for download links and the latest.json for auto-update.'
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: neuralclaw-desktop-${{ matrix.target }}
-          path: |
-            desktop/src-tauri/target/release/bundle/**/*.dmg
-            desktop/src-tauri/target/release/bundle/**/*.msi
-            desktop/src-tauri/target/release/bundle/**/*.AppImage
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

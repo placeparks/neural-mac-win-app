@@ -12,6 +12,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(std::sync::Mutex::new(sidecar::SidecarState::default()))
         .invoke_handler(tauri::generate_handler![
             commands::get_health,
@@ -25,9 +26,15 @@ pub fn run() {
             commands::get_kb_documents,
             commands::ingest_kb_document,
             commands::search_kb,
+            commands::delete_kb_document,
             commands::get_workflows,
             commands::create_workflow,
             commands::run_workflow,
+            commands::pause_workflow,
+            commands::delete_workflow,
+            commands::get_features,
+            commands::set_feature,
+            commands::validate_api_key,
             commands::get_dashboard_stats,
             commands::start_backend,
             commands::stop_backend,
