@@ -52,6 +52,7 @@ class VectorMemory:
         embedding_model: str = "nomic-embed-text",
         dimension: int = 768,
         bus: NeuralBus | None = None,
+        ollama_base_url: str = "",
     ) -> None:
         self._db_path = db_path
         self._embedding_provider = embedding_provider
@@ -59,6 +60,7 @@ class VectorMemory:
         self._dimension = max(8, dimension)
         self._bus = bus
         self._db: aiosqlite.Connection | None = None
+        self._ollama_base_url = ollama_base_url
 
     async def initialize(self) -> None:
         """Initialize the vector store schema."""
@@ -259,7 +261,13 @@ class VectorMemory:
         return None
 
     async def _embed_ollama(self, text: str) -> list[float] | None:
-        base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+        base_url = (
+            self._ollama_base_url
+            or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        ).rstrip("/")
+        # Strip /v1 suffix if present — Ollama native API doesn't use it
+        if base_url.endswith("/v1"):
+            base_url = base_url[:-3]
 
         try:
             async with aiohttp.ClientSession() as session:

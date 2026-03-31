@@ -75,7 +75,9 @@ export const DEFAULT_MODELS: Record<ProviderId, { name: string; description: str
     { name: 'mistral-large-latest', description: 'Mistral Large', icon: '🌪️' },
   ],
   local: [
-    { name: 'llama3.3:latest', description: 'Local Llama via Ollama', icon: '🦙' },
-    { name: 'mistral:latest', description: 'Local Mistral via Ollama', icon: '🌪️' },
+    { name: 'qwen3.5:35b-a3b', description: 'Primary — deep reasoning & vision', icon: '🧠' },
+    { name: 'qwen3.5:9b', description: 'Fast — tool calls & skill dispatch', icon: '⚡' },
+    { name: 'qwen3.5:4b', description: 'Micro — intent routing & classification', icon: '🔬' },
+    { name: 'qwen3-embedding:8b', description: 'Embed — memory & RAG search', icon: '🔗' },
   ],
 };

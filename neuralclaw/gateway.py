@@ -179,12 +179,19 @@ class NeuralClawGateway:
         # Memory cortex
         self._memory_db_pool = DBPool(self._config.memory.db_path)
         self._trace_db_pool = DBPool(self._config.traceline.db_path)
+        # Use role-based embed model if model_roles is enabled
+        _embed_model = self._config.memory.embedding_model
+        _embed_base_url = ""
+        if self._config.model_roles.enabled:
+            _embed_model = self._config.model_roles.embed
+            _embed_base_url = self._config.model_roles.base_url
         self._vector_memory = VectorMemory(
             self._config.memory.db_path,
             embedding_provider=self._config.memory.embedding_provider,
-            embedding_model=self._config.memory.embedding_model,
+            embedding_model=_embed_model,
             dimension=self._config.memory.embedding_dimension,
             bus=self._bus,
+            ollama_base_url=_embed_base_url,
         ) if feat.vector_memory and self._config.memory.vector_memory else None
         self._episodic = EpisodicMemory(
             self._config.memory.db_path,
@@ -367,6 +374,7 @@ class NeuralClawGateway:
 
         # Provider
         self._provider: ProviderRouter | None = None
+        self._role_router: "RoleRouter | None" = None  # Role-based model routing
         self._health.register_probe(
             ReadinessProbe(
                 name="memory_db",
@@ -548,8 +556,21 @@ class NeuralClawGateway:
 
         # Initialize LLM provider
         self._provider = self._build_provider()
+
+        # Build role-based model router (Ollama multi-model routing)
+        if self._config.model_roles.enabled:
+            from neuralclaw.providers.role_router import RoleRouter
+            self._role_router = RoleRouter.from_config(self._config.model_roles)
+            self._logger.info(
+                "Role router enabled: %s", self._role_router.model_map
+            )
+
         if self._provider:
             self._deliberate.set_provider(self._provider)
+            # Inject role router into deliberative reasoner and classifier
+            if self._role_router:
+                self._deliberate.set_role_router(self._role_router)
+                self._classifier.set_role_router(self._role_router)
             if self._config.features.vision:
                 self._vision = VisionPerception(self._provider, self._bus)
             if self._distiller:
@@ -2321,6 +2342,8 @@ class NeuralClawGateway:
 
         print(f"\n🧠 {self._config.name} Gateway is running (Phase 3: Swarm)")
         print(f"   Provider: {self._provider.name if self._provider else 'NONE'}")
+        if self._role_router:
+            print(f"   Role Router: {self._role_router.model_map}")
         print(f"   Skills: {self._skills.count} ({self._skills.tool_count} tools)")
         print(f"   Channels: {list(self._channels.keys()) or ['none']}")
         feat = self._config.features

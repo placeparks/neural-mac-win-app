@@ -17,5 +17,5 @@ export const WS_RECONNECT_INTERVAL = 3000;
 export const WS_MAX_RECONNECT_ATTEMPTS = 10;
 
 export const APP_NAME = 'NeuralClaw';
-export const APP_VERSION = '1.1.0';
+export const APP_VERSION = '1.2.0';
 export const APP_DESCRIPTION = 'The Self-Evolving AI Assistant';

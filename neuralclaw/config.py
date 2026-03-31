@@ -259,6 +259,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "api_request",
             "save_api_config",
             "list_api_configs",
+            # Package management
+            "pip_install",
         ],
         "mutating_tools": [
             "build_app",
@@ -341,6 +343,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "expose_tools": True,
         "expose_resources": True,
         "expose_prompts": True,
+    },
+    "model_roles": {
+        "enabled": False,
+        "primary": "qwen3.5:35b-a3b",
+        "fast": "qwen3.5:9b",
+        "micro": "qwen3.5:4b",
+        "embed": "qwen3-embedding:8b",
+        "base_url": "http://localhost:11434/v1",
     },
     "apis": {},  # User-saved API configs: [apis.myapi] = {base_url = "...", auth_type = "bearer"}
     "channels": {
@@ -694,6 +704,28 @@ class FeaturesConfig:
 
 
 @dataclass
+class ModelRolesConfig:
+    """Role-based model routing — deterministic model selection by call-site role.
+
+    Roles:
+        primary — deep reasoning, vision, complex agent tasks, user-facing final answers
+        fast    — tool call execution, skill dispatch, multi-step loops
+        micro   — intent classification, routing, quick yes/no ops
+        embed   — embeddings for Nexus Memory, RAG, semantic search
+    """
+    primary: str = "qwen3.5:35b-a3b"
+    fast: str = "qwen3.5:9b"
+    micro: str = "qwen3.5:4b"
+    embed: str = "qwen3-embedding:8b"
+    base_url: str = "http://localhost:11434/v1"
+    enabled: bool = False
+
+    def get_model(self, role: str) -> str:
+        """Get model name for a given role, falling back to primary."""
+        return getattr(self, role, self.primary)
+
+
+@dataclass
 class ForgeConfig:
     """SkillForge configuration for proactive skill synthesis."""
     model: str = "claude-sonnet-4-20250514"
@@ -797,6 +829,7 @@ class NeuralClawConfig:
     rag: RAGConfig = field(default_factory=RAGConfig)
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     mcp_server: MCPServerConfig = field(default_factory=MCPServerConfig)
+    model_roles: ModelRolesConfig = field(default_factory=ModelRolesConfig)
     apis: dict[str, dict[str, Any]] = field(default_factory=dict)
     channels: list[ChannelConfig] = field(default_factory=list)
     dashboard_port: int = 8080
@@ -854,6 +887,7 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
     rag_section = merged.get("rag", {})
     wf_section = merged.get("workflow", {})
     mcp_section = merged.get("mcp_server", {})
+    roles_section = merged.get("model_roles", {})
     apis_section = merged.get("apis", {})
     chan_section = merged.get("channels", {})
 
@@ -946,6 +980,7 @@ def load_config(path: Path | None = None) -> NeuralClawConfig:
         rag=RAGConfig(**_filter_fields(RAGConfig, rag_section)) if rag_section else RAGConfig(),
         workflow=WorkflowConfig(**_filter_fields(WorkflowConfig, wf_section)) if wf_section else WorkflowConfig(),
         mcp_server=MCPServerConfig(**_filter_fields(MCPServerConfig, mcp_section)) if mcp_section else MCPServerConfig(),
+        model_roles=ModelRolesConfig(**_filter_fields(ModelRolesConfig, roles_section)) if roles_section else ModelRolesConfig(),
         apis=apis_section if isinstance(apis_section, dict) else {},
         channels=channels,
         _raw=merged,

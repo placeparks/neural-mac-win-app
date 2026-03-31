@@ -78,9 +78,25 @@ _NOISE_PATTERNS = [
 # Classifier
 # ---------------------------------------------------------------------------
 
+_LLM_CLASSIFY_PROMPT = (
+    "Classify the user message into exactly ONE intent: "
+    "COMMAND, QUESTION, CONTINUATION, EMOTIONAL, or NOISE.\n"
+    "Respond with ONLY the intent word, nothing else.\n\n"
+    "User message: {text}"
+)
+
+_INTENT_MAP = {
+    "COMMAND": Intent.COMMAND,
+    "QUESTION": Intent.QUESTION,
+    "CONTINUATION": Intent.CONTINUATION,
+    "EMOTIONAL": Intent.EMOTIONAL,
+    "NOISE": Intent.NOISE,
+}
+
+
 class IntentClassifier:
     """
-    Zero-shot intent classifier with heuristic fast-path.
+    Zero-shot intent classifier with heuristic fast-path and optional LLM fallback.
 
     Flow:
         1. Check noise patterns → NOISE (confidence 0.95)
@@ -88,11 +104,17 @@ class IntentClassifier:
         3. Check question patterns → QUESTION (confidence 0.85)
         4. Check emotional patterns → EMOTIONAL (confidence 0.80)
         5. Check continuation triggers → CONTINUATION (confidence 0.75)
-        6. Fallback → UNKNOWN (confidence 0.0) — caller should use LLM
+        6. If role_router available → LLM classify via micro model (confidence 0.70)
+        7. Fallback → UNKNOWN (confidence 0.0) — caller should use LLM
     """
 
     def __init__(self, bus: NeuralBus) -> None:
         self._bus = bus
+        self._role_router: Any = None
+
+    def set_role_router(self, role_router: Any) -> None:
+        """Set role router for LLM-based classification of ambiguous intents."""
+        self._role_router = role_router
 
     async def classify(self, signal: Signal) -> IntentResult:
         """Classify the intent of a Signal."""
@@ -134,7 +156,15 @@ class IntentClassifier:
             await self._publish(signal, result)
             return result
 
-        # 6. Unknown — needs LLM classification
+        # 6. LLM classification via micro model (fast, cheap)
+        if self._role_router:
+            llm_result = await self._llm_classify(text)
+            if llm_result:
+                signal.intent = llm_result.intent.name
+                await self._publish(signal, llm_result)
+                return llm_result
+
+        # 7. Unknown — no heuristic match and no LLM available
         result = IntentResult(Intent.UNKNOWN, confidence=0.0)
         signal.intent = result.intent.name
         await self._publish(signal, result)
@@ -153,6 +183,26 @@ class IntentClassifier:
             return "file_ops"
         if any(w in lower for w in ("run", "execute", "code", "script")):
             return "code_exec"
+        return None
+
+    async def _llm_classify(self, text: str) -> IntentResult | None:
+        """Use micro model for intent classification on ambiguous messages."""
+        try:
+            response = await self._role_router.complete(
+                role="micro",
+                messages=[{
+                    "role": "user",
+                    "content": _LLM_CLASSIFY_PROMPT.format(text=text[:500]),
+                }],
+                temperature=0.0,
+                max_tokens=16,
+            )
+            label = (response.content or "").strip().upper()
+            intent = _INTENT_MAP.get(label)
+            if intent:
+                return IntentResult(intent, confidence=0.70)
+        except Exception:
+            pass
         return None
 
     async def _publish(self, signal: Signal, result: IntentResult) -> None:

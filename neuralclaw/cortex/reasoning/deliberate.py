@@ -108,6 +108,7 @@ class DeliberativeReasoner:
         self._bus = bus
         self._persona = persona
         self._provider: Any = None  # Set via set_provider()
+        self._role_router: Any = None  # Optional role-based model router
         self._policy = policy
         self._idempotency = idempotency
         self._audit = audit
@@ -115,6 +116,37 @@ class DeliberativeReasoner:
     def set_provider(self, provider: Any) -> None:
         """Set the LLM provider for reasoning."""
         self._provider = provider
+
+    def set_role_router(self, role_router: Any) -> None:
+        """Set the role-based model router for smart model dispatch."""
+        self._role_router = role_router
+
+    async def _complete(
+        self,
+        role: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+    ) -> Any:
+        """Route completion through role router if available, else use default provider.
+
+        Roles: primary (user-facing), fast (tool loops), micro (classification).
+        """
+        if self._role_router:
+            return await self._role_router.complete(
+                role=role,
+                messages=messages,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        return await self._provider.complete(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
     async def reason(
         self,
@@ -168,8 +200,13 @@ class DeliberativeReasoner:
         while iterations < self.MAX_ITERATIONS:
             iterations += 1
 
+            # Role dispatch: first iteration uses primary (user-facing reasoning),
+            # subsequent iterations (tool-result processing) use fast model
+            role = "primary" if iterations == 1 else "fast"
+
             try:
-                response = await self._provider.complete(
+                response = await self._complete(
+                    role=role,
                     messages=messages,
                     tools=tool_defs,
                 )
@@ -263,7 +300,8 @@ class DeliberativeReasoner:
                 # If 3+ rounds of nothing but errors, force a text-only response
                 if consecutive_errors >= 3:
                     try:
-                        fallback = await self._provider.complete(
+                        fallback = await self._complete(
+                            role="primary",  # Final user-facing answer
                             messages=messages + [{
                                 "role": "user",
                                 "content": (
@@ -322,7 +360,8 @@ class DeliberativeReasoner:
 
         # Max iterations reached — still give a useful answer instead of a useless cop-out
         try:
-            fallback = await self._provider.complete(
+            fallback = await self._complete(
+                role="primary",  # Final user-facing synthesis
                 messages=messages + [{
                     "role": "user",
                     "content": (
@@ -392,7 +431,14 @@ class DeliberativeReasoner:
         )
 
         try:
-            async for chunk in self._provider.stream_complete(messages=messages, tools=None):
+            # Streaming uses primary model (user-facing response)
+            if self._role_router:
+                stream = self._role_router.stream_complete(
+                    role="primary", messages=messages, tools=None,
+                )
+            else:
+                stream = self._provider.stream_complete(messages=messages, tools=None)
+            async for chunk in stream:
                 if chunk:
                     yield chunk
         except Exception as exc:
