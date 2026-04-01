@@ -4,6 +4,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import Header from '../components/layout/Header';
+import { DASHBOARD_BASE } from '../lib/constants';
 
 interface Stats {
   provider?: string;
@@ -50,12 +51,12 @@ export default function DashboardPage() {
 
     // Try traces and bus events (may not exist)
     try {
-      const resp = await fetch('http://127.0.0.1:8080/api/traces?limit=20');
+      const resp = await fetch(`${DASHBOARD_BASE}/api/traces?limit=20`);
       if (resp.ok) setTraces(await resp.json());
     } catch { /* */ }
 
     try {
-      const resp = await fetch('http://127.0.0.1:8080/api/bus');
+      const resp = await fetch(`${DASHBOARD_BASE}/api/bus`);
       if (resp.ok) setEvents(await resp.json());
     } catch { /* */ }
 

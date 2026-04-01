@@ -1,4 +1,4 @@
-// NeuralClaw Desktop — Settings Page (Full Implementation)
+// NeuralClaw Desktop — Settings Page (v1.2.0 — fully wired)
 
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -7,75 +7,102 @@ import { DEFAULT_MODELS, ALL_PROVIDERS } from '../lib/theme';
 import type { ProviderId } from '../lib/theme';
 import { APP_VERSION } from '../lib/constants';
 
-const SECTIONS = ['General', 'Provider', 'Models', 'Channels', 'Memory', 'Security', 'Features', 'Advanced', 'About'];
+const SECTIONS = ['General', 'Provider', 'Models', 'Memory', 'Features', 'Advanced'];
 
 interface FeatureEntry { label: string; value: boolean; live: boolean }
 
 export default function SettingsPage() {
-  const [activeSection, setActiveSection] = useState('General');
-  const [config, setConfig] = useState<Record<string, unknown>>({});
+  const [section, setSection] = useState('General');
+  const [config, setConfig] = useState<Record<string, any>>({});
   const [features, setFeatures] = useState<Record<string, FeatureEntry>>({});
-  const [backendStatus, setBackendStatus] = useState<{ running: boolean; port: number; healthy: boolean } | null>(null);
+  const [backend, setBackend] = useState<{ running: boolean; port: number; healthy: boolean } | null>(null);
   const [saving, setSaving] = useState(false);
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  // Provider form state
+  const [selProvider, setSelProvider] = useState<ProviderId>('openai');
+  const [apiKey, setApiKey] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
-    // Load config, features, and backend status
     invoke<string>('get_config').then(r => {
-      try { setConfig(JSON.parse(r)); } catch { /* empty */ }
+      try {
+        const c = JSON.parse(r);
+        setConfig(c);
+        // Populate provider form from config
+        const prov = c.providers || {};
+        const primary = prov.primary || 'openai';
+        const provId = ALL_PROVIDERS.find(p => p.id === primary)?.id || 'openai';
+        setSelProvider(provId as ProviderId);
+        setBaseUrl(prov[primary]?.base_url || '');
+      } catch {}
     }).catch(() => {});
 
     invoke<string>('get_features').then(r => {
-      try { setFeatures(JSON.parse(r)); } catch { /* empty */ }
+      try { setFeatures(JSON.parse(r)); } catch {}
     }).catch(() => {});
 
     invoke<{ running: boolean; port: number; healthy: boolean }>('get_backend_status')
-      .then(setBackendStatus)
-      .catch(() => {});
+      .then(setBackend).catch(() => {});
   }, []);
 
-  const handleSaveConfig = async (updates: Record<string, unknown>) => {
+  const save = async (updates: Record<string, any>) => {
     setSaving(true);
-    setStatusMsg(null);
+    setMsg(null);
     try {
       await invoke<string>('update_config', { config: updates });
       setConfig(prev => ({ ...prev, ...updates }));
-      setStatusMsg('Saved successfully.');
-    } catch (err) {
-      setStatusMsg('Failed to save. Check backend connection.');
+      setMsg('Saved.');
+    } catch {
+      setMsg('Failed to save.');
     } finally {
       setSaving(false);
     }
   };
 
-  const handleToggleFeature = async (feature: string, value: boolean) => {
+  const toggleFeature = async (key: string, val: boolean) => {
     try {
-      await invoke<string>('set_feature', { feature, value });
-      setFeatures(prev => ({
-        ...prev,
-        [feature]: { ...prev[feature], value },
-      }));
+      await invoke<string>('set_feature', { feature: key, value: val });
+      setFeatures(prev => ({ ...prev, [key]: { ...prev[key], value: val } }));
     } catch {
-      setStatusMsg('Failed to toggle feature.');
+      setMsg('Failed to toggle feature.');
     }
   };
 
-  const handleStartBackend = async () => {
+  const testConnection = async () => {
+    setTesting(true);
+    setTestResult(null);
     try {
-      await invoke('start_backend');
-      setStatusMsg('Backend started.');
-    } catch (err) {
-      setStatusMsg('Failed to start backend.');
+      const r = await invoke<string>('validate_api_key', {
+        provider: selProvider,
+        apiKey: apiKey || 'test',
+        endpoint: baseUrl || undefined,
+      });
+      const res = JSON.parse(r);
+      setTestResult(res.valid
+        ? { ok: true, text: 'Connected successfully' }
+        : { ok: false, text: 'Invalid API key or unreachable' }
+      );
+    } catch {
+      setTestResult({ ok: false, text: 'Connection failed' });
+    } finally {
+      setTesting(false);
     }
   };
 
-  const handleStopBackend = async () => {
-    try {
-      await invoke('stop_backend');
-      setStatusMsg('Backend stopped.');
-    } catch (err) {
-      setStatusMsg('Failed to stop backend.');
-    }
+  const saveProvider = async () => {
+    const updates: Record<string, any> = {
+      providers: {
+        primary: selProvider,
+        [selProvider]: {
+          ...(config.providers?.[selProvider] || {}),
+          base_url: baseUrl,
+        },
+      },
+    };
+    await save(updates);
   };
 
   return (
@@ -83,26 +110,27 @@ export default function SettingsPage() {
       <Header title="Settings" />
       <div className="settings-layout" style={{ flex: 1, overflow: 'hidden' }}>
         <nav className="settings-nav">
-          {SECTIONS.map((s) => (
-            <button
-              key={s}
-              className={`settings-nav-item ${activeSection === s ? 'active' : ''}`}
-              onClick={() => { setActiveSection(s); setStatusMsg(null); }}
-            >
+          {SECTIONS.map(s => (
+            <button key={s} className={`settings-nav-item ${section === s ? 'active' : ''}`}
+              onClick={() => { setSection(s); setMsg(null); setTestResult(null); }}>
               {s}
             </button>
           ))}
         </nav>
 
         <div className="settings-content">
-          {statusMsg && (
-            <div className="info-box" style={{ marginBottom: 12, background: statusMsg.includes('Failed') ? 'var(--accent-red-muted)' : 'var(--accent-green-muted)' }}>
-              <span className="info-icon">{statusMsg.includes('Failed') ? '!' : '✓'}</span>
-              <span>{statusMsg}</span>
+          {msg && (
+            <div className="info-box" style={{
+              marginBottom: 12,
+              background: msg.includes('Failed') ? 'var(--accent-red-muted)' : 'var(--accent-green-muted)',
+            }}>
+              <span className="info-icon">{msg.includes('Failed') ? '!' : '✓'}</span>
+              <span>{msg}</span>
             </div>
           )}
 
-          {activeSection === 'General' && (
+          {/* ── GENERAL ── */}
+          {section === 'General' && (
             <div className="settings-section">
               <h2>General</h2>
               <div className="settings-row">
@@ -110,89 +138,133 @@ export default function SettingsPage() {
                   <div className="settings-row-label">Bot Name</div>
                   <div className="settings-row-desc">The name your AI assistant responds to</div>
                 </div>
-                <input
-                  className="input-field"
-                  style={{ width: 200 }}
-                  defaultValue={(config as Record<string, string>).bot_name || 'NeuralClaw'}
-                  onBlur={(e) => handleSaveConfig({ bot_name: e.target.value })}
-                />
+                <input className="input-field" style={{ width: 200 }}
+                  defaultValue={config.general?.name || 'NeuralClaw'}
+                  onBlur={e => save({ general: { ...config.general, name: e.target.value } })} />
               </div>
               <div className="settings-row">
                 <div>
-                  <div className="settings-row-label">Start on Login</div>
-                  <div className="settings-row-desc">Launch NeuralClaw when you log in</div>
+                  <div className="settings-row-label">Log Level</div>
+                  <div className="settings-row-desc">Backend logging verbosity</div>
                 </div>
-                <button className="toggle on" />
+                <select className="input-field" style={{ width: 120 }}
+                  value={config.general?.log_level || 'INFO'}
+                  onChange={e => save({ general: { ...config.general, log_level: e.target.value } })}>
+                  <option value="DEBUG">DEBUG</option>
+                  <option value="INFO">INFO</option>
+                  <option value="WARNING">WARNING</option>
+                  <option value="ERROR">ERROR</option>
+                </select>
               </div>
               <div className="settings-row">
                 <div>
-                  <div className="settings-row-label">Biometric Lock</div>
-                  <div className="settings-row-desc">Require biometric auth to access</div>
+                  <div className="settings-row-label">Desktop Version</div>
+                  <div className="settings-row-desc">NeuralClaw Desktop client version</div>
                 </div>
-                <button className="toggle on" />
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>v{APP_VERSION}</span>
               </div>
               <div className="settings-row">
                 <div>
-                  <div className="settings-row-label">Auto-Update</div>
-                  <div className="settings-row-desc">Automatically download and install updates</div>
+                  <div className="settings-row-label">Backend Version</div>
+                  <div className="settings-row-desc">NeuralClaw gateway engine</div>
                 </div>
-                <button className="toggle on" />
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>
+                  {config.version || 'Not connected'}
+                </span>
+              </div>
+              <div className="settings-row">
+                <div>
+                  <div className="settings-row-label">Runtime</div>
+                  <div className="settings-row-desc">Application framework stack</div>
+                </div>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>Tauri 2 + React 19</span>
               </div>
             </div>
           )}
 
-          {activeSection === 'Provider' && (
+          {/* ── PROVIDER ── */}
+          {section === 'Provider' && (
             <div className="settings-section">
               <h2>AI Provider</h2>
               <div className="card" style={{ marginBottom: 16 }}>
                 <div className="input-group" style={{ marginBottom: 16 }}>
                   <label className="input-label">Primary Provider</label>
-                  <select className="input-field">
+                  <select className="input-field" value={selProvider}
+                    onChange={e => {
+                      const id = e.target.value as ProviderId;
+                      setSelProvider(id);
+                      setTestResult(null);
+                      // Load base_url from config for this provider
+                      const pConf = config.providers?.[id] || {};
+                      setBaseUrl(pConf.base_url || '');
+                    }}>
                     {ALL_PROVIDERS.map(p => (
                       <option key={p.id} value={p.id}>{p.name} ({p.company})</option>
                     ))}
                   </select>
                 </div>
-                <div className="input-group" style={{ marginBottom: 16 }}>
-                  <label className="input-label">API Key</label>
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    <input className="input-field input-mono" type="password" defaultValue="●●●●●●●●●●" style={{ flex: 1 }} />
-                    <button className="btn btn-secondary btn-sm">Change</button>
+
+                {selProvider !== 'local' && selProvider !== 'meta' && (
+                  <div className="input-group" style={{ marginBottom: 16 }}>
+                    <label className="input-label">API Key</label>
+                    <input className="input-field input-mono" type="password"
+                      placeholder="Enter API key..."
+                      value={apiKey}
+                      onChange={e => setApiKey(e.target.value)} />
                   </div>
-                </div>
+                )}
+
                 <div className="input-group">
                   <label className="input-label">Base URL</label>
-                  <input className="input-field input-mono" defaultValue="https://api.venice.ai/api/v1" />
+                  <input className="input-field input-mono"
+                    placeholder={selProvider === 'local' ? 'http://localhost:11434/v1' : 'https://api.openai.com/v1'}
+                    value={baseUrl}
+                    onChange={e => setBaseUrl(e.target.value)} />
                 </div>
-                <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span className={'status-dot ' + (backendStatus?.healthy ? 'online' : 'offline')} />
-                  <span style={{ fontSize: 13, color: backendStatus?.healthy ? 'var(--accent-green)' : 'var(--accent-red)' }}>
-                    {backendStatus?.healthy ? 'Connected' : 'Disconnected'}
-                  </span>
-                </div>
+
+                {testResult && (
+                  <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span className={'status-dot ' + (testResult.ok ? 'online' : 'offline')} />
+                    <span style={{ fontSize: 13, color: testResult.ok ? 'var(--accent-green)' : 'var(--accent-red)' }}>
+                      {testResult.text}
+                    </span>
+                  </div>
+                )}
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
-                <button className="btn btn-secondary">Test Connection</button>
-                <button className="btn btn-primary" disabled={saving} onClick={() => handleSaveConfig({})}>
+                <button className="btn btn-secondary" onClick={testConnection} disabled={testing}>
+                  {testing ? 'Testing...' : 'Test Connection'}
+                </button>
+                <button className="btn btn-primary" disabled={saving} onClick={saveProvider}>
                   {saving ? 'Saving...' : 'Save'}
                 </button>
               </div>
             </div>
           )}
 
-          {activeSection === 'Models' && (
+          {/* ── MODELS ── */}
+          {section === 'Models' && (
             <div className="settings-section">
               <h2>Models</h2>
               <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16 }}>
-                Available models by provider. The primary model is used for reasoning by default.
+                Available models by provider. The primary model is used for reasoning.
               </p>
-              {(Object.keys(DEFAULT_MODELS) as ProviderId[]).map((providerId) => (
+
+              {/* Role Router Info */}
+              {config.model_roles?.enabled && (
+                <div className="info-box" style={{ marginBottom: 16, background: 'var(--accent-green-muted)' }}>
+                  <span className="info-icon">✓</span>
+                  <span>Role-based routing active — models are selected by call-site role (primary/fast/micro/embed)</span>
+                </div>
+              )}
+
+              {(Object.keys(DEFAULT_MODELS) as ProviderId[]).map(providerId => (
                 <div key={providerId} className="card" style={{ marginBottom: 12 }}>
                   <div className="card-header">
                     <span className="card-title">{ALL_PROVIDERS.find(p => p.id === providerId)?.name || providerId}</span>
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {DEFAULT_MODELS[providerId].map((model) => (
+                    {DEFAULT_MODELS[providerId].map(model => (
                       <div key={model.name} style={{
                         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                         padding: '8px 12px', background: 'var(--bg-tertiary)',
@@ -211,38 +283,8 @@ export default function SettingsPage() {
             </div>
           )}
 
-          {activeSection === 'Channels' && (
-            <div className="settings-section">
-              <h2>Messaging Channels</h2>
-              <div className="card" style={{ marginBottom: 12 }}>
-                <div className="card-header">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span>✈️</span>
-                    <span className="card-title">Telegram</span>
-                  </div>
-                  <span className="badge badge-green">● Running</span>
-                </div>
-                <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>Bot: @NeuralClawBot</p>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button className="btn btn-secondary btn-sm">Configure</button>
-                  <button className="btn btn-danger btn-sm">Stop</button>
-                </div>
-              </div>
-              <div className="card">
-                <div className="card-header">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span>💬</span>
-                    <span className="card-title">Discord</span>
-                  </div>
-                  <span className="badge badge-red">○ Not configured</span>
-                </div>
-                <button className="btn btn-primary btn-sm" style={{ marginTop: 8 }}>Setup Discord Bot →</button>
-              </div>
-              <button className="btn btn-secondary" style={{ marginTop: 16 }}>+ Add Channel</button>
-            </div>
-          )}
-
-          {activeSection === 'Memory' && (
+          {/* ── MEMORY ── */}
+          {section === 'Memory' && (
             <div className="settings-section">
               <h2>Memory</h2>
               <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16 }}>
@@ -253,7 +295,7 @@ export default function SettingsPage() {
                   <span className="card-title">Memory Statistics</span>
                   <button className="btn btn-ghost btn-sm" onClick={() => {
                     invoke<string>('get_memory_episodes').then(r => {
-                      try { setConfig(prev => ({ ...prev, _memory: JSON.parse(r) })); } catch { /* */ }
+                      try { setConfig(prev => ({ ...prev, _memory: JSON.parse(r) })); } catch {}
                     }).catch(() => {});
                   }}>Refresh</button>
                 </div>
@@ -263,7 +305,7 @@ export default function SettingsPage() {
                       padding: 12, background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-sm)', textAlign: 'center',
                     }}>
                       <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-primary)' }}>
-                        {(config._memory as Record<string, number>)?.[`${type}_count`] ?? '—'}
+                        {(config._memory as any)?.[`${type}_count`] ?? '—'}
                       </div>
                       <div style={{ fontSize: 11, color: 'var(--text-muted)', textTransform: 'capitalize' }}>{type}</div>
                     </div>
@@ -284,57 +326,19 @@ export default function SettingsPage() {
                 </div>
               </div>
               <div style={{ marginTop: 16 }}>
-                <button className="btn btn-danger" onClick={() => invoke('clear_chat').catch(() => {})}>
+                <button className="btn btn-danger" onClick={() => {
+                  if (confirm('Clear all memory? This cannot be undone.')) {
+                    invoke('clear_chat').then(() => setMsg('Memory cleared.')).catch(() => setMsg('Failed to clear memory.'));
+                  }
+                }}>
                   Clear All Memory
                 </button>
               </div>
             </div>
           )}
 
-          {activeSection === 'Security' && (
-            <div className="settings-section">
-              <h2>Security</h2>
-              <div className="settings-row">
-                <div>
-                  <div className="settings-row-label">Biometric Authentication</div>
-                  <div className="settings-row-desc">Require Touch ID / Windows Hello to unlock the app</div>
-                </div>
-                <button className="toggle on" />
-              </div>
-              <div className="settings-row">
-                <div>
-                  <div className="settings-row-label">Secret Redaction</div>
-                  <div className="settings-row-desc">Automatically redact API keys and tokens in logs</div>
-                </div>
-                <button className="toggle on" />
-              </div>
-              <div className="settings-row">
-                <div>
-                  <div className="settings-row-label">MCP Authentication</div>
-                  <div className="settings-row-desc">Require Bearer token for MCP server connections</div>
-                </div>
-                <button className="toggle on" />
-              </div>
-              <div className="settings-row">
-                <div>
-                  <div className="settings-row-label">Tool Allowlist</div>
-                  <div className="settings-row-desc">Only allow explicitly permitted tools to execute</div>
-                </div>
-                <button className="toggle on" />
-              </div>
-              <div className="card" style={{ marginTop: 16 }}>
-                <div className="card-header">
-                  <span className="card-title">MCP Auth Token</span>
-                </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <input className="input-field input-mono" type="password" defaultValue="●●●●●●●●" style={{ flex: 1 }} />
-                  <button className="btn btn-secondary btn-sm">Regenerate</button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {activeSection === 'Features' && (
+          {/* ── FEATURES ── */}
+          {section === 'Features' && (
             <div className="settings-section">
               <h2>Feature Flags</h2>
               <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16 }}>
@@ -352,111 +356,66 @@ export default function SettingsPage() {
                     <div>
                       <div className="settings-row-label">{feat.label || key}</div>
                       <div className="settings-row-desc">
-                        {feat.live ? (
-                          <span className="badge badge-green" style={{ fontSize: 10 }}>● Live</span>
-                        ) : (
-                          <span className="badge" style={{ fontSize: 10 }}>○ Inactive</span>
-                        )}
+                        {feat.live
+                          ? <span className="badge badge-green" style={{ fontSize: 10 }}>● Live</span>
+                          : <span className="badge" style={{ fontSize: 10 }}>○ Inactive</span>
+                        }
                       </div>
                     </div>
-                    <button
-                      className={`toggle ${feat.value ? 'on' : ''}`}
-                      onClick={() => handleToggleFeature(key, !feat.value)}
-                    />
+                    <button className={`toggle ${feat.value ? 'on' : ''}`}
+                      onClick={() => toggleFeature(key, !feat.value)} />
                   </div>
                 ))
               )}
             </div>
           )}
 
-          {activeSection === 'Advanced' && (
+          {/* ── ADVANCED ── */}
+          {section === 'Advanced' && (
             <div className="settings-section">
               <h2>Advanced</h2>
               <div className="settings-row">
                 <div>
                   <div className="settings-row-label">Backend Sidecar</div>
                   <div className="settings-row-desc">
-                    Status: {backendStatus?.running ? (
-                      <span style={{ color: 'var(--accent-green)' }}>Running on port {backendStatus.port}</span>
-                    ) : (
-                      <span style={{ color: 'var(--accent-red)' }}>Stopped</span>
-                    )}
+                    Status: {backend?.running
+                      ? <span style={{ color: 'var(--accent-green)' }}>Running on port {backend.port}</span>
+                      : <span style={{ color: 'var(--accent-red)' }}>Stopped</span>
+                    }
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
-                  <button className="btn btn-primary btn-sm" onClick={handleStartBackend}>Start</button>
-                  <button className="btn btn-danger btn-sm" onClick={handleStopBackend}>Stop</button>
+                  <button className="btn btn-primary btn-sm" onClick={async () => {
+                    try { await invoke('start_backend'); setMsg('Backend started.'); } catch { setMsg('Failed to start.'); }
+                  }}>Start</button>
+                  <button className="btn btn-danger btn-sm" onClick={async () => {
+                    try { await invoke('stop_backend'); setMsg('Backend stopped.'); } catch { setMsg('Failed to stop.'); }
+                  }}>Stop</button>
                 </div>
               </div>
               <div className="settings-row">
                 <div>
                   <div className="settings-row-label">Dashboard Port</div>
-                  <div className="settings-row-desc">REST API port for the backend dashboard</div>
+                  <div className="settings-row-desc">REST API port (read-only)</div>
                 </div>
-                <input className="input-field" style={{ width: 100 }} defaultValue="8080" readOnly />
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>8080</span>
               </div>
               <div className="settings-row">
                 <div>
                   <div className="settings-row-label">WebChat Port</div>
-                  <div className="settings-row-desc">WebSocket port for real-time chat</div>
+                  <div className="settings-row-desc">WebSocket port (read-only)</div>
                 </div>
-                <input className="input-field" style={{ width: 100 }} defaultValue="8099" readOnly />
-              </div>
-              <div className="settings-row">
-                <div>
-                  <div className="settings-row-label">Log Level</div>
-                  <div className="settings-row-desc">Backend logging verbosity</div>
-                </div>
-                <select className="input-field" style={{ width: 120 }} defaultValue="INFO"
-                  onChange={(e) => handleSaveConfig({ log_level: e.target.value })}>
-                  <option value="DEBUG">DEBUG</option>
-                  <option value="INFO">INFO</option>
-                  <option value="WARNING">WARNING</option>
-                  <option value="ERROR">ERROR</option>
-                </select>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>8099</span>
               </div>
               <div style={{ marginTop: 20 }}>
                 <button className="btn btn-danger" onClick={() => {
-                  localStorage.clear();
-                  window.location.reload();
+                  if (confirm('Reset all local data? This clears cached settings.')) {
+                    localStorage.clear();
+                    window.location.reload();
+                  }
                 }}>
                   Reset All Local Data
                 </button>
-              </div>
-            </div>
-          )}
-
-          {activeSection === 'About' && (
-            <div className="settings-section">
-              <h2>About NeuralClaw</h2>
-              <div className="card" style={{ marginBottom: 16 }}>
-                <div style={{ textAlign: 'center', padding: 20 }}>
-                  <div style={{ fontSize: 48, marginBottom: 8 }}>🧠</div>
-                  <h2 style={{ margin: '0 0 4px' }}>NeuralClaw Desktop</h2>
-                  <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>
-                    Version {APP_VERSION}
-                  </div>
-                  <p style={{ fontSize: 13, color: 'var(--text-secondary)', maxWidth: 400, margin: '0 auto' }}>
-                    The Self-Evolving AI Assistant. A cognitive agent framework with five cortices,
-                    multi-channel support, and autonomous learning capabilities.
-                  </p>
-                </div>
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div className="settings-row">
-                  <div className="settings-row-label">Desktop Version</div>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>{APP_VERSION}</span>
-                </div>
-                <div className="settings-row">
-                  <div className="settings-row-label">Backend Version</div>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>
-                    {(config as Record<string, string>).version || 'Not connected'}
-                  </span>
-                </div>
-                <div className="settings-row">
-                  <div className="settings-row-label">Runtime</div>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }}>Tauri 2 + React 19</span>
-                </div>
               </div>
             </div>
           )}

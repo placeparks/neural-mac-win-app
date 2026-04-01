@@ -346,7 +346,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "model_roles": {
         "enabled": False,
-        "primary": "qwen3.5:35b-a3b",
+        "primary": "qwen3.5:35b",
         "fast": "qwen3.5:9b",
         "micro": "qwen3.5:4b",
         "embed": "qwen3-embedding:8b",
@@ -713,7 +713,7 @@ class ModelRolesConfig:
         micro   — intent classification, routing, quick yes/no ops
         embed   — embeddings for Nexus Memory, RAG, semantic search
     """
-    primary: str = "qwen3.5:35b-a3b"
+    primary: str = "qwen3.5:35b"
     fast: str = "qwen3.5:9b"
     micro: str = "qwen3.5:4b"
     embed: str = "qwen3-embedding:8b"
