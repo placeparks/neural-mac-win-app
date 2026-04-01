@@ -51,29 +51,38 @@ fn main_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .ok_or_else(|| "Main window not configured".to_string())
 }
 
-fn clamp_position(app: &AppHandle, x: i32, y: i32) -> (i32, i32) {
+fn avatar_dimensions(scale: f64) -> (i32, i32) {
+    let clamped = scale.clamp(0.5, 2.0);
+    let width = ((AVATAR_WINDOW_WIDTH as f64) * clamped).round() as i32;
+    let height = ((AVATAR_WINDOW_HEIGHT as f64) * clamped).round() as i32;
+    (width.clamp(180, 640), height.clamp(240, 860))
+}
+
+fn clamp_position(app: &AppHandle, x: i32, y: i32, scale: f64) -> (i32, i32) {
+    let (width, height) = avatar_dimensions(scale);
     if let Ok(Some(monitor)) = app.primary_monitor() {
         let size = monitor.size();
         let pos = monitor.position();
-        let max_x = pos.x + size.width as i32 - AVATAR_WINDOW_WIDTH;
-        let max_y = pos.y + size.height as i32 - AVATAR_WINDOW_HEIGHT;
+        let max_x = pos.x + size.width as i32 - width;
+        let max_y = pos.y + size.height as i32 - height;
         return (x.clamp(pos.x, max_x), y.clamp(pos.y, max_y));
     }
     (x.max(0), y.max(0))
 }
 
-fn anchored_position(app: &AppHandle, anchor: &str) -> Result<AvatarPosition, String> {
+fn anchored_position(app: &AppHandle, anchor: &str, scale: f64) -> Result<AvatarPosition, String> {
     let monitor = app
         .primary_monitor()
         .map_err(|err| err.to_string())?
         .ok_or_else(|| "Primary monitor unavailable".to_string())?;
     let size = monitor.size();
     let pos = monitor.position();
+    let (width, height) = avatar_dimensions(scale);
 
-    let right = pos.x + size.width as i32 - AVATAR_WINDOW_WIDTH - AVATAR_MARGIN;
+    let right = pos.x + size.width as i32 - width - AVATAR_MARGIN;
     let left = pos.x + AVATAR_MARGIN;
     let top = pos.y + AVATAR_MARGIN;
-    let bottom = pos.y + size.height as i32 - AVATAR_WINDOW_HEIGHT - AVATAR_MARGIN;
+    let bottom = pos.y + size.height as i32 - height - AVATAR_MARGIN;
 
     let (x, y) = match anchor {
         "bottom-left" => (left, bottom),
@@ -88,6 +97,10 @@ fn anchored_position(app: &AppHandle, anchor: &str) -> Result<AvatarPosition, St
 
 fn apply_window_state(app: &AppHandle, state: &AvatarWindowState) -> Result<(), String> {
     let window = avatar_window(app)?;
+    let (width, height) = avatar_dimensions(state.scale);
+    window
+        .set_size(tauri::Size::Physical(tauri::PhysicalSize::new(width as u32, height as u32)))
+        .map_err(|err| err.to_string())?;
     window
         .set_position(PhysicalPosition::new(state.position.x, state.position.y))
         .map_err(|err| err.to_string())?;
@@ -120,7 +133,7 @@ pub fn toggle_avatar_window_internal(
         let mut state = avatar_state.lock().map_err(|err| err.to_string())?;
         state.visible = !state.visible;
         if state.anchor != "free" {
-            state.position = anchored_position(app, &state.anchor)?;
+            state.position = anchored_position(app, &state.anchor, state.scale)?;
         }
         state.clone()
     };
@@ -159,7 +172,7 @@ pub fn set_avatar_position(
 ) -> Result<AvatarWindowState, String> {
     let next_state = {
         let mut current = state.lock().map_err(|err| err.to_string())?;
-        let (x, y) = clamp_position(&app, x, y);
+        let (x, y) = clamp_position(&app, x, y, current.scale);
         current.anchor = "free".into();
         current.position = AvatarPosition { x, y };
         current.clone()
@@ -182,7 +195,8 @@ pub fn set_avatar_anchor(
         let current = state.lock().map_err(|err| err.to_string())?;
         current.position.clone()
     } else {
-        anchored_position(&app, &anchor)?
+        let current = state.lock().map_err(|err| err.to_string())?;
+        anchored_position(&app, &anchor, current.scale)?
     };
 
     let next_state = {
@@ -203,7 +217,7 @@ pub fn anchor_to_taskbar(
     let next_state = {
         let mut current = state.lock().map_err(|err| err.to_string())?;
         current.anchor = "taskbar".into();
-        current.position = anchored_position(&app, "taskbar")?;
+        current.position = anchored_position(&app, "taskbar", current.scale)?;
         current.clone()
     };
     apply_window_state(&app, &next_state)?;
@@ -212,18 +226,29 @@ pub fn anchor_to_taskbar(
 
 #[tauri::command]
 pub fn update_avatar_settings(
+    app: AppHandle,
     state: State<'_, Mutex<AvatarWindowState>>,
     scale: Option<f64>,
     model_path: Option<String>,
 ) -> Result<AvatarWindowState, String> {
-    let mut current = state.lock().map_err(|err| err.to_string())?;
-    if let Some(scale) = scale {
-        current.scale = scale.clamp(0.5, 2.0);
-    }
-    if let Some(model_path) = model_path {
-        current.model_path = model_path;
-    }
-    Ok(current.clone())
+    let next_state = {
+        let mut current = state.lock().map_err(|err| err.to_string())?;
+        if let Some(scale) = scale {
+            current.scale = scale.clamp(0.5, 2.0);
+            if current.anchor != "free" {
+                current.position = anchored_position(&app, &current.anchor, current.scale)?;
+            } else {
+                let (x, y) = clamp_position(&app, current.position.x, current.position.y, current.scale);
+                current.position = AvatarPosition { x, y };
+            }
+        }
+        if let Some(model_path) = model_path {
+            current.model_path = model_path;
+        }
+        current.clone()
+    };
+    apply_window_state(&app, &next_state)?;
+    Ok(next_state)
 }
 
 #[tauri::command]

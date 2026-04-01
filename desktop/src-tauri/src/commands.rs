@@ -33,7 +33,7 @@ pub async fn get_backend_status(
         let s = state.lock().map_err(|e| e.to_string())?;
         (s.running, s.port)
     };
-    let health = sidecar::check_health(port).await;
+    let health = sidecar::check_health().await;
     Ok(serde_json::json!({
         "running": running,
         "port": port,

@@ -105,7 +105,6 @@ class SemanticMemory:
 
             CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
             CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
-            CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace);
 
             CREATE TABLE IF NOT EXISTS relationships (
                 id TEXT PRIMARY KEY,
@@ -121,21 +120,22 @@ class SemanticMemory:
             CREATE INDEX IF NOT EXISTS idx_rel_from ON relationships(from_entity_id);
             CREATE INDEX IF NOT EXISTS idx_rel_to ON relationships(to_entity_id);
             CREATE INDEX IF NOT EXISTS idx_rel_type ON relationships(relation_type);
-            CREATE INDEX IF NOT EXISTS idx_rel_namespace ON relationships(namespace);
         """)
         await self._db.commit()
 
-        # Migrate: add namespace column to existing tables if missing
-        try:
-            await self._db.execute("SELECT namespace FROM entities LIMIT 1")
-        except Exception:
+        if not await self._has_column("entities", "namespace"):
             await self._db.execute("ALTER TABLE entities ADD COLUMN namespace TEXT NOT NULL DEFAULT 'global'")
             await self._db.commit()
-        try:
-            await self._db.execute("SELECT namespace FROM relationships LIMIT 1")
-        except Exception:
+
+        if not await self._has_column("relationships", "namespace"):
             await self._db.execute("ALTER TABLE relationships ADD COLUMN namespace TEXT NOT NULL DEFAULT 'global'")
             await self._db.commit()
+
+        await self._db.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace);
+            CREATE INDEX IF NOT EXISTS idx_rel_namespace ON relationships(namespace);
+        """)
+        await self._db.commit()
 
     async def upsert_entity(
         self,
@@ -394,3 +394,8 @@ class SemanticMemory:
             created_at=row[4] if len(row) > 4 else 0.0,
             updated_at=row[5] if len(row) > 5 else 0.0,
         )
+
+    async def _has_column(self, table: str, column: str) -> bool:
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(f"PRAGMA table_info({table})")
+        return any(row[1] == column for row in rows)

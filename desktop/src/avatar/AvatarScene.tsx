@@ -14,14 +14,15 @@ interface Props {
 export default function AvatarScene({ modelPath, scale, emotion, isSpeaking }: Props) {
   return (
     <Canvas
-      camera={{ position: [0, 0.9, 3.6], fov: 28 }}
+      camera={{ position: [0, 0.55, 5.1], fov: 24 }}
       gl={{ alpha: true, antialias: true }}
       style={{ background: 'transparent' }}
     >
-      <ambientLight intensity={1.35} />
-      <directionalLight position={[2.5, 4, 3]} intensity={2.2} color="#ffffff" />
-      <directionalLight position={[-2.2, 1.8, 1.5]} intensity={0.8} color="#8ec5ff" />
-      <pointLight position={[0, -1, 2]} intensity={0.8} color="#72f8ff" />
+      <ambientLight intensity={1.2} />
+      <directionalLight position={[2.5, 4, 3]} intensity={1.9} color="#ffffff" />
+      <directionalLight position={[-2.2, 1.8, 1.5]} intensity={0.95} color="#8ec5ff" />
+      <pointLight position={[0, 0.5, 2.4]} intensity={1.05} color="#72f8ff" />
+      <pointLight position={[0, -2, 1.8]} intensity={0.45} color="#ffdca8" />
       <Suspense fallback={null}>
         <VRMAvatar
           modelPath={modelPath}

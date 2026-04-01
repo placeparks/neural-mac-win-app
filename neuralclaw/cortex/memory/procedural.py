@@ -105,16 +105,17 @@ class ProceduralMemory:
 
             CREATE INDEX IF NOT EXISTS idx_proc_name ON procedures(name);
             CREATE INDEX IF NOT EXISTS idx_proc_last_used ON procedures(last_used);
-            CREATE INDEX IF NOT EXISTS idx_proc_namespace ON procedures(namespace);
         """)
         await self._db.commit()
 
-        # Migrate: add namespace column if missing
-        try:
-            await self._db.execute_fetchall("SELECT namespace FROM procedures LIMIT 1")
-        except Exception:
+        if not await self._has_column("procedures", "namespace"):
             await self._db.execute("ALTER TABLE procedures ADD COLUMN namespace TEXT NOT NULL DEFAULT 'global'")
             await self._db.commit()
+
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_proc_namespace ON procedures(namespace)"
+        )
+        await self._db.commit()
 
     async def close(self) -> None:
         if self._db and self._owns_db:
@@ -246,3 +247,8 @@ class ProceduralMemory:
             success_count=row[5], failure_count=row[6],
             last_used=row[7], created_at=row[8],
         )
+
+    async def _has_column(self, table: str, column: str) -> bool:
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(f"PRAGMA table_info({table})")
+        return any(row[1] == column for row in rows)

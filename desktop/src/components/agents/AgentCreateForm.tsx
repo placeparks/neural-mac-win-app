@@ -7,6 +7,8 @@ import { DEFAULT_MODELS } from '../../lib/theme';
 
 interface Props {
   initial?: AgentDefinition | null;
+  saving?: boolean;
+  error?: string | null;
   onSave: (data: Partial<AgentDefinition>) => void;
   onCancel: () => void;
 }
@@ -22,7 +24,7 @@ const PROVIDERS = [
   { id: 'venice', label: 'Venice' },
 ];
 
-export default function AgentCreateForm({ initial, onSave, onCancel }: Props) {
+export default function AgentCreateForm({ initial, saving = false, error = null, onSave, onCancel }: Props) {
   const [name, setName] = useState(initial?.name || '');
   const [description, setDescription] = useState(initial?.description || '');
   const [systemPrompt, setSystemPrompt] = useState(initial?.system_prompt || '');
@@ -93,7 +95,29 @@ export default function AgentCreateForm({ initial, onSave, onCancel }: Props) {
         {initial ? `Edit Agent: ${initial.name}` : 'Create New Agent'}
       </h3>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {error && (
+        <div
+          className="info-box"
+          style={{
+            marginBottom: 16,
+            background: 'var(--accent-red-muted)',
+            borderColor: 'rgba(248,81,73,0.35)',
+          }}
+        >
+          <span className="info-icon">!</span>
+          <span>{error}</span>
+        </div>
+      )}
+
+      <form
+        style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!saving && name.trim() && model.trim()) {
+            handleSave();
+          }
+        }}
+      >
         {/* Name */}
         <div>
           <label style={{ fontSize: 13, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>Name</label>
@@ -189,7 +213,7 @@ export default function AgentCreateForm({ initial, onSave, onCancel }: Props) {
 
         {/* Test Connection */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <button className="btn btn-secondary" onClick={handleTest} disabled={testing} style={{ fontSize: 12 }}>
+          <button type="button" className="btn btn-secondary" onClick={handleTest} disabled={testing} style={{ fontSize: 12 }}>
             {testing ? 'Testing...' : 'Test Connection'}
           </button>
           {testResult && (
@@ -224,17 +248,17 @@ export default function AgentCreateForm({ initial, onSave, onCancel }: Props) {
         {/* Actions */}
         <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
           <button
+            type="submit"
             className="btn btn-primary"
-            onClick={handleSave}
-            disabled={!name.trim() || !model.trim()}
+            disabled={!name.trim() || !model.trim() || saving}
           >
-            {initial ? 'Update Agent' : 'Create Agent'}
+            {saving ? (initial ? 'Updating...' : 'Creating...') : (initial ? 'Update Agent' : 'Create Agent')}
           </button>
-          <button className="btn btn-secondary" onClick={onCancel}>
+          <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={saving}>
             Cancel
           </button>
         </div>
-      </div>
+      </form>
     </div>
   );
 }

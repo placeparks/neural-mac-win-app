@@ -71,7 +71,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     try {
       const result = await createAgentDefinition(defn);
       if (result.ok) {
+        set({ error: null });
         await get().loadDefinitions();
+      } else {
+        set({ error: result.error || 'Failed to create agent' });
       }
       return result;
     } catch (e: any) {

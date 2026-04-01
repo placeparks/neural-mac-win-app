@@ -1,5 +1,6 @@
 """Tests for Memory Cortex."""
 import time
+import aiosqlite
 
 import pytest
 from neuralclaw.cortex.memory.episodic import EpisodicMemory, Episode
@@ -151,6 +152,38 @@ class TestSemanticMemory:
         triples = await self.mem.get_all_triples()
         assert len(triples) >= 1
 
+    @pytest.mark.asyncio
+    async def test_initialize_migrates_legacy_namespace_schema(self, tmp_path):
+        legacy_db = str(tmp_path / "semantic-legacy.db")
+        async with aiosqlite.connect(legacy_db) as conn:
+            await conn.executescript("""
+                CREATE TABLE entities (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    entity_type TEXT NOT NULL DEFAULT 'unknown',
+                    attributes_json TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL DEFAULT 0
+                );
+                CREATE TABLE relationships (
+                    id TEXT PRIMARY KEY,
+                    from_entity_id TEXT NOT NULL,
+                    to_entity_id TEXT NOT NULL,
+                    relation_type TEXT NOT NULL,
+                    confidence REAL NOT NULL DEFAULT 0.8,
+                    source_event_id TEXT,
+                    created_at REAL NOT NULL DEFAULT 0
+                );
+            """)
+            await conn.commit()
+
+        legacy = SemanticMemory(legacy_db)
+        await legacy.initialize()
+        await legacy.upsert_entity("Legacy", "concept")
+        entity = await legacy.query_entity("Legacy")
+        assert entity is not None
+        await legacy.close()
+
 
 class TestProceduralMemory:
     @pytest.fixture(autouse=True)
@@ -183,6 +216,37 @@ class TestProceduralMemory:
         for i in range(3):
             await self.mem.store_procedure(name=f"p{i}", description=f"P{i}", trigger_patterns=[f"t{i}"], steps=[ProcedureStep(action=f"a{i}", description=f"s{i}")])
         assert len(await self.mem.get_all()) >= 3
+
+    @pytest.mark.asyncio
+    async def test_initialize_migrates_legacy_namespace_schema(self, tmp_path):
+        legacy_db = str(tmp_path / "procedural-legacy.db")
+        async with aiosqlite.connect(legacy_db) as conn:
+            await conn.executescript("""
+                CREATE TABLE procedures (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT DEFAULT '',
+                    trigger_patterns_json TEXT DEFAULT '[]',
+                    steps_json TEXT DEFAULT '[]',
+                    success_count INTEGER DEFAULT 0,
+                    failure_count INTEGER DEFAULT 0,
+                    last_used REAL DEFAULT 0,
+                    created_at REAL DEFAULT 0
+                );
+            """)
+            await conn.commit()
+
+        legacy = ProceduralMemory(legacy_db)
+        await legacy.initialize()
+        await legacy.store_procedure(
+            name="legacy",
+            description="Legacy procedure",
+            trigger_patterns=["legacy"],
+            steps=[ProcedureStep(action="check", description="Check legacy")],
+        )
+        procs = await legacy.get_all()
+        assert any(proc.name == "legacy" for proc in procs)
+        await legacy.close()
 
 
 class TestMemoryMetabolism:

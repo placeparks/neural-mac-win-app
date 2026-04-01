@@ -13,13 +13,14 @@ import { updateAgentDefinition } from '../lib/api';
 
 export default function AgentsPage() {
   const {
-    definitions, running, loading,
-    loadAll, createAgent, deleteAgent, spawnAgent, despawnAgent,
+    definitions, running, loading, error,
+    loadAll, createAgent, deleteAgent, spawnAgent, despawnAgent, clearError,
   } = useAgentStore();
 
   const [showCreate, setShowCreate] = useState(false);
   const [editingAgent, setEditingAgent] = useState<AgentDefinition | null>(null);
   const [showDelegate, setShowDelegate] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     loadAll();
@@ -32,19 +33,26 @@ export default function AgentsPage() {
   }, []);
 
   const handleSave = useCallback(async (data: Partial<AgentDefinition>) => {
+    setSaving(true);
+    clearError();
     if (editingAgent) {
-      await updateAgentDefinition(editingAgent.agent_id, data);
-      await loadAll();
-      setEditingAgent(null);
+      const result = await updateAgentDefinition(editingAgent.agent_id, data);
+      if (result.ok) {
+        await loadAll();
+        setEditingAgent(null);
+      }
     } else {
       const result = await createAgent(data);
       if (result.ok) {
+        await loadAll();
         setShowCreate(false);
       }
     }
-  }, [editingAgent, createAgent, loadAll]);
+    setSaving(false);
+  }, [clearError, createAgent, editingAgent, loadAll]);
 
   const handleCancel = () => {
+    clearError();
     setShowCreate(false);
     setEditingAgent(null);
   };
@@ -86,6 +94,8 @@ export default function AgentsPage() {
             <div style={{ marginBottom: 20 }}>
               <AgentCreateForm
                 initial={editingAgent}
+                saving={saving}
+                error={error}
                 onSave={handleSave}
                 onCancel={handleCancel}
               />
