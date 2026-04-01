@@ -223,6 +223,7 @@ class AgentMesh:
 
         card = self._agents[to_agent]
         card.active_tasks += 1
+        card.status = AgentStatus.BUSY if card.active_tasks > 0 else AgentStatus.ONLINE
 
         try:
             if card.endpoint:
@@ -257,6 +258,7 @@ class AgentMesh:
             )
         finally:
             card.active_tasks = max(0, card.active_tasks - 1)
+            card.status = AgentStatus.ONLINE if card.active_tasks == 0 else AgentStatus.BUSY
 
     async def broadcast(
         self,
@@ -345,3 +347,39 @@ class AgentMesh:
                 for a in self._agents.values()
             ],
         }
+
+    def record_message(
+        self,
+        from_agent: str,
+        to_agent: str,
+        content: str,
+        message_type: str = "task",
+        payload: dict[str, Any] | None = None,
+        correlation_id: str | None = None,
+    ) -> MeshMessage:
+        """Append a synthetic activity event to the mesh log."""
+        msg = MeshMessage(
+            from_agent=from_agent,
+            to_agent=to_agent,
+            message_type=message_type,
+            content=content,
+            payload=payload or {},
+            correlation_id=correlation_id,
+        )
+        self._message_log.append(msg)
+        return msg
+
+    def get_recent_messages(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return recent mesh traffic for dashboards and desktop clients."""
+        return [
+            {
+                "id": msg.id,
+                "from_agent": msg.from_agent,
+                "to_agent": msg.to_agent,
+                "message_type": msg.message_type,
+                "content": msg.content,
+                "payload": msg.payload,
+                "timestamp": msg.timestamp,
+            }
+            for msg in self._message_log[-limit:]
+        ]

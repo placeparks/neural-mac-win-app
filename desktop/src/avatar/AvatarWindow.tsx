@@ -1,0 +1,209 @@
+import { MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from 'react';
+import AvatarScene from './AvatarScene';
+import AvatarChatOverlay from './AvatarChatOverlay';
+import { useAvatarState, type AvatarAnchor } from './useAvatarState';
+import { getAgentActivity, getRunningAgents } from '../lib/api';
+
+const PRESET_LABELS: Array<{ anchor: AvatarAnchor; label: string }> = [
+  { anchor: 'bottom-right', label: 'Bottom Right' },
+  { anchor: 'bottom-left', label: 'Bottom Left' },
+  { anchor: 'top-right', label: 'Top Right' },
+  { anchor: 'top-left', label: 'Top Left' },
+  { anchor: 'taskbar', label: 'Taskbar' },
+];
+
+export default function AvatarWindow() {
+  const {
+    hydrate,
+    modelPath,
+    scale,
+    emotion,
+    isSpeaking,
+    position,
+    inputOpen,
+    setInputOpen,
+    setPosition,
+    setAnchor,
+    openMainApp,
+    collaborationPulse,
+    setCollaborationPulse,
+  } = useAvatarState();
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [runningCount, setRunningCount] = useState(0);
+  const dragStart = useRef<{ mouseX: number; mouseY: number; originX: number; originY: number } | null>(null);
+
+  useEffect(() => {
+    hydrate();
+  }, [hydrate]);
+
+  useEffect(() => {
+    const previousBody = document.body.style.background;
+    const previousRoot = document.documentElement.style.background;
+    document.body.style.background = 'transparent';
+    document.documentElement.style.background = 'transparent';
+    return () => {
+      document.body.style.background = previousBody;
+      document.documentElement.style.background = previousRoot;
+    };
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() === 'k' && event.ctrlKey) {
+        event.preventDefault();
+        setInputOpen(true);
+      }
+      if (event.key === 'Escape') {
+        setContextMenu(null);
+        if (inputOpen) setInputOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [inputOpen, setInputOpen]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const [running, activity] = await Promise.all([
+          getRunningAgents(),
+          getAgentActivity(4),
+        ]);
+
+        if (cancelled) return;
+        setRunningCount(running.length);
+        const mostRecent = activity[activity.length - 1];
+        setCollaborationPulse(Boolean(
+          mostRecent &&
+          mostRecent.from_agent !== mostRecent.to_agent &&
+          Date.now() - (mostRecent.timestamp * 1000) < 12000,
+        ));
+      } catch {
+        if (!cancelled) {
+          setRunningCount(0);
+          setCollaborationPulse(false);
+        }
+      }
+    };
+
+    poll();
+    const timer = window.setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [setCollaborationPulse]);
+
+  useEffect(() => {
+    if (!dragStart.current) return;
+
+    const onMove = (event: MouseEvent) => {
+      const start = dragStart.current;
+      if (!start) return;
+      const nextX = start.originX + (event.screenX - start.mouseX);
+      const nextY = start.originY + (event.screenY - start.mouseY);
+      void setPosition(nextX, nextY);
+    };
+
+    const onUp = () => {
+      dragStart.current = null;
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [setPosition]);
+
+  const onPointerDown = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (event.button !== 0) return;
+    if (target.closest('button') || target.closest('input') || target.closest('form')) return;
+    dragStart.current = {
+      mouseX: event.screenX,
+      mouseY: event.screenY,
+      originX: position.x,
+      originY: position.y,
+    };
+  };
+
+  const avatarClassName = useMemo(
+    () => `avatar-window-shell${collaborationPulse ? ' collaborating' : ''}`,
+    [collaborationPulse],
+  );
+
+  return (
+    <div
+      className={avatarClassName}
+      onMouseDown={onPointerDown}
+      onClick={() => setContextMenu(null)}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        setContextMenu({ x: event.clientX, y: event.clientY });
+      }}
+    >
+      <div className="avatar-stage" onDoubleClick={() => setInputOpen(true)}>
+        <AvatarScene
+          modelPath={modelPath}
+          scale={scale}
+          emotion={emotion}
+          isSpeaking={isSpeaking}
+        />
+      </div>
+
+      <div className="avatar-status-pill">
+        <span className={`status-dot ${collaborationPulse ? 'online' : 'connecting'}`} />
+        <span>{runningCount} agent{runningCount === 1 ? '' : 's'}</span>
+      </div>
+
+      <AvatarChatOverlay />
+
+      {contextMenu && (
+        <div
+          className="avatar-context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          {PRESET_LABELS.map((preset) => (
+            <button
+              key={preset.anchor}
+              type="button"
+              className="avatar-context-item"
+              onClick={async () => {
+                await setAnchor(preset.anchor);
+                setContextMenu(null);
+              }}
+            >
+              {preset.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            className="avatar-context-item"
+            onClick={async () => {
+              await openMainApp();
+              setContextMenu(null);
+            }}
+          >
+            Open Main App
+          </button>
+          <button
+            type="button"
+            className="avatar-context-item"
+            onClick={async () => {
+              await openMainApp('settings');
+              setContextMenu(null);
+            }}
+          >
+            Open Settings
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}

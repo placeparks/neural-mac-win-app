@@ -1,4 +1,4 @@
-// NeuralClaw Desktop — Sidebar Navigation
+// NeuralClaw Desktop - Sidebar Navigation
 
 import { useAppStore } from '../../store/appStore';
 
@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { id: 'memory', icon: '🧠', label: 'Memory' },
   { id: 'knowledge', icon: '📚', label: 'Knowledge Base' },
   { id: 'workflows', icon: '⚡', label: 'Workflows' },
+  { id: 'agents', icon: '🤖', label: 'Agents' },
   { id: 'dashboard', icon: '📊', label: 'Dashboard' },
   { id: 'settings', icon: '⚙️', label: 'Settings' },
   { id: 'about', icon: 'ℹ️', label: 'About' },
@@ -50,7 +51,7 @@ export default function Sidebar({ currentView, onNavigate }: Props) {
           />
           <span>
             {connectionStatus === 'connected' ? 'Backend Online' :
-             connectionStatus === 'connecting' ? 'Connecting...' : 'Backend Offline'}
+              connectionStatus === 'connecting' ? 'Connecting...' : 'Backend Offline'}
           </span>
         </div>
       </div>

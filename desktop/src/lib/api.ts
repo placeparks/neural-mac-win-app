@@ -1,6 +1,7 @@
 // NeuralClaw Desktop — API Client
 // Maps to the actual Dashboard + WebChat backend routes
 
+import { invoke } from '@tauri-apps/api/core';
 import { DASHBOARD_BASE } from './constants';
 
 async function dashboardGet<T = unknown>(path: string): Promise<T> {
@@ -156,6 +157,152 @@ export async function getSkills(): Promise<unknown[]> {
   return dashboardGet('/skills');
 }
 
+// ── Agent Definitions (persistent) ──
+
+export interface AgentDefinition {
+  agent_id: string;
+  name: string;
+  description: string;
+  capabilities: string[];
+  provider: string;
+  model: string;
+  base_url: string;
+  api_key?: string;
+  system_prompt: string;
+  memory_namespace: string;
+  auto_start: boolean;
+  created_at: number;
+  updated_at: number;
+  metadata: Record<string, unknown>;
+}
+
+export interface RunningAgent {
+  name: string;
+  description: string;
+  status: 'online' | 'busy' | 'offline' | string;
+  capabilities: string[];
+  active_tasks: number;
+  source: string;
+  endpoint: string;
+  provider?: string;
+  model?: string;
+  memory_namespace?: string;
+}
+
+export interface AgentActivityEvent {
+  id: string;
+  from_agent: string;
+  to_agent: string;
+  message_type: string;
+  content: string;
+  payload?: Record<string, unknown>;
+  timestamp: number;
+}
+
+export interface AgentMemorySnapshot {
+  ok: boolean;
+  namespace: string;
+  episodic: {
+    id: string;
+    content: string;
+    timestamp: number;
+    source: string;
+    importance: number;
+  }[];
+  semantic: {
+    subject: string;
+    predicate: string;
+    object: string;
+    confidence: number;
+  }[];
+  procedural: {
+    id: string;
+    name: string;
+    description: string;
+    success_rate: number;
+    last_used: number;
+  }[];
+}
+
+export interface SharedTaskDetails {
+  ok: boolean;
+  task: {
+    task_id: string;
+    agents: string[];
+    status: string;
+    created_at: number;
+  };
+  memories: {
+    id: string;
+    from_agent: string;
+    content: string;
+    memory_type: string;
+    timestamp: number;
+  }[];
+}
+
+export async function getAgentDefinitions(): Promise<AgentDefinition[]> {
+  return dashboardGet<AgentDefinition[]>('/api/agents/definitions');
+}
+
+export async function createAgentDefinition(defn: Partial<AgentDefinition>): Promise<{ ok: boolean; agent_id?: string; error?: string }> {
+  return dashboardPost('/api/agents/definitions', defn);
+}
+
+export async function updateAgentDefinition(id: string, updates: Partial<AgentDefinition>): Promise<{ ok: boolean }> {
+  const resp = await fetch(`${DASHBOARD_BASE}/api/agents/definitions/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  });
+  return resp.json();
+}
+
+export async function deleteAgentDefinition(id: string): Promise<{ ok: boolean }> {
+  const resp = await fetch(`${DASHBOARD_BASE}/api/agents/definitions/${id}`, { method: 'DELETE' });
+  return resp.json();
+}
+
+export async function spawnDefinedAgent(id: string): Promise<{ ok: boolean; name?: string; error?: string }> {
+  return dashboardPost(`/api/agents/definitions/${id}/spawn`, {});
+}
+
+export async function despawnDefinedAgent(id: string): Promise<{ ok: boolean }> {
+  return dashboardPost(`/api/agents/definitions/${id}/despawn`, {});
+}
+
+export async function getRunningAgents(): Promise<RunningAgent[]> {
+  return dashboardGet<RunningAgent[]>('/api/agents/running');
+}
+
+export async function getAgentActivity(limit = 50): Promise<AgentActivityEvent[]> {
+  return dashboardGet<AgentActivityEvent[]>(`/api/agents/activity?limit=${limit}`);
+}
+
+export async function getAgentMemories(agentName: string): Promise<AgentMemorySnapshot> {
+  return dashboardGet<AgentMemorySnapshot>(`/api/agents/${encodeURIComponent(agentName)}/memories`);
+}
+
+export async function createSharedTask(agents: string[]): Promise<{ ok: boolean; task_id?: string; error?: string }> {
+  return dashboardPost('/api/agents/shared-task', { agents });
+}
+
+export async function getSharedTask(taskId: string): Promise<SharedTaskDetails> {
+  return dashboardGet<SharedTaskDetails>(`/api/agents/shared-task/${encodeURIComponent(taskId)}`);
+}
+
+export async function delegateTask(
+  agentName: string,
+  task: string,
+  options?: { agentNames?: string[]; sharedTaskId?: string },
+): Promise<{ ok: boolean; result?: string; error?: string; results?: Array<{ agent: string; status: string; result: string; confidence: number; error?: string }>; shared_task_id?: string | null }> {
+  const body: Record<string, unknown> = { task };
+  if (options?.agentNames?.length) body.agent_names = options.agentNames;
+  else body.agent_name = agentName;
+  if (options?.sharedTaskId) body.shared_task_id = options.sharedTaskId;
+  return dashboardPost('/api/agents/delegate', body);
+}
+
 // ── Types for chat (WebSocket-based, not REST) ──
 
 export interface ChatMessage {
@@ -171,4 +318,60 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
   result?: string;
   status?: 'running' | 'success' | 'error';
+}
+
+export interface DesktopChatSession {
+  sessionId: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  lastMessageAt: number;
+  messageCount: number;
+  preview: string;
+  draft: string;
+}
+
+export interface DesktopChatBootstrap {
+  activeSessionId: string;
+  sessions: DesktopChatSession[];
+  messages: ChatMessage[];
+  draft: string;
+}
+
+export interface DesktopChatSessionPayload {
+  activeSessionId: string;
+  messages: ChatMessage[];
+  draft: string;
+}
+
+export async function getChatBootstrap(): Promise<DesktopChatBootstrap> {
+  return invoke<DesktopChatBootstrap>('get_chat_bootstrap');
+}
+
+export async function createDesktopChatSession(title?: string): Promise<DesktopChatBootstrap> {
+  return invoke<DesktopChatBootstrap>('create_chat_session', { title });
+}
+
+export async function switchDesktopChatSession(sessionId: string): Promise<DesktopChatSessionPayload> {
+  return invoke<DesktopChatSessionPayload>('switch_chat_session', { sessionId });
+}
+
+export async function renameDesktopChatSession(sessionId: string, title: string): Promise<DesktopChatSession[]> {
+  return invoke<DesktopChatSession[]>('rename_chat_session', { sessionId, title });
+}
+
+export async function deleteDesktopChatSession(sessionId: string): Promise<DesktopChatBootstrap> {
+  return invoke<DesktopChatBootstrap>('delete_chat_session', { sessionId });
+}
+
+export async function clearDesktopChatSession(sessionId: string): Promise<DesktopChatSession[]> {
+  return invoke<DesktopChatSession[]>('clear_chat_session', { sessionId });
+}
+
+export async function saveDesktopChatDraft(sessionId: string, content: string): Promise<void> {
+  await invoke('save_chat_draft', { sessionId, content });
+}
+
+export async function saveDesktopChatMessage(sessionId: string, message: ChatMessage): Promise<DesktopChatSession[]> {
+  return invoke<DesktopChatSession[]>('save_chat_message', { sessionId, message });
 }

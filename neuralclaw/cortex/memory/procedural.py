@@ -74,12 +74,14 @@ class ProceduralMemory:
         db_path: str,
         bus: NeuralBus | None = None,
         db_pool: DBPool | None = None,
+        namespace: str = "global",
     ) -> None:
         self._db_path = db_path
         self._bus = bus
         self._db: aiosqlite.Connection | DBPool | None = None
         self._db_pool = db_pool
         self._owns_db = db_pool is None
+        self._namespace = namespace
 
     async def initialize(self) -> None:
         if self._db_pool:
@@ -97,13 +99,22 @@ class ProceduralMemory:
                 success_count INTEGER DEFAULT 0,
                 failure_count INTEGER DEFAULT 0,
                 last_used REAL DEFAULT 0,
+                namespace TEXT NOT NULL DEFAULT 'global',
                 created_at REAL DEFAULT (unixepoch('now'))
             );
 
             CREATE INDEX IF NOT EXISTS idx_proc_name ON procedures(name);
             CREATE INDEX IF NOT EXISTS idx_proc_last_used ON procedures(last_used);
+            CREATE INDEX IF NOT EXISTS idx_proc_namespace ON procedures(namespace);
         """)
         await self._db.commit()
+
+        # Migrate: add namespace column if missing
+        try:
+            await self._db.execute_fetchall("SELECT namespace FROM procedures LIMIT 1")
+        except Exception:
+            await self._db.execute("ALTER TABLE procedures ADD COLUMN namespace TEXT NOT NULL DEFAULT 'global'")
+            await self._db.commit()
 
     async def close(self) -> None:
         if self._db and self._owns_db:
@@ -129,10 +140,10 @@ class ProceduralMemory:
 
         await self._db.execute(
             """INSERT INTO procedures
-               (id, name, description, trigger_patterns_json, steps_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (id, name, description, trigger_patterns_json, steps_json, namespace, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (proc_id, name, description,
-             json.dumps(trigger_patterns), json.dumps(steps_data), time.time()),
+             json.dumps(trigger_patterns), json.dumps(steps_data), self._namespace, time.time()),
         )
         await self._db.commit()
 
@@ -151,7 +162,8 @@ class ProceduralMemory:
         query_lower = query.lower()
 
         rows = await self._db.execute_fetchall(
-            "SELECT * FROM procedures ORDER BY success_count DESC",
+            "SELECT * FROM procedures WHERE namespace = ? ORDER BY success_count DESC",
+            (self._namespace,),
         )
 
         matches: list[Procedure] = []
@@ -169,37 +181,51 @@ class ProceduralMemory:
         assert self._db is not None
         col = "success_count" if success else "failure_count"
         await self._db.execute(
-            f"UPDATE procedures SET {col} = {col} + 1, last_used = ? WHERE id = ?",
-            (time.time(), proc_id),
+            f"UPDATE procedures SET {col} = {col} + 1, last_used = ? "
+            "WHERE id = ? AND namespace = ?",
+            (time.time(), proc_id, self._namespace),
         )
         await self._db.commit()
 
     async def get_all(self, limit: int = 50) -> list[Procedure]:
-        """Get all stored procedures."""
+        """Get all stored procedures in this namespace."""
         assert self._db is not None
         rows = await self._db.execute_fetchall(
-            "SELECT * FROM procedures ORDER BY last_used DESC LIMIT ?", (limit,),
+            "SELECT * FROM procedures WHERE namespace = ? ORDER BY last_used DESC LIMIT ?",
+            (self._namespace, limit),
         )
         return [self._row_to_procedure(r) for r in rows]
 
     async def delete(self, proc_id: str) -> None:
         """Delete a procedure."""
         assert self._db is not None
-        await self._db.execute("DELETE FROM procedures WHERE id = ?", (proc_id,))
+        await self._db.execute(
+            "DELETE FROM procedures WHERE id = ? AND namespace = ?",
+            (proc_id, self._namespace),
+        )
         await self._db.commit()
 
     async def count(self) -> int:
-        """Total number of stored procedures."""
+        """Total number of stored procedures in this namespace."""
         assert self._db is not None
-        row = await self._db.execute_fetchall("SELECT COUNT(*) FROM procedures")
+        row = await self._db.execute_fetchall(
+            "SELECT COUNT(*) FROM procedures WHERE namespace = ?",
+            (self._namespace,),
+        )
         return row[0][0] if row else 0
 
     async def clear(self) -> int:
-        """Delete all procedures. Returns count deleted."""
+        """Delete all procedures in this namespace. Returns count deleted."""
         assert self._db is not None
-        row = await self._db.execute_fetchall("SELECT COUNT(*) FROM procedures")
+        row = await self._db.execute_fetchall(
+            "SELECT COUNT(*) FROM procedures WHERE namespace = ?",
+            (self._namespace,),
+        )
         count = row[0][0] if row else 0
-        await self._db.execute("DELETE FROM procedures")
+        await self._db.execute(
+            "DELETE FROM procedures WHERE namespace = ?",
+            (self._namespace,),
+        )
         await self._db.commit()
         return count
 

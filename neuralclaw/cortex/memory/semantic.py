@@ -75,11 +75,12 @@ class SemanticMemory:
     - Graph traversal queries
     """
 
-    def __init__(self, db_path: str = ":memory:", db_pool: DBPool | None = None) -> None:
+    def __init__(self, db_path: str = ":memory:", db_pool: DBPool | None = None, namespace: str = "global") -> None:
         self._db_path = db_path
         self._db: aiosqlite.Connection | DBPool | None = None
         self._db_pool = db_pool
         self._owns_db = db_pool is None
+        self._namespace = namespace
 
     async def initialize(self) -> None:
         """Initialize database and create tables."""
@@ -97,12 +98,14 @@ class SemanticMemory:
                 name TEXT NOT NULL,
                 entity_type TEXT NOT NULL DEFAULT 'unknown',
                 attributes_json TEXT NOT NULL DEFAULT '{}',
+                namespace TEXT NOT NULL DEFAULT 'global',
                 created_at REAL NOT NULL DEFAULT (unixepoch('now')),
                 updated_at REAL NOT NULL DEFAULT (unixepoch('now'))
             );
 
             CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
             CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
+            CREATE INDEX IF NOT EXISTS idx_entities_namespace ON entities(namespace);
 
             CREATE TABLE IF NOT EXISTS relationships (
                 id TEXT PRIMARY KEY,
@@ -111,14 +114,28 @@ class SemanticMemory:
                 relation_type TEXT NOT NULL,
                 confidence REAL NOT NULL DEFAULT 0.8,
                 source_event_id TEXT,
+                namespace TEXT NOT NULL DEFAULT 'global',
                 created_at REAL NOT NULL DEFAULT (unixepoch('now'))
             );
 
             CREATE INDEX IF NOT EXISTS idx_rel_from ON relationships(from_entity_id);
             CREATE INDEX IF NOT EXISTS idx_rel_to ON relationships(to_entity_id);
             CREATE INDEX IF NOT EXISTS idx_rel_type ON relationships(relation_type);
+            CREATE INDEX IF NOT EXISTS idx_rel_namespace ON relationships(namespace);
         """)
         await self._db.commit()
+
+        # Migrate: add namespace column to existing tables if missing
+        try:
+            await self._db.execute("SELECT namespace FROM entities LIMIT 1")
+        except Exception:
+            await self._db.execute("ALTER TABLE entities ADD COLUMN namespace TEXT NOT NULL DEFAULT 'global'")
+            await self._db.commit()
+        try:
+            await self._db.execute("SELECT namespace FROM relationships LIMIT 1")
+        except Exception:
+            await self._db.execute("ALTER TABLE relationships ADD COLUMN namespace TEXT NOT NULL DEFAULT 'global'")
+            await self._db.commit()
 
     async def upsert_entity(
         self,
@@ -130,11 +147,11 @@ class SemanticMemory:
         assert self._db is not None
         now = time.time()
 
-        # Check if entity exists (by name + type)
+        # Check if entity exists (by name + type + namespace)
         row = await self._db.execute_fetchall(
             "SELECT id, name, entity_type, attributes_json, created_at, updated_at "
-            "FROM entities WHERE name = ? AND entity_type = ?",
-            (name, entity_type),
+            "FROM entities WHERE name = ? AND entity_type = ? AND namespace = ?",
+            (name, entity_type, self._namespace),
         )
 
         if row:
@@ -160,9 +177,9 @@ class SemanticMemory:
                 updated_at=now,
             )
             await self._db.execute(
-                "INSERT INTO entities (id, name, entity_type, attributes_json, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (entity.id, entity.name, entity.entity_type, json.dumps(entity.attributes), now, now),
+                "INSERT INTO entities (id, name, entity_type, attributes_json, namespace, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (entity.id, entity.name, entity.entity_type, json.dumps(entity.attributes), self._namespace, now, now),
             )
             await self._db.commit()
             return entity
@@ -192,8 +209,9 @@ class SemanticMemory:
         existing = await self._db.execute_fetchall(
             "SELECT r.id, e.name FROM relationships r "
             "JOIN entities e ON e.id = r.to_entity_id "
-            "WHERE r.from_entity_id = ? AND r.relation_type = ? AND r.to_entity_id != ?",
-            (from_entity.id, relation_type, to_entity.id),
+            "WHERE r.from_entity_id = ? AND r.relation_type = ? "
+            "AND r.to_entity_id != ? AND r.namespace = ? AND e.namespace = ?",
+            (from_entity.id, relation_type, to_entity.id, self._namespace, self._namespace),
         )
 
         # If contradiction found with lower confidence, reduce its confidence
@@ -215,20 +233,20 @@ class SemanticMemory:
         )
 
         await self._db.execute(
-            "INSERT INTO relationships (id, from_entity_id, to_entity_id, relation_type, confidence, source_event_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (rel.id, rel.from_entity_id, rel.to_entity_id, rel.relation_type, rel.confidence, rel.source_event_id, rel.created_at),
+            "INSERT INTO relationships (id, from_entity_id, to_entity_id, relation_type, confidence, source_event_id, namespace, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (rel.id, rel.from_entity_id, rel.to_entity_id, rel.relation_type, rel.confidence, rel.source_event_id, self._namespace, rel.created_at),
         )
         await self._db.commit()
         return rel
 
     async def query_entity(self, name: str) -> Entity | None:
-        """Look up an entity by name."""
+        """Look up an entity by name within this namespace."""
         assert self._db is not None
         rows = await self._db.execute_fetchall(
             "SELECT id, name, entity_type, attributes_json, created_at, updated_at "
-            "FROM entities WHERE name = ?",
-            (name,),
+            "FROM entities WHERE name = ? AND namespace = ?",
+            (name, self._namespace),
         )
         return self._row_to_entity(rows[0]) if rows else None
 
@@ -250,8 +268,9 @@ class SemanticMemory:
                    JOIN entities ef ON ef.id = r.from_entity_id
                    JOIN entities et ON et.id = r.to_entity_id
                    WHERE ef.name = ? AND r.confidence >= ?
+                   AND r.namespace = ? AND ef.namespace = ? AND et.namespace = ?
                    ORDER BY r.confidence DESC""",
-                (entity_name, min_confidence),
+                (entity_name, min_confidence, self._namespace, self._namespace, self._namespace),
             )
             for row in rows:
                 triples.append(KnowledgeTriple(
@@ -265,8 +284,9 @@ class SemanticMemory:
                    JOIN entities ef ON ef.id = r.from_entity_id
                    JOIN entities et ON et.id = r.to_entity_id
                    WHERE et.name = ? AND r.confidence >= ?
+                   AND r.namespace = ? AND ef.namespace = ? AND et.namespace = ?
                    ORDER BY r.confidence DESC""",
-                (entity_name, min_confidence),
+                (entity_name, min_confidence, self._namespace, self._namespace, self._namespace),
             )
             for row in rows:
                 triples.append(KnowledgeTriple(
@@ -287,14 +307,14 @@ class SemanticMemory:
         if entity_type:
             rows = await self._db.execute_fetchall(
                 "SELECT id, name, entity_type, attributes_json, created_at, updated_at "
-                "FROM entities WHERE name LIKE ? AND entity_type = ? LIMIT ?",
-                (f"%{query}%", entity_type, limit),
+                "FROM entities WHERE name LIKE ? AND entity_type = ? AND namespace = ? LIMIT ?",
+                (f"%{query}%", entity_type, self._namespace, limit),
             )
         else:
             rows = await self._db.execute_fetchall(
                 "SELECT id, name, entity_type, attributes_json, created_at, updated_at "
-                "FROM entities WHERE name LIKE ? LIMIT ?",
-                (f"%{query}%", limit),
+                "FROM entities WHERE name LIKE ? AND namespace = ? LIMIT ?",
+                (f"%{query}%", self._namespace, limit),
             )
 
         return [self._row_to_entity(r) for r in rows]
@@ -312,10 +332,10 @@ class SemanticMemory:
                FROM relationships r
                JOIN entities ef ON ef.id = r.from_entity_id
                JOIN entities et ON et.id = r.to_entity_id
-               WHERE r.confidence >= ?
+               WHERE r.confidence >= ? AND r.namespace = ?
                ORDER BY r.confidence DESC
                LIMIT ?""",
-            (min_confidence, limit),
+            (min_confidence, self._namespace, limit),
         )
 
         return [
@@ -324,18 +344,30 @@ class SemanticMemory:
         ]
 
     async def count(self) -> int:
-        """Total number of entities stored."""
+        """Total number of entities in this namespace."""
         assert self._db is not None
-        row = await self._db.execute_fetchall("SELECT COUNT(*) FROM entities")
+        row = await self._db.execute_fetchall(
+            "SELECT COUNT(*) FROM entities WHERE namespace = ?",
+            (self._namespace,),
+        )
         return row[0][0] if row else 0
 
     async def clear(self) -> int:
-        """Delete all entities and relationships. Returns entity count deleted."""
+        """Delete all entities and relationships in this namespace."""
         assert self._db is not None
-        row = await self._db.execute_fetchall("SELECT COUNT(*) FROM entities")
+        row = await self._db.execute_fetchall(
+            "SELECT COUNT(*) FROM entities WHERE namespace = ?",
+            (self._namespace,),
+        )
         count = row[0][0] if row else 0
-        await self._db.execute("DELETE FROM relationships")
-        await self._db.execute("DELETE FROM entities")
+        await self._db.execute(
+            "DELETE FROM relationships WHERE namespace = ?",
+            (self._namespace,),
+        )
+        await self._db.execute(
+            "DELETE FROM entities WHERE namespace = ?",
+            (self._namespace,),
+        )
         await self._db.commit()
         return count
 

@@ -1,6 +1,7 @@
-// NeuralClaw Desktop — Main App Component
+// NeuralClaw Desktop - Main App Component
 
-import { useState } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { useAppStore } from './store/appStore';
 import { useHealth } from './hooks/useHealth';
 import { useBackend } from './hooks/useBackend';
@@ -15,25 +16,51 @@ import WorkflowPage from './views/WorkflowPage';
 import DashboardPage from './views/DashboardPage';
 import AboutPage from './views/AboutPage';
 
+const AgentsPage = lazy(() => import('./views/AgentsPage'));
+const AvatarWindow = lazy(() => import('./avatar/AvatarWindow'));
+
+const currentWindow = getCurrentWebviewWindow();
+const isAvatarWindow = currentWindow.label === 'avatar' || window.location.pathname === '/avatar';
+
 export default function App() {
   const { setupComplete, isLocked, biometricEnabled } = useAppStore();
-  const [currentView, setCurrentView] = useState('chat');
+  const [currentView, setCurrentView] = useState(() => localStorage.getItem('neuralclaw_current_view') || 'chat');
 
-  // Start health polling & WebSocket connection
   useHealth();
   useBackend();
 
-  // Show lock screen if biometrics enabled and locked
+  useEffect(() => {
+    if (isAvatarWindow) return;
+    const handleNavigate = (event: Event) => {
+      const nextView = (event as CustomEvent<string>).detail || 'chat';
+      setCurrentView(nextView);
+    };
+    window.addEventListener('neuralclaw:navigate', handleNavigate as EventListener);
+    return () => window.removeEventListener('neuralclaw:navigate', handleNavigate as EventListener);
+  }, []);
+
+  useEffect(() => {
+    if (!isAvatarWindow) {
+      localStorage.setItem('neuralclaw_current_view', currentView);
+    }
+  }, [currentView]);
+
+  if (isAvatarWindow) {
+    return (
+      <Suspense fallback={null}>
+        <AvatarWindow />
+      </Suspense>
+    );
+  }
+
   if (biometricEnabled && isLocked) {
     return <LockView />;
   }
 
-  // Show wizard if setup not complete
   if (!setupComplete) {
     return <WizardShell />;
   }
 
-  // Main app layout
   const renderView = () => {
     switch (currentView) {
       case 'chat': return <ChatPage />;
@@ -41,6 +68,12 @@ export default function App() {
       case 'memory': return <MemoryPage />;
       case 'knowledge': return <KnowledgePage />;
       case 'workflows': return <WorkflowPage />;
+      case 'agents':
+        return (
+          <Suspense fallback={null}>
+            <AgentsPage />
+          </Suspense>
+        );
       case 'dashboard': return <DashboardPage />;
       case 'about': return <AboutPage />;
       default: return <ChatPage />;

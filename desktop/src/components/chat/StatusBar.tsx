@@ -1,19 +1,23 @@
-// NeuralClaw Desktop — Status Bar
+// NeuralClaw Desktop - Status Bar
 
 import { useAppStore } from '../../store/appStore';
 
 interface Props {
   onClear: () => void;
+  sessionCount: number;
 }
 
-export default function StatusBar({ onClear }: Props) {
+export default function StatusBar({ onClear, sessionCount }: Props) {
   const { connectionStatus, backendVersion } = useAppStore();
 
   return (
     <div className="chat-status-bar">
       <button className="btn btn-ghost btn-sm" onClick={onClear}>
-        🗑 Clear
+        Clear Session
       </button>
+      <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+        {sessionCount} session{sessionCount === 1 ? '' : 's'}
+      </span>
       <span style={{ fontFamily: 'var(--font-mono)' }}>
         {backendVersion ? `NeuralClaw v${backendVersion}` : 'NeuralClaw'}
       </span>

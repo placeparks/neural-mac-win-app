@@ -343,6 +343,25 @@ class EpisodicMemory:
         )
         return [self._row_to_episode(row) for row in rows]
 
+    async def get_for_namespace(
+        self,
+        namespace: str,
+        limit: int = 50,
+    ) -> list[Episode]:
+        """Get recent episodes scoped to a memory namespace (matches author field)."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            """SELECT id, timestamp, source, author, content,
+                      importance, emotional_valence, tags_json,
+                      access_count, last_accessed
+               FROM episodes
+               WHERE author = ?
+               ORDER BY timestamp DESC
+               LIMIT ?""",
+            (namespace, limit),
+        )
+        return [self._row_to_episode(row) for row in rows]
+
     async def clear(self) -> int:
         """Delete all episodes and rebuild FTS index. Returns count deleted."""
         assert self._db is not None

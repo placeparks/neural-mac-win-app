@@ -3,6 +3,8 @@
 // Registers plugins, IPC commands, and sets up the system tray.
 
 mod commands;
+mod avatar;
+mod chat_sessions;
 mod sidecar;
 mod tray;
 
@@ -14,6 +16,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(std::sync::Mutex::new(sidecar::SidecarState::default()))
+        .manage(std::sync::Mutex::new(avatar::AvatarWindowState::default()))
         .invoke_handler(tauri::generate_handler![
             commands::get_health,
             commands::send_message,
@@ -39,6 +42,22 @@ pub fn run() {
             commands::start_backend,
             commands::stop_backend,
             commands::get_backend_status,
+            chat_sessions::get_chat_bootstrap,
+            chat_sessions::create_chat_session,
+            chat_sessions::switch_chat_session,
+            chat_sessions::rename_chat_session,
+            chat_sessions::delete_chat_session,
+            chat_sessions::clear_chat_session,
+            chat_sessions::save_chat_draft,
+            chat_sessions::save_chat_message,
+            avatar::get_avatar_state,
+            avatar::toggle_avatar_window,
+            avatar::set_avatar_position,
+            avatar::set_avatar_anchor,
+            avatar::anchor_to_taskbar,
+            avatar::update_avatar_settings,
+            avatar::open_main_window,
+            avatar::save_avatar_model,
         ])
         .setup(|app| {
             // Build system tray

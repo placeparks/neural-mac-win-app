@@ -76,6 +76,8 @@ from neuralclaw.swarm.consensus import ConsensusProtocol
 from neuralclaw.swarm.mesh import AgentMesh
 from neuralclaw.swarm.federation import FederationProtocol, FederationBridge
 from neuralclaw.swarm.spawn import AgentSpawner
+from neuralclaw.swarm.agent_store import AgentStore
+from neuralclaw.cortex.memory.shared import SharedMemoryBridge
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +314,18 @@ class NeuralClawGateway:
         self._federation_bridge: FederationBridge | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
 
+        # Agent persistence + shared memory
+        self._agent_store: AgentStore | None = None
+        self._shared_bridge: SharedMemoryBridge | None = None
+
         if feat.swarm and self._mesh and self._delegation:
             self._spawner = AgentSpawner(self._mesh, self._delegation, self._bus)
+            # Agent store for persistent definitions
+            agent_db = self._config.memory.db_path.replace(".db", "-agents.db")
+            self._agent_store = AgentStore(agent_db)
+            # Shared memory bridge for cross-agent collaboration
+            shared_db = self._config.memory.db_path.replace(".db", "-shared.db")
+            self._shared_bridge = SharedMemoryBridge(shared_db)
 
             fed_cfg = self._config.federation
             if fed_cfg.enabled:
@@ -441,6 +453,12 @@ class NeuralClawGateway:
             await self._knowledge_base.initialize()
         if self._workflow_engine:
             await self._workflow_engine.initialize()
+
+        # Initialize agent store + shared memory bridge
+        if self._agent_store:
+            await self._agent_store.initialize()
+        if self._shared_bridge:
+            await self._shared_bridge.initialize()
 
         # Initialize idempotency store
         await self._idempotency.initialize()
@@ -721,6 +739,22 @@ class NeuralClawGateway:
             if self._spawner:
                 self._dashboard.set_spawn_action(self._dashboard_spawn)
                 self._dashboard.set_despawn_action(self._dashboard_despawn)
+            # Agent definition CRUD actions
+            if self._agent_store:
+                self._dashboard.set_agent_definition_actions(
+                    list_fn=self._dashboard_list_definitions,
+                    create_fn=self._dashboard_create_definition,
+                    update_fn=self._dashboard_update_definition,
+                    delete_fn=self._dashboard_delete_definition,
+                    spawn_fn=self._dashboard_spawn_definition,
+                    despawn_fn=self._dashboard_despawn_definition,
+                    running_fn=self._dashboard_get_running_agents,
+                    delegate_fn=self._dashboard_delegate_task,
+                    shared_task_create_fn=self._dashboard_create_shared_task,
+                    shared_task_get_fn=self._dashboard_get_shared_task,
+                    memories_fn=self._dashboard_get_agent_memories,
+                    activity_fn=self._dashboard_get_agent_activity,
+                )
             if self._federation:
                 self._dashboard.set_join_federation_action(self._federation.join_federation)
                 self._dashboard.set_message_peer_action(self._dashboard_message_peer)
@@ -755,6 +789,25 @@ class NeuralClawGateway:
             await self._federation_bridge.start(
                 sync_interval=self._config.federation.heartbeat_interval,
             )
+
+        # Auto-start saved agent definitions
+        if self._agent_store and self._spawner:
+            try:
+                auto_agents = await self._agent_store.get_auto_start()
+                for defn in auto_agents:
+                    try:
+                        self._spawner.spawn_from_definition(
+                            defn,
+                            episodic=self._episodic,
+                            semantic=self._semantic,
+                            procedural=self._procedural,
+                            shared_bridge=self._shared_bridge,
+                        )
+                        print(f"   Agent auto-started: {defn.name} ({defn.provider}/{defn.model})")
+                    except Exception as e:
+                        self._logger.warning("Failed to auto-start agent %s: %s", defn.name, e)
+            except Exception as e:
+                self._logger.warning("Failed to load auto-start agents: %s", e)
 
     def _build_provider(self) -> ProviderRouter | None:
         """Build the provider router from config."""
@@ -2584,6 +2637,316 @@ class NeuralClawGateway:
         if not self._spawner:
             return False
         return self._spawner.despawn(name)
+
+    # -- Agent definition CRUD (for dashboard) ---------------------------------
+
+    async def _dashboard_list_definitions(self) -> list[dict]:
+        if not self._agent_store:
+            return []
+        defns = await self._agent_store.list_all()
+        return [d.to_dict() for d in defns]
+
+    async def _dashboard_create_definition(self, data: dict) -> dict:
+        if not self._agent_store:
+            return {"ok": False, "error": "Agent store not available"}
+        from neuralclaw.swarm.agent_store import AgentDefinition
+        try:
+            defn = AgentDefinition(
+                agent_id="",
+                name=data.get("name", ""),
+                description=data.get("description", ""),
+                capabilities=data.get("capabilities", []),
+                provider=data.get("provider", "local"),
+                model=data.get("model", ""),
+                base_url=data.get("base_url", ""),
+                api_key=data.get("api_key", ""),
+                system_prompt=data.get("system_prompt", ""),
+                memory_namespace=data.get("memory_namespace", ""),
+                auto_start=data.get("auto_start", False),
+                metadata=data.get("metadata", {}),
+            )
+            agent_id = await self._agent_store.create(defn)
+            return {"ok": True, "agent_id": agent_id}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    async def _dashboard_update_definition(self, agent_id: str, data: dict) -> dict:
+        if not self._agent_store:
+            return {"ok": False, "error": "Agent store not available"}
+        try:
+            ok = await self._agent_store.update(agent_id, **data)
+            return {"ok": ok}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    async def _dashboard_delete_definition(self, agent_id: str) -> dict:
+        if not self._agent_store:
+            return {"ok": False, "error": "Agent store not available"}
+        ok = await self._agent_store.delete(agent_id)
+        return {"ok": ok}
+
+    async def _dashboard_spawn_definition(self, agent_id: str) -> dict:
+        if not self._agent_store or not self._spawner:
+            return {"ok": False, "error": "Agent store or spawner not available"}
+        defn = await self._agent_store.get(agent_id)
+        if not defn:
+            return {"ok": False, "error": "Agent definition not found"}
+        try:
+            self._spawner.spawn_from_definition(
+                defn,
+                episodic=self._episodic,
+                semantic=self._semantic,
+                procedural=self._procedural,
+                shared_bridge=self._shared_bridge,
+            )
+            return {"ok": True, "name": defn.name}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    async def _dashboard_despawn_definition(self, agent_id: str) -> dict:
+        if not self._agent_store or not self._spawner:
+            return {"ok": False, "error": "Agent store or spawner not available"}
+        defn = await self._agent_store.get(agent_id)
+        if not defn:
+            return {"ok": False, "error": "Agent definition not found"}
+        ok = self._spawner.despawn(defn.name)
+        return {"ok": ok}
+
+    def _dashboard_get_running_agents(self) -> list[dict]:
+        if not self._spawner:
+            return []
+        return self._spawner.get_status()
+
+    def _dashboard_get_agent_activity(self, limit: int = 50) -> list[dict]:
+        if not self._mesh:
+            return []
+        return self._mesh.get_recent_messages(limit=limit)
+
+    async def _dashboard_get_agent_memories(self, agent_name: str) -> dict:
+        if not self._agent_store:
+            return {"ok": False, "error": "Agent store not available"}
+        defn = await self._agent_store.get_by_name(agent_name)
+        if not defn:
+            return {"ok": False, "error": "Agent definition not found"}
+
+        namespace = defn.memory_namespace or f"agent:{defn.name}"
+        episodic = await self._episodic.get_for_namespace(namespace, limit=10) if self._episodic else []
+
+        semantic_triples: list[dict[str, Any]] = []
+        if self._semantic:
+            semantic_mem = SemanticMemory(
+                db_path=self._semantic._db_path,
+                db_pool=self._semantic._db_pool,
+                namespace=namespace,
+            )
+            semantic_mem._db = self._semantic._db
+            semantic_triples = [
+                {
+                    "subject": triple.subject,
+                    "predicate": triple.predicate,
+                    "object": triple.obj,
+                    "confidence": triple.confidence,
+                }
+                for triple in await semantic_mem.get_all_triples(limit=12)
+            ]
+
+        procedures: list[dict[str, Any]] = []
+        if self._procedural:
+            procedural_mem = ProceduralMemory(
+                db_path=self._procedural._db_path,
+                bus=self._procedural._bus,
+                db_pool=self._procedural._db_pool,
+                namespace=namespace,
+            )
+            procedural_mem._db = self._procedural._db
+            procedures = [
+                {
+                    "id": proc.id,
+                    "name": proc.name,
+                    "description": proc.description,
+                    "success_rate": proc.success_rate,
+                    "last_used": proc.last_used,
+                }
+                for proc in await procedural_mem.get_all(limit=8)
+            ]
+
+        return {
+            "ok": True,
+            "namespace": namespace,
+            "episodic": [
+                {
+                    "id": ep.id,
+                    "content": ep.content,
+                    "timestamp": ep.timestamp,
+                    "source": ep.source,
+                    "importance": ep.importance,
+                }
+                for ep in episodic
+            ],
+            "semantic": semantic_triples,
+            "procedural": procedures,
+        }
+
+    async def _dashboard_delegate_task(self, payload: dict[str, Any]) -> dict:
+        if not self._delegation:
+            return {"ok": False, "error": "Delegation not available"}
+        from neuralclaw.swarm.delegation import DelegationContext
+
+        task = str(payload.get("task", "")).strip()
+        agent_name = str(payload.get("agent_name", "")).strip()
+        agent_names = [
+            str(name).strip()
+            for name in payload.get("agent_names", [])
+            if str(name).strip()
+        ]
+        shared_task_id = str(payload.get("shared_task_id", "")).strip()
+
+        targets = agent_names or ([agent_name] if agent_name else [])
+        if not task or not targets:
+            return {"ok": False, "error": "task and target agent required"}
+
+        ctx = DelegationContext(
+            task_description=task,
+            constraints={"shared_task_id": shared_task_id} if shared_task_id else {},
+        )
+
+        def log_activity(
+            from_agent: str,
+            to_agent: str,
+            content: str,
+            message_type: str,
+            correlation_id: str | None = None,
+            extra_payload: dict[str, Any] | None = None,
+        ) -> str | None:
+            if not self._mesh:
+                return None
+            event = self._mesh.record_message(
+                from_agent=from_agent,
+                to_agent=to_agent,
+                content=content,
+                message_type=message_type,
+                payload={
+                    **({"shared_task_id": shared_task_id} if shared_task_id else {}),
+                    **(extra_payload or {}),
+                },
+                correlation_id=correlation_id,
+            )
+            return event.id
+
+        try:
+            if len(targets) == 1:
+                request_id = log_activity(
+                    from_agent="dashboard",
+                    to_agent=targets[0],
+                    content=task,
+                    message_type="delegation",
+                )
+                result = await self._delegation.delegate(targets[0], ctx)
+                log_activity(
+                    from_agent=targets[0],
+                    to_agent="dashboard",
+                    content=result.result or result.error or result.status.name.lower(),
+                    message_type="delegation_result",
+                    correlation_id=request_id,
+                    extra_payload={
+                        "status": result.status.name.lower(),
+                        "confidence": result.confidence,
+                        "error": result.error,
+                    },
+                )
+                return {
+                    "ok": True,
+                    "status": result.status.name.lower(),
+                    "result": result.result or "",
+                    "confidence": result.confidence,
+                    "results": [
+                        {
+                            "agent": targets[0],
+                            "status": result.status.name.lower(),
+                            "result": result.result or "",
+                            "confidence": result.confidence,
+                        }
+                    ],
+                    "shared_task_id": shared_task_id or None,
+                }
+
+            request_ids = {
+                name: log_activity(
+                    from_agent="dashboard",
+                    to_agent=name,
+                    content=task,
+                    message_type="delegation",
+                )
+                for name in targets
+            }
+            results = await self._delegation.delegate_parallel([(name, ctx) for name in targets])
+            for agent, res in zip(targets, results, strict=False):
+                log_activity(
+                    from_agent=agent,
+                    to_agent="dashboard",
+                    content=res.result or res.error or res.status.name.lower(),
+                    message_type="delegation_result",
+                    correlation_id=request_ids.get(agent),
+                    extra_payload={
+                        "status": res.status.name.lower(),
+                        "confidence": res.confidence,
+                        "error": res.error,
+                    },
+                )
+            return {
+                "ok": True,
+                "status": "completed",
+                "result": "\n\n".join(
+                    f"[{agent}] {res.result}".strip()
+                    for agent, res in zip(targets, results, strict=False)
+                ).strip(),
+                "results": [
+                    {
+                        "agent": agent,
+                        "status": res.status.name.lower(),
+                        "result": res.result or "",
+                        "confidence": res.confidence,
+                        "error": res.error,
+                    }
+                    for agent, res in zip(targets, results, strict=False)
+                ],
+                "shared_task_id": shared_task_id or None,
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    async def _dashboard_create_shared_task(self, agent_names: list[str]) -> dict:
+        if not self._shared_bridge:
+            return {"ok": False, "error": "Shared memory not available"}
+        task = await self._shared_bridge.create_shared_task(agent_names)
+        return {"ok": True, "task_id": task.task_id}
+
+    async def _dashboard_get_shared_task(self, task_id: str) -> dict:
+        if not self._shared_bridge:
+            return {"ok": False, "error": "Shared memory not available"}
+        task = await self._shared_bridge.get_task(task_id)
+        if not task:
+            return {"ok": False, "error": "Task not found"}
+        memories = await self._shared_bridge.get_shared_memories(task_id)
+        return {
+            "ok": True,
+            "task": {
+                "task_id": task.task_id,
+                "agents": task.agents,
+                "status": task.status,
+                "created_at": task.created_at,
+            },
+            "memories": [
+                {
+                    "id": m.id,
+                    "from_agent": m.from_agent,
+                    "content": m.content,
+                    "memory_type": m.memory_type,
+                    "timestamp": m.timestamp,
+                }
+                for m in memories
+            ],
+        }
 
     async def _dashboard_send_message(self, content: str) -> str:
         """Send a test message through the full cognitive pipeline."""

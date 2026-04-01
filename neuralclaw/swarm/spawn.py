@@ -20,6 +20,11 @@ from neuralclaw.swarm.delegation import (
 )
 from neuralclaw.swarm.mesh import AgentMesh, MeshMessage
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from neuralclaw.swarm.agent_runtime import AgentRuntime
+    from neuralclaw.swarm.agent_store import AgentDefinition
+
 MessageHandler = Callable[[MeshMessage], Awaitable[MeshMessage | None]]
 
 
@@ -56,6 +61,7 @@ class AgentSpawner:
         self._delegation = delegation
         self._bus = bus
         self._agents: dict[str, SpawnedAgent] = {}
+        self._runtimes: dict[str, "AgentRuntime"] = {}
 
     @property
     def agents(self) -> dict[str, SpawnedAgent]:
@@ -81,6 +87,9 @@ class AgentSpawner:
         Registers in both mesh and delegation chain. If no executor is
         provided, a default wrapper around the handler is created.
         """
+        if name in self._agents:
+            return self._agents[name]
+
         card = self._mesh.register(
             name=name,
             description=description,
@@ -194,6 +203,75 @@ class AgentSpawner:
 
         return agent
 
+    def spawn_from_definition(
+        self,
+        defn: "AgentDefinition",
+        episodic: Any | None = None,
+        semantic: Any | None = None,
+        procedural: Any | None = None,
+        shared_bridge: Any | None = None,
+    ) -> SpawnedAgent:
+        """
+        Spawn a local agent from a persistent AgentDefinition.
+
+        Creates an AgentRuntime with its own provider + memory namespace,
+        then registers it in the mesh and delegation chain.
+        """
+        from neuralclaw.swarm.agent_runtime import AgentRuntime
+        from neuralclaw.cortex.memory.procedural import ProceduralMemory
+        from neuralclaw.cortex.memory.semantic import SemanticMemory
+
+        if defn.name in self._agents:
+            return self._agents[defn.name]
+
+        # Build namespaced semantic memory if a base semantic instance is provided
+        namespaced_semantic = None
+        if semantic is not None:
+            namespaced_semantic = SemanticMemory(
+                db_path=semantic._db_path,
+                db_pool=semantic._db_pool,
+                namespace=defn.memory_namespace or f"agent:{defn.name}",
+            )
+            namespaced_semantic._db = semantic._db
+
+        namespaced_procedural = None
+        if procedural is not None:
+            namespaced_procedural = ProceduralMemory(
+                db_path=procedural._db_path,
+                bus=procedural._bus,
+                db_pool=procedural._db_pool,
+                namespace=defn.memory_namespace or f"agent:{defn.name}",
+            )
+            namespaced_procedural._db = procedural._db
+
+        runtime = AgentRuntime(
+            definition=defn,
+            episodic=episodic,
+            semantic=namespaced_semantic,
+            procedural=namespaced_procedural,
+            shared_bridge=shared_bridge,
+        )
+        self._runtimes[defn.name] = runtime
+
+        return self.spawn_local(
+            name=defn.name,
+            description=defn.description,
+            capabilities=defn.capabilities,
+            handler=runtime.handle_message,
+            executor=runtime.handle_delegation,
+            metadata={
+                "agent_id": defn.agent_id,
+                "provider": defn.provider,
+                "model": defn.model,
+                "source": "definition",
+                "memory_namespace": defn.memory_namespace,
+            },
+        )
+
+    def get_runtime(self, name: str) -> "AgentRuntime | None":
+        """Get the runtime for a spawned agent."""
+        return self._runtimes.get(name)
+
     def despawn(self, name: str) -> bool:
         """Remove an agent from mesh, delegation, and spawner registry."""
         if name not in self._agents:
@@ -201,6 +279,7 @@ class AgentSpawner:
 
         self._mesh.unregister(name)
         self._delegation.unregister_executor(name)
+        self._runtimes.pop(name, None)
         del self._agents[name]
 
         if self._bus:
@@ -217,8 +296,13 @@ class AgentSpawner:
                 "name": a.name,
                 "description": a.description,
                 "capabilities": a.capabilities,
+                "status": (self._mesh.get_agent(a.name).status.name.lower() if self._mesh.get_agent(a.name) else "offline"),
+                "active_tasks": (self._mesh.get_agent(a.name).active_tasks if self._mesh.get_agent(a.name) else 0),
                 "source": a.source,
                 "endpoint": a.endpoint or "local",
+                "provider": a.metadata.get("provider", ""),
+                "model": a.metadata.get("model", ""),
+                "memory_namespace": a.metadata.get("memory_namespace", ""),
             }
             for a in self._agents.values()
         ]

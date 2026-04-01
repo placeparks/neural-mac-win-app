@@ -1,14 +1,15 @@
 // NeuralClaw Desktop — Input Bar
 
-import { useState, useRef, useEffect } from 'react';
+import { useRef, useEffect } from 'react';
 
 interface Props {
   onSend: (message: string) => void;
+  value: string;
+  onChange: (value: string) => void;
   disabled?: boolean;
 }
 
-export default function InputBar({ onSend, disabled }: Props) {
-  const [input, setInput] = useState('');
+export default function InputBar({ onSend, value, onChange, disabled }: Props) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -16,12 +17,11 @@ export default function InputBar({ onSend, disabled }: Props) {
       textareaRef.current.style.height = '24px';
       textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + 'px';
     }
-  }, [input]);
+  }, [value]);
 
   const handleSend = () => {
-    if (input.trim() && !disabled) {
-      onSend(input.trim());
-      setInput('');
+    if (value.trim() && !disabled) {
+      onSend(value.trim());
       if (textareaRef.current) textareaRef.current.style.height = '24px';
     }
   };
@@ -40,8 +40,8 @@ export default function InputBar({ onSend, disabled }: Props) {
           ref={textareaRef}
           className="chat-input"
           placeholder="Message NeuralClaw..."
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
           onKeyDown={handleKeyDown}
           disabled={disabled}
           rows={1}
@@ -49,7 +49,7 @@ export default function InputBar({ onSend, disabled }: Props) {
         <button
           className="chat-send-btn"
           onClick={handleSend}
-          disabled={!input.trim() || disabled}
+          disabled={!value.trim() || disabled}
           aria-label="Send message"
         >
           {disabled ? <span className="spinner" style={{ width: 16, height: 16, borderWidth: 2 }} /> : '⬆'}

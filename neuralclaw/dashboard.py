@@ -659,6 +659,20 @@ class Dashboard:
         self._message_peer_action: Any = None
         self._provider_reset_action: Any = None
 
+        # Agent definition CRUD
+        self._agent_def_list: Any = None
+        self._agent_def_create: Any = None
+        self._agent_def_update: Any = None
+        self._agent_def_delete: Any = None
+        self._agent_def_spawn: Any = None
+        self._agent_def_despawn: Any = None
+        self._agent_running: Any = None
+        self._agent_delegate: Any = None
+        self._shared_task_create: Any = None
+        self._shared_task_get: Any = None
+        self._agent_memories: Any = None
+        self._agent_activity: Any = None
+
     # -- Data provider setters --
 
     def set_stats_provider(self, provider: Any) -> None:
@@ -728,6 +742,34 @@ class Dashboard:
     def set_provider_reset_action(self, action: Any) -> None:
         self._provider_reset_action = action
 
+    def set_agent_definition_actions(
+        self,
+        list_fn: Any = None,
+        create_fn: Any = None,
+        update_fn: Any = None,
+        delete_fn: Any = None,
+        spawn_fn: Any = None,
+        despawn_fn: Any = None,
+        running_fn: Any = None,
+        delegate_fn: Any = None,
+        shared_task_create_fn: Any = None,
+        shared_task_get_fn: Any = None,
+        memories_fn: Any = None,
+        activity_fn: Any = None,
+    ) -> None:
+        self._agent_def_list = list_fn
+        self._agent_def_create = create_fn
+        self._agent_def_update = update_fn
+        self._agent_def_delete = delete_fn
+        self._agent_def_spawn = spawn_fn
+        self._agent_def_despawn = despawn_fn
+        self._agent_running = running_fn
+        self._agent_delegate = delegate_fn
+        self._shared_task_create = shared_task_create_fn
+        self._shared_task_get = shared_task_get_fn
+        self._agent_memories = memories_fn
+        self._agent_activity = activity_fn
+
     # -- Trace push --
 
     def push_trace(self, category: str, message: str, data: dict[str, Any] | None = None) -> None:
@@ -779,6 +821,19 @@ class Dashboard:
         self._app.router.add_post("/api/features", self._handle_set_feature)
         self._app.router.add_post("/api/federation/message", self._handle_message_peer)
         self._app.router.add_post("/api/provider/reset-circuit", self._handle_provider_reset)
+        # Agent definition CRUD routes
+        self._app.router.add_get("/api/agents/definitions", self._handle_agent_def_list)
+        self._app.router.add_post("/api/agents/definitions", self._handle_agent_def_create)
+        self._app.router.add_put("/api/agents/definitions/{agent_id}", self._handle_agent_def_update)
+        self._app.router.add_delete("/api/agents/definitions/{agent_id}", self._handle_agent_def_delete)
+        self._app.router.add_post("/api/agents/definitions/{agent_id}/spawn", self._handle_agent_def_spawn)
+        self._app.router.add_post("/api/agents/definitions/{agent_id}/despawn", self._handle_agent_def_despawn)
+        self._app.router.add_get("/api/agents/running", self._handle_agents_running)
+        self._app.router.add_get("/api/agents/activity", self._handle_agent_activity)
+        self._app.router.add_get("/api/agents/{agent_name}/memories", self._handle_agent_memories)
+        self._app.router.add_post("/api/agents/delegate", self._handle_agent_delegate)
+        self._app.router.add_post("/api/agents/shared-task", self._handle_shared_task_create)
+        self._app.router.add_get("/api/agents/shared-task/{task_id}", self._handle_shared_task_get)
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -1040,6 +1095,158 @@ class Dashboard:
                 await ws_client.send_str(payload)
             except Exception:
                 self._ws_clients.remove(ws_client)
+
+    # -- Agent definition CRUD handlers --
+
+    async def _handle_agent_def_list(self, request: Any) -> Any:
+        if not self._agent_def_list:
+            return web.json_response([])
+        result = self._agent_def_list()
+        if asyncio.iscoroutine(result):
+            result = await result
+        return web.json_response(result)
+
+    async def _handle_agent_def_create(self, request: Any) -> Any:
+        if not self._agent_def_create:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            body = await request.json()
+            result = self._agent_def_create(body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok") else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_agent_def_update(self, request: Any) -> Any:
+        if not self._agent_def_update:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            agent_id = request.match_info["agent_id"]
+            body = await request.json()
+            result = self._agent_def_update(agent_id, body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_agent_def_delete(self, request: Any) -> Any:
+        if not self._agent_def_delete:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            agent_id = request.match_info["agent_id"]
+            result = self._agent_def_delete(agent_id)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_agent_def_spawn(self, request: Any) -> Any:
+        if not self._agent_def_spawn:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            agent_id = request.match_info["agent_id"]
+            result = self._agent_def_spawn(agent_id)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_agent_def_despawn(self, request: Any) -> Any:
+        if not self._agent_def_despawn:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            agent_id = request.match_info["agent_id"]
+            result = self._agent_def_despawn(agent_id)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_agents_running(self, request: Any) -> Any:
+        if not self._agent_running:
+            return web.json_response([])
+        result = self._agent_running()
+        if asyncio.iscoroutine(result):
+            result = await result
+        return web.json_response(result)
+
+    async def _handle_agent_activity(self, request: Any) -> Any:
+        if not self._agent_activity:
+            return web.json_response([])
+        limit = int(request.query.get("limit", "50"))
+        result = self._agent_activity(limit)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return web.json_response(result)
+
+    async def _handle_agent_memories(self, request: Any) -> Any:
+        if not self._agent_memories:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            agent_name = str(request.match_info.get("agent_name", "")).strip()
+            if not agent_name:
+                return web.json_response({"ok": False, "error": "agent_name required"}, status=400)
+            result = self._agent_memories(agent_name)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 404
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_agent_delegate(self, request: Any) -> Any:
+        if not self._agent_delegate:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            body = await request.json()
+            task = str(body.get("task", "")).strip()
+            agent_name = str(body.get("agent_name", "")).strip()
+            agent_names = [
+                str(name).strip()
+                for name in body.get("agent_names", [])
+                if str(name).strip()
+            ]
+            if not task or (not agent_name and not agent_names):
+                return web.json_response({"ok": False, "error": "task and target agent required"}, status=400)
+            result = self._agent_delegate(body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_shared_task_create(self, request: Any) -> Any:
+        if not self._shared_task_create:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            body = await request.json()
+            agents = body.get("agents", [])
+            if not agents:
+                return web.json_response({"ok": False, "error": "agents list required"}, status=400)
+            result = self._shared_task_create(agents)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_shared_task_get(self, request: Any) -> Any:
+        if not self._shared_task_get:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            task_id = request.match_info["task_id"]
+            result = self._shared_task_get(task_id)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
 
     async def _periodic_push(self) -> None:
         while True:
