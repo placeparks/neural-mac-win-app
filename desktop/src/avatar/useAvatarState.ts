@@ -21,6 +21,7 @@ interface AvatarState extends AvatarStatePayload {
   collaborationPulse: boolean;
   hydrate: () => Promise<void>;
   toggleVisible: () => Promise<void>;
+  hide: () => Promise<void>;
   setAnchor: (anchor: AvatarAnchor) => Promise<void>;
   setPosition: (x: number, y: number) => Promise<void>;
   anchorToTaskbar: () => Promise<void>;
@@ -63,6 +64,11 @@ export const useAvatarState = create<AvatarState>((set, get) => ({
 
   toggleVisible: async () => {
     const state = await invoke<AvatarStatePayload>('toggle_avatar_window');
+    set(state);
+  },
+
+  hide: async () => {
+    const state = await invoke<AvatarStatePayload>('hide_avatar_window');
     set(state);
   },
 

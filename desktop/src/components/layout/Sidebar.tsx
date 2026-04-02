@@ -1,6 +1,6 @@
-// NeuralClaw Desktop - Sidebar Navigation
-
 import { useAppStore } from '../../store/appStore';
+import { useAgentStore } from '../../store/agentStore';
+import { useTaskStore } from '../../store/taskStore';
 
 interface Props {
   currentView: string;
@@ -8,23 +8,27 @@ interface Props {
 }
 
 const NAV_ITEMS = [
-  { id: 'chat', icon: '💬', label: 'Chat' },
-  { id: 'memory', icon: '🧠', label: 'Memory' },
-  { id: 'knowledge', icon: '📚', label: 'Knowledge Base' },
-  { id: 'workflows', icon: '⚡', label: 'Workflows' },
-  { id: 'agents', icon: '🤖', label: 'Agents' },
-  { id: 'dashboard', icon: '📊', label: 'Dashboard' },
-  { id: 'settings', icon: '⚙️', label: 'Settings' },
-  { id: 'about', icon: 'ℹ️', label: 'About' },
+  { id: 'chat', icon: 'CH', label: 'Chat' },
+  { id: 'tasks', icon: 'TK', label: 'Tasks' },
+  { id: 'memory', icon: 'MM', label: 'Memory' },
+  { id: 'knowledge', icon: 'KB', label: 'Knowledge Base' },
+  { id: 'workflows', icon: 'WF', label: 'Workflows' },
+  { id: 'agents', icon: 'AG', label: 'Agents' },
+  { id: 'dashboard', icon: 'DB', label: 'Dashboard' },
+  { id: 'settings', icon: 'CF', label: 'Settings' },
+  { id: 'about', icon: 'IN', label: 'About' },
 ];
 
 export default function Sidebar({ currentView, onNavigate }: Props) {
   const { connectionStatus } = useAppStore();
+  const runningAgents = useAgentStore((state) => state.running.length);
+  const tasks = useTaskStore((state) => state.tasks);
+  const activeTasks = tasks.filter((task) => task.status === 'queued' || task.status === 'running').length;
 
   return (
     <aside className="app-sidebar">
       <div className="sidebar-logo">
-        <span className="logo-icon">🧠</span>
+        <span className="logo-icon">NC</span>
         <span>NeuralClaw</span>
       </div>
 
@@ -34,9 +38,12 @@ export default function Sidebar({ currentView, onNavigate }: Props) {
             key={item.id}
             className={`sidebar-link ${currentView === item.id ? 'active' : ''}`}
             onClick={() => onNavigate(item.id)}
+            type="button"
           >
             <span className="link-icon">{item.icon}</span>
-            <span>{item.label}</span>
+            <span className="link-label">{item.label}</span>
+            {item.id === 'tasks' && activeTasks > 0 && <span className="sidebar-pill">{activeTasks}</span>}
+            {item.id === 'agents' && runningAgents > 0 && <span className="sidebar-pill">{runningAgents}</span>}
           </button>
         ))}
       </nav>

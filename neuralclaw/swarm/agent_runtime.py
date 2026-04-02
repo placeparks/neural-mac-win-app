@@ -90,6 +90,111 @@ class AgentRuntime:
         self._shared = shared_bridge
         self._namespace = definition.memory_namespace or f"agent:{definition.name}"
         self._conversation: list[dict[str, str]] = []
+        self._metrics: dict[str, Any] = {
+            "requested_model": definition.model,
+            "effective_model": definition.model,
+            "base_url": definition.base_url,
+            "last_task_at": 0.0,
+            "avg_latency_ms": 0.0,
+            "success_count": 0,
+            "failure_count": 0,
+            "token_usage": {"input": 0, "output": 0, "total": 0},
+            "last_error": "",
+            "recent_tasks": [],
+            "recent_logs": [],
+        }
+
+    def get_metrics(self) -> dict[str, Any]:
+        return {
+            **self._metrics,
+            "token_usage": dict(self._metrics.get("token_usage", {})),
+            "recent_tasks": list(self._metrics.get("recent_tasks", [])),
+            "recent_logs": list(self._metrics.get("recent_logs", [])),
+            "memory_namespace": self._namespace,
+        }
+
+    def update_execution_context(
+        self,
+        *,
+        requested_model: str | None = None,
+        effective_model: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        if requested_model:
+            self._metrics["requested_model"] = requested_model
+        if effective_model:
+            self._metrics["effective_model"] = effective_model
+            self.definition.model = effective_model
+        if base_url:
+            self._metrics["base_url"] = base_url
+            self.definition.base_url = base_url
+
+    def _record_usage(self, usage: dict[str, Any] | None) -> None:
+        if not isinstance(usage, dict):
+            return
+        input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+        token_usage = self._metrics["token_usage"]
+        token_usage["input"] += input_tokens
+        token_usage["output"] += output_tokens
+        token_usage["total"] += total_tokens
+
+    def _approximate_usage(self, messages: list[dict[str, Any]], content: str) -> None:
+        prompt_chars = sum(len(str(message.get("content", ""))) for message in messages)
+        output_chars = len(content)
+        approx_in = max(1, prompt_chars // 4) if prompt_chars else 0
+        approx_out = max(1, output_chars // 4) if output_chars else 0
+        token_usage = self._metrics["token_usage"]
+        token_usage["input"] += approx_in
+        token_usage["output"] += approx_out
+        token_usage["total"] += approx_in + approx_out
+
+    def _record_completion(
+        self,
+        *,
+        task: str,
+        result: str,
+        elapsed_seconds: float,
+        success: bool,
+        error: str = "",
+    ) -> None:
+        latency_ms = elapsed_seconds * 1000.0
+        successes = int(self._metrics["success_count"])
+        failures = int(self._metrics["failure_count"])
+        prev_count = successes + failures
+        self._metrics["avg_latency_ms"] = (
+            ((float(self._metrics["avg_latency_ms"]) * prev_count) + latency_ms) / max(1, prev_count + 1)
+        )
+        self._metrics["last_task_at"] = time.time()
+        if success:
+            self._metrics["success_count"] = successes + 1
+            self._metrics["last_error"] = ""
+        else:
+            self._metrics["failure_count"] = failures + 1
+            self._metrics["last_error"] = error
+
+        recent_tasks = self._metrics["recent_tasks"]
+        recent_tasks.append(
+            {
+                "task": task[:220],
+                "result_preview": (result or error or "").strip()[:280],
+                "success": success,
+                "latency_ms": round(latency_ms, 2),
+                "timestamp": time.time(),
+            }
+        )
+        del recent_tasks[:-8]
+
+        recent_logs = self._metrics["recent_logs"]
+        recent_logs.append(
+            {
+                "timestamp": time.time(),
+                "message": (result or error or "").strip()[:280],
+                "level": "info" if success else "error",
+            }
+        )
+        del recent_logs[:-12]
 
     @property
     def system_prompt(self) -> str:
@@ -103,6 +208,7 @@ class AgentRuntime:
 
     async def handle_message(self, msg: MeshMessage) -> MeshMessage | None:
         """Process an incoming mesh message through this agent's pipeline."""
+        start = time.time()
         try:
             # Build context
             messages = [{"role": "system", "content": self.system_prompt}]
@@ -138,6 +244,10 @@ class AgentRuntime:
             )
 
             result_text = response.content or ""
+            self._record_usage(response.usage or {})
+            if not response.usage:
+                self._approximate_usage(messages, result_text)
+            self._metrics["effective_model"] = response.model or self._metrics["effective_model"]
 
             # Store in conversation history
             self._conversation.append({"role": "user", "content": msg.content})
@@ -161,6 +271,13 @@ class AgentRuntime:
                     memory_type="episodic",
                 )
 
+            self._record_completion(
+                task=msg.content,
+                result=result_text,
+                elapsed_seconds=time.time() - start,
+                success=True,
+            )
+
             return msg.reply(
                 content=result_text,
                 payload={"confidence": 0.8, "model": self.definition.model},
@@ -168,6 +285,13 @@ class AgentRuntime:
 
         except Exception as e:
             log.error("AgentRuntime[%s] error: %s", self.definition.name, e)
+            self._record_completion(
+                task=msg.content,
+                result="",
+                elapsed_seconds=time.time() - start,
+                success=False,
+                error=str(e),
+            )
             return msg.reply(
                 content=f"Error: {e}",
                 payload={"error": str(e)},
@@ -212,6 +336,10 @@ class AgentRuntime:
             )
 
             result_text = response.content or ""
+            self._record_usage(response.usage or {})
+            if not response.usage:
+                self._approximate_usage(messages, result_text)
+            self._metrics["effective_model"] = response.model or self._metrics["effective_model"]
 
             # Store result
             if self._episodic:
@@ -230,20 +358,35 @@ class AgentRuntime:
                     memory_type="delegation",
                 )
 
+            elapsed = time.time() - start
+            self._record_completion(
+                task=ctx.task_description,
+                result=result_text,
+                elapsed_seconds=elapsed,
+                success=True,
+            )
             return DelegationResult(
                 delegation_id="",
                 status=DelegationStatus.COMPLETED,
                 result=result_text,
                 confidence=0.8,
-                elapsed_seconds=time.time() - start,
+                elapsed_seconds=elapsed,
             )
 
         except Exception as e:
+            elapsed = time.time() - start
+            self._record_completion(
+                task=ctx.task_description,
+                result="",
+                elapsed_seconds=elapsed,
+                success=False,
+                error=str(e),
+            )
             return DelegationResult(
                 delegation_id="",
                 status=DelegationStatus.FAILED,
                 error=str(e),
-                elapsed_seconds=time.time() - start,
+                elapsed_seconds=elapsed,
             )
 
     async def _recall_memories(self, query: str) -> str:

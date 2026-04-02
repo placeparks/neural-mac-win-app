@@ -1,7 +1,18 @@
 // NeuralClaw Desktop - Delegate Task Modal
 
 import { useState } from 'react';
-import { RunningAgent, createSharedTask, delegateTask, getSharedTask } from '../../lib/api';
+import {
+  RunningAgent,
+  createDesktopChatSessionWithMetadata,
+  createSharedTask,
+  delegateTask,
+  getChatBootstrap,
+  getProviderDefaults,
+  getSharedTask,
+  saveDesktopChatMessage,
+  switchDesktopChatSession,
+  type ChatMessage,
+} from '../../lib/api';
 
 interface Props {
   agents: RunningAgent[];
@@ -16,6 +27,80 @@ export default function DelegateTaskModal({ agents, onClose }: Props) {
   const [useSharedTask, setUseSharedTask] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const buildResultContent = (
+    delegatedTask: string,
+    delegatedAgents: string[],
+    response: Awaited<ReturnType<typeof delegateTask>>,
+  ) => {
+    const header = delegatedAgents.length === 1
+      ? `Delegated task completed by ${delegatedAgents[0]}.`
+      : `Delegated task completed across ${delegatedAgents.join(', ')}.`;
+    const details = response.results?.length
+      ? response.results
+        .map((entry) => {
+          const body = entry.result || entry.error || entry.status;
+          return `### ${entry.agent}\nStatus: ${entry.status}\n\n${body}`;
+        })
+        .join('\n\n')
+      : (response.result || response.error || 'No response returned.');
+    return `${header}\n\nTask:\n${delegatedTask}\n\n${details}`.trim();
+  };
+
+  const promptDelegationResult = async (
+    delegatedTask: string,
+    delegatedAgents: string[],
+    response: Awaited<ReturnType<typeof delegateTask>>,
+  ) => {
+    const defaults = await getProviderDefaults('local').catch(() => ({
+      provider: 'local',
+      primary: 'local',
+      baseUrl: 'http://localhost:11434/v1',
+      model: '',
+    }));
+    const taskMessage: ChatMessage = {
+      role: 'user',
+      content: delegatedTask,
+      timestamp: new Date().toISOString(),
+    };
+    const assistantMessage: ChatMessage = {
+      role: 'assistant',
+      content: buildResultContent(delegatedTask, delegatedAgents, response),
+      timestamp: new Date().toISOString(),
+    };
+
+    let sessionId = '';
+    if (delegatedAgents.length === 1) {
+      const bootstrap = await getChatBootstrap();
+      const existing = bootstrap.sessions.find((session) => session.metadata?.targetAgent === delegatedAgents[0]);
+      if (existing) {
+        sessionId = existing.sessionId;
+        await switchDesktopChatSession(existing.sessionId);
+      } else {
+        const created = await createDesktopChatSessionWithMetadata(`Agent: ${delegatedAgents[0]}`, {
+          targetAgent: delegatedAgents[0],
+          selectedProvider: 'local',
+          selectedModel: defaults.model || null,
+          baseUrl: defaults.baseUrl || 'http://localhost:11434/v1',
+        });
+        sessionId = created.activeSessionId;
+      }
+    } else {
+      const created = await createDesktopChatSessionWithMetadata(
+        `Delegation: ${delegatedAgents.join(', ')}`,
+        {
+          selectedProvider: 'local',
+          selectedModel: defaults.model || null,
+          baseUrl: defaults.baseUrl || 'http://localhost:11434/v1',
+        },
+      );
+      sessionId = created.activeSessionId;
+    }
+
+    await saveDesktopChatMessage(sessionId, taskMessage);
+    await saveDesktopChatMessage(sessionId, assistantMessage);
+    window.dispatchEvent(new CustomEvent('neuralclaw:navigate', { detail: 'chat' }));
+  };
 
   const toggleAgent = (agentName: string) => {
     setSelectedAgents((current) =>
@@ -51,7 +136,7 @@ export default function DelegateTaskModal({ agents, onClose }: Props) {
 
       if (res.ok) {
         const lines = res.results?.length
-          ? res.results.map((entry) => `[${entry.agent}] ${entry.result || entry.status}`).join('\n\n')
+          ? res.results.map((entry) => `[${entry.agent}] ${entry.result || entry.error || entry.status}`).join('\n\n')
           : (res.result || 'Task completed');
         setResult(lines);
 
@@ -65,6 +150,11 @@ export default function DelegateTaskModal({ agents, onClose }: Props) {
             setSharedTaskDetails(details || 'Shared task created. No shared memories yet.');
           }
         }
+
+        await promptDelegationResult(task.trim(), selectedAgents, res);
+        setLoading(false);
+        onClose();
+        return;
       } else {
         setError(res.error || 'Delegation failed');
       }

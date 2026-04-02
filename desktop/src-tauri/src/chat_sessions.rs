@@ -11,6 +11,24 @@ const DB_NAME: &str = "desktop-chat.db";
 const DEFAULT_SESSION_TITLE: &str = "New chat";
 const ACTIVE_SESSION_KEY: &str = "active_session_id";
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSessionMetadata {
+    pub target_agent: Option<String>,
+    pub selected_model: Option<String>,
+    pub selected_provider: Option<String>,
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSessionMetadataInput {
+    pub target_agent: Option<String>,
+    pub selected_model: Option<String>,
+    pub selected_provider: Option<String>,
+    pub base_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatSessionSummary {
@@ -22,6 +40,7 @@ pub struct ChatSessionSummary {
     pub message_count: i64,
     pub preview: String,
     pub draft: String,
+    pub metadata: ChatSessionMetadata,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -51,6 +70,7 @@ pub struct ChatSessionPayload {
     pub active_session_id: String,
     pub messages: Vec<PersistedChatMessage>,
     pub draft: String,
+    pub metadata: ChatSessionMetadata,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,7 +114,8 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
             title TEXT NOT NULL DEFAULT 'New chat',
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
-            last_message_at INTEGER NOT NULL
+            last_message_at INTEGER NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
         );
 
         CREATE TABLE IF NOT EXISTS chat_messages (
@@ -126,21 +147,59 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
         ",
     )
     .map_err(|e| format!("failed to initialize chat database: {e}"))?;
+
+    if !has_column(&conn, "chat_sessions", "metadata_json")? {
+        conn.execute(
+            "ALTER TABLE chat_sessions ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
+            [],
+        )
+        .map_err(|e| format!("failed to migrate chat session metadata: {e}"))?;
+    }
     Ok(conn)
 }
 
-fn create_session_record(conn: &Connection, title: Option<String>) -> Result<String, String> {
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| format!("failed to inspect table schema: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| format!("failed to read table schema: {e}"))?;
+
+    for row in rows {
+        if row.map_err(|e| format!("failed to parse table schema: {e}"))? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn metadata_to_json(metadata: Option<ChatSessionMetadataInput>) -> Result<String, String> {
+    serde_json::to_string(&metadata.unwrap_or_default())
+        .map_err(|e| format!("failed to serialize chat metadata: {e}"))
+}
+
+fn parse_metadata(raw: &str) -> ChatSessionMetadata {
+    serde_json::from_str::<ChatSessionMetadata>(raw).unwrap_or_default()
+}
+
+fn create_session_record(
+    conn: &Connection,
+    title: Option<String>,
+    metadata: Option<ChatSessionMetadataInput>,
+) -> Result<String, String> {
     let now = now_ms();
     let session_id = Uuid::new_v4().to_string();
     let session_title = title
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_SESSION_TITLE.to_string());
+    let metadata_json = metadata_to_json(metadata)?;
 
     conn.execute(
-        "INSERT INTO chat_sessions (session_id, title, created_at, updated_at, last_message_at)
-         VALUES (?1, ?2, ?3, ?3, ?3)",
-        params![session_id, session_title, now],
+        "INSERT INTO chat_sessions (session_id, title, created_at, updated_at, last_message_at, metadata_json)
+         VALUES (?1, ?2, ?3, ?3, ?3, ?4)",
+        params![session_id, session_title, now, metadata_json],
     )
     .map_err(|e| format!("failed to create chat session: {e}"))?;
 
@@ -193,7 +252,7 @@ fn ensure_active_session(conn: &Connection) -> Result<String, String> {
     let session_id = if let Some(session_id) = existing {
         session_id
     } else {
-        create_session_record(conn, None)?
+        create_session_record(conn, None, None)?
     };
 
     conn.execute(
@@ -262,7 +321,8 @@ fn load_sessions(conn: &Connection) -> Result<Vec<ChatSessionSummary>, String> {
                 s.last_message_at,
                 COALESCE((SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.session_id), 0) AS message_count,
                 COALESCE((SELECT content FROM chat_messages m WHERE m.session_id = s.session_id ORDER BY m.created_at DESC LIMIT 1), '') AS preview,
-                COALESCE((SELECT content FROM chat_drafts d WHERE d.session_id = s.session_id), '') AS draft
+                COALESCE((SELECT content FROM chat_drafts d WHERE d.session_id = s.session_id), '') AS draft,
+                COALESCE(s.metadata_json, '{}') AS metadata_json
             FROM chat_sessions s
             ORDER BY s.last_message_at DESC, s.updated_at DESC
             ",
@@ -280,6 +340,7 @@ fn load_sessions(conn: &Connection) -> Result<Vec<ChatSessionSummary>, String> {
                 message_count: row.get(5)?,
                 preview: row.get(6)?,
                 draft: row.get(7)?,
+                metadata: parse_metadata(&row.get::<_, String>(8)?),
             })
         })
         .map_err(|e| format!("failed to load chat sessions: {e}"))?;
@@ -330,6 +391,17 @@ fn load_draft(conn: &Connection, session_id: &str) -> Result<String, String> {
     .map_err(|e| format!("failed to load chat draft: {e}"))
 }
 
+fn load_metadata(conn: &Connection, session_id: &str) -> Result<ChatSessionMetadata, String> {
+    conn.query_row(
+        "SELECT metadata_json FROM chat_sessions WHERE session_id = ?1",
+        params![session_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map(|value| parse_metadata(&value.unwrap_or_else(|| "{}".to_string())))
+    .map_err(|e| format!("failed to load chat metadata: {e}"))
+}
+
 fn build_bootstrap(conn: &Connection, session_id: String) -> Result<ChatBootstrap, String> {
     Ok(ChatBootstrap {
         active_session_id: session_id.clone(),
@@ -349,7 +421,18 @@ pub fn get_chat_bootstrap(app: tauri::AppHandle) -> Result<ChatBootstrap, String
 #[tauri::command]
 pub fn create_chat_session(app: tauri::AppHandle, title: Option<String>) -> Result<ChatBootstrap, String> {
     let conn = open_db(&app)?;
-    let session_id = create_session_record(&conn, title)?;
+    let session_id = create_session_record(&conn, title, None)?;
+    build_bootstrap(&conn, session_id)
+}
+
+#[tauri::command]
+pub fn create_chat_session_with_metadata(
+    app: tauri::AppHandle,
+    title: Option<String>,
+    metadata: Option<ChatSessionMetadataInput>,
+) -> Result<ChatBootstrap, String> {
+    let conn = open_db(&app)?;
+    let session_id = create_session_record(&conn, title, metadata)?;
     build_bootstrap(&conn, session_id)
 }
 
@@ -370,6 +453,7 @@ pub fn switch_chat_session(app: tauri::AppHandle, session_id: String) -> Result<
         active_session_id: session_id.clone(),
         messages: load_messages(&conn, &session_id)?,
         draft: load_draft(&conn, &session_id)?,
+        metadata: load_metadata(&conn, &session_id)?,
     })
 }
 
@@ -405,11 +489,47 @@ pub fn clear_chat_session(app: tauri::AppHandle, session_id: String) -> Result<V
     conn.execute("DELETE FROM chat_drafts WHERE session_id = ?1", params![session_id])
         .map_err(|e| format!("failed to clear chat session draft: {e}"))?;
     conn.execute(
-        "UPDATE chat_sessions SET title = ?2, updated_at = ?3, last_message_at = ?3 WHERE session_id = ?1",
+        "UPDATE chat_sessions SET title = ?2, updated_at = ?3, last_message_at = ?3, metadata_json = '{}' WHERE session_id = ?1",
         params![session_id, DEFAULT_SESSION_TITLE, now_ms()],
     )
     .map_err(|e| format!("failed to reset chat session: {e}"))?;
     load_sessions(&conn)
+}
+
+#[tauri::command]
+pub fn update_chat_session_metadata(
+    app: tauri::AppHandle,
+    session_id: String,
+    metadata: Option<ChatSessionMetadataInput>,
+) -> Result<Vec<ChatSessionSummary>, String> {
+    let conn = open_db(&app)?;
+    if !session_exists(&conn, &session_id)? {
+        return Err("Chat session not found".to_string());
+    }
+
+    let metadata_json = metadata_to_json(metadata)?;
+    conn.execute(
+        "UPDATE chat_sessions SET metadata_json = ?2, updated_at = ?3 WHERE session_id = ?1",
+        params![session_id, metadata_json, now_ms()],
+    )
+    .map_err(|e| format!("failed to update chat metadata: {e}"))?;
+    load_sessions(&conn)
+}
+
+#[tauri::command]
+pub fn reset_all_chat_sessions(app: tauri::AppHandle) -> Result<ChatBootstrap, String> {
+    let conn = open_db(&app)?;
+    conn.execute("DELETE FROM chat_messages", [])
+        .map_err(|e| format!("failed to clear chat messages: {e}"))?;
+    conn.execute("DELETE FROM chat_drafts", [])
+        .map_err(|e| format!("failed to clear chat drafts: {e}"))?;
+    conn.execute("DELETE FROM chat_sessions", [])
+        .map_err(|e| format!("failed to clear chat sessions: {e}"))?;
+    conn.execute("DELETE FROM app_meta", [])
+        .map_err(|e| format!("failed to clear chat metadata: {e}"))?;
+
+    let session_id = create_session_record(&conn, Some(DEFAULT_SESSION_TITLE.to_string()), None)?;
+    build_bootstrap(&conn, session_id)
 }
 
 #[tauri::command]

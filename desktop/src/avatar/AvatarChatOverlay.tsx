@@ -1,11 +1,10 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { getChatBootstrap, saveDesktopChatDraft, saveDesktopChatMessage } from '../lib/api';
-import { wsManager } from '../lib/ws';
-import { useChatStore } from '../store/chatStore';
+import { useChat } from '../hooks/useChat';
 import { useAvatarState } from './useAvatarState';
 
 export default function AvatarChatOverlay() {
   const { latestResponse, inputOpen, setInputOpen } = useAvatarState();
+  const { sendMessage, isStreaming } = useChat();
   const [text, setText] = useState('');
   const [bubbleVisible, setBubbleVisible] = useState(false);
 
@@ -19,49 +18,8 @@ export default function AvatarChatOverlay() {
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
     const content = text.trim();
-    if (!content) return;
-    let activeSessionId: string | null = null;
-
-    try {
-      const bootstrap = await getChatBootstrap();
-      activeSessionId = bootstrap.activeSessionId;
-      const message = {
-        role: 'user' as const,
-        content,
-        timestamp: new Date().toISOString(),
-      };
-      const chatStore = useChatStore.getState();
-      chatStore.setBootstrap(bootstrap);
-      chatStore.addMessage(message, bootstrap.activeSessionId);
-      chatStore.setDraft('');
-      chatStore.setPendingResponseSessionId(bootstrap.activeSessionId);
-      chatStore.setStreaming(true);
-      await saveDesktopChatDraft(bootstrap.activeSessionId, '');
-      const sessions = await saveDesktopChatMessage(bootstrap.activeSessionId, message);
-      chatStore.setSessions(sessions);
-    } catch {
-      // Keep avatar input responsive even if local persistence is unavailable.
-    }
-
-    if (!wsManager.connected) {
-      if (activeSessionId) {
-        const chatStore = useChatStore.getState();
-        const errorMessage = {
-          role: 'assistant' as const,
-          content: 'Connection to the backend is unavailable. Start NeuralClaw and retry.',
-          timestamp: new Date().toISOString(),
-        };
-        chatStore.addMessage(errorMessage, activeSessionId);
-        const sessions = await saveDesktopChatMessage(activeSessionId, errorMessage).catch(() => null);
-        if (sessions) chatStore.setSessions(sessions);
-        chatStore.resetStream();
-      }
-      setText('');
-      setInputOpen(false);
-      return;
-    }
-
-    wsManager.send(content);
+    if (!content || isStreaming) return;
+    await sendMessage(content);
     setText('');
     setInputOpen(false);
   };
@@ -75,7 +33,7 @@ export default function AvatarChatOverlay() {
       )}
 
       {inputOpen ? (
-        <form className="avatar-input-shell" onSubmit={onSubmit}>
+        <form className="avatar-input-shell" onSubmit={(event) => void onSubmit(event)}>
           <input
             className="avatar-chat-input"
             autoFocus
@@ -86,7 +44,9 @@ export default function AvatarChatOverlay() {
             }}
             placeholder="Ask NeuralClaw..."
           />
-          <button type="submit" className="avatar-chat-send">Send</button>
+          <button type="submit" className="avatar-chat-send" disabled={isStreaming || !text.trim()}>
+            {isStreaming ? '...' : 'Send'}
+          </button>
         </form>
       ) : (
         <button
@@ -94,7 +54,7 @@ export default function AvatarChatOverlay() {
           className="avatar-chat-toggle"
           onClick={() => setInputOpen(true)}
         >
-          Chat
+          Ask
         </button>
       )}
     </div>

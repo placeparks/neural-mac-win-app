@@ -9,17 +9,19 @@ interface Props {
   running: RunningAgent | undefined;
   onSpawn: () => void;
   onDespawn: () => void;
+  onTalk: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }
 
-export default function AgentCard({ definition, running, onSpawn, onDespawn, onEdit, onDelete }: Props) {
+export default function AgentCard({ definition, running, onSpawn, onDespawn, onTalk, onEdit, onDelete }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [memories, setMemories] = useState<AgentMemorySnapshot | null>(null);
   const [loadingMemories, setLoadingMemories] = useState(false);
 
   const isOnline = !!running;
   const providerColor = (PROVIDER_COLORS as Record<string, { bg: string } | undefined>)[definition.provider]?.bg || 'var(--bg-card)';
+  const formatEventTime = (value: number) => new Date(value > 1_000_000_000_000 ? value : value * 1000).toLocaleTimeString();
 
   useEffect(() => {
     if (!expanded) return;
@@ -95,6 +97,11 @@ export default function AgentCard({ definition, running, onSpawn, onDespawn, onE
           <span className="badge badge-green" style={{ fontSize: 10 }}>
             {running.status}
           </span>
+          {running.effective_model && (
+            <span className="badge badge-blue" style={{ fontSize: 10 }}>
+              {running.effective_model}
+            </span>
+          )}
           <span>{running.active_tasks} active task{running.active_tasks === 1 ? '' : 's'}</span>
         </div>
       )}
@@ -125,6 +132,48 @@ export default function AgentCard({ definition, running, onSpawn, onDespawn, onE
             <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>Loading recent memories...</div>
           ) : (
             <div style={{ display: 'grid', gap: 10 }}>
+              {running && (
+                <section>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Execution telemetry</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
+                    <div style={{ background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-sm)', padding: 10 }}>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Requested / effective</div>
+                      <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', marginTop: 4 }}>
+                        {running.requested_model || definition.model || 'auto'}
+                        {running.effective_model && running.effective_model !== (running.requested_model || definition.model)
+                          ? ` -> ${running.effective_model}`
+                          : ''}
+                      </div>
+                    </div>
+                    <div style={{ background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-sm)', padding: 10 }}>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Latency / success</div>
+                      <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', marginTop: 4 }}>
+                        {running.avg_latency_ms ? `${running.avg_latency_ms.toFixed(0)} ms` : 'unknown'}
+                        {' · '}
+                        {running.success_count || 0}/{(running.success_count || 0) + (running.failure_count || 0)}
+                      </div>
+                    </div>
+                    <div style={{ background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-sm)', padding: 10 }}>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Token totals</div>
+                      <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', marginTop: 4 }}>
+                        {running.token_usage?.total ?? 'unknown'}
+                      </div>
+                    </div>
+                    <div style={{ background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-sm)', padding: 10 }}>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>Last task</div>
+                      <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', marginTop: 4 }}>
+                        {running.last_task_at ? formatEventTime(running.last_task_at) : 'waiting'}
+                      </div>
+                    </div>
+                  </div>
+                  {running.last_error && (
+                    <div style={{ marginTop: 8, fontSize: 12, color: 'var(--accent-red)', whiteSpace: 'pre-wrap' }}>
+                      Last error: {running.last_error}
+                    </div>
+                  )}
+                </section>
+              )}
+
               <section>
                 <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Recent episodic memory</div>
                 {memories?.episodic?.length ? (
@@ -170,6 +219,36 @@ export default function AgentCard({ definition, running, onSpawn, onDespawn, onE
                   <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>No stored procedures yet.</div>
                 )}
               </section>
+
+              {running?.recent_tasks?.length ? (
+                <section>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Recent delegated work</div>
+                  <div style={{ display: 'grid', gap: 6 }}>
+                    {running.recent_tasks.slice().reverse().map((entry, index) => (
+                      <div key={`${entry.timestamp}-${index}`} style={{ fontSize: 12, color: 'var(--text-secondary)', background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-sm)', padding: 10 }}>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
+                          {entry.success ? 'completed' : 'failed'} · {Math.round(entry.latency_ms)} ms
+                        </div>
+                        <div style={{ marginBottom: 4 }}>{entry.task}</div>
+                        <div style={{ color: 'var(--text-muted)' }}>{entry.result_preview}</div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
+              {running?.recent_logs?.length ? (
+                <section>
+                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Execution log</div>
+                  <div style={{ display: 'grid', gap: 4 }}>
+                    {running.recent_logs.slice().reverse().map((entry, index) => (
+                      <div key={`${entry.timestamp}-${index}`} style={{ fontSize: 12, color: entry.level === 'error' ? 'var(--accent-red)' : 'var(--text-secondary)' }}>
+                        [{formatEventTime(entry.timestamp)}] {entry.message}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
             </div>
           )}
         </div>
@@ -187,6 +266,9 @@ export default function AgentCard({ definition, running, onSpawn, onDespawn, onE
         )}
         <button className="btn btn-secondary" onClick={onEdit} style={{ fontSize: 12, padding: '4px 10px' }}>
           Edit
+        </button>
+        <button className="btn btn-secondary" onClick={onTalk} style={{ fontSize: 12, padding: '4px 10px' }}>
+          Talk
         </button>
         <button
           className="btn btn-secondary"

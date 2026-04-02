@@ -174,7 +174,7 @@ jobs:
           cat > /tmp/latest.json << ENDJSON
           {
             "version": "$VERSION",
-            "notes": "NeuralClaw Desktop $TAG — role-based model router, pip_install skill, Ollama multi-model routing",
+            "notes": "NeuralClaw Desktop $TAG - task inbox, agent telemetry, local model failover, avatar controls, and polished desktop orchestration",
             "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "platforms": {
               "darwin-aarch64": {

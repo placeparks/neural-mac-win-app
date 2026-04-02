@@ -263,6 +263,7 @@ class AgentSpawner:
                 "agent_id": defn.agent_id,
                 "provider": defn.provider,
                 "model": defn.model,
+                "base_url": defn.base_url,
                 "source": "definition",
                 "memory_namespace": defn.memory_namespace,
             },
@@ -271,6 +272,23 @@ class AgentSpawner:
     def get_runtime(self, name: str) -> "AgentRuntime | None":
         """Get the runtime for a spawned agent."""
         return self._runtimes.get(name)
+
+    def update_runtime_context(
+        self,
+        name: str,
+        *,
+        requested_model: str | None = None,
+        effective_model: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        runtime = self._runtimes.get(name)
+        if not runtime:
+            return
+        runtime.update_execution_context(
+            requested_model=requested_model,
+            effective_model=effective_model,
+            base_url=base_url,
+        )
 
     def despawn(self, name: str) -> bool:
         """Remove an agent from mesh, delegation, and spawner registry."""
@@ -291,21 +309,39 @@ class AgentSpawner:
 
     def get_status(self) -> list[dict[str, Any]]:
         """Return status of all spawned agents."""
-        return [
-            {
-                "name": a.name,
-                "description": a.description,
-                "capabilities": a.capabilities,
-                "status": (self._mesh.get_agent(a.name).status.name.lower() if self._mesh.get_agent(a.name) else "offline"),
-                "active_tasks": (self._mesh.get_agent(a.name).active_tasks if self._mesh.get_agent(a.name) else 0),
-                "source": a.source,
-                "endpoint": a.endpoint or "local",
-                "provider": a.metadata.get("provider", ""),
-                "model": a.metadata.get("model", ""),
-                "memory_namespace": a.metadata.get("memory_namespace", ""),
-            }
-            for a in self._agents.values()
-        ]
+        payload: list[dict[str, Any]] = []
+        for agent in self._agents.values():
+            mesh_card = self._mesh.get_agent(agent.name)
+            runtime = self._runtimes.get(agent.name)
+            metrics = runtime.get_metrics() if runtime else {}
+            requested_model = str(metrics.get("requested_model") or agent.metadata.get("model", ""))
+            effective_model = str(metrics.get("effective_model") or requested_model)
+            payload.append(
+                {
+                    "name": agent.name,
+                    "description": agent.description,
+                    "capabilities": agent.capabilities,
+                    "status": (mesh_card.status.name.lower() if mesh_card else "offline"),
+                    "active_tasks": (mesh_card.active_tasks if mesh_card else 0),
+                    "source": agent.source,
+                    "endpoint": agent.endpoint or "local",
+                    "provider": agent.metadata.get("provider", ""),
+                    "model": requested_model,
+                    "requested_model": requested_model,
+                    "effective_model": effective_model,
+                    "base_url": str(metrics.get("base_url") or agent.metadata.get("base_url", "") or "local"),
+                    "memory_namespace": metrics.get("memory_namespace") or agent.metadata.get("memory_namespace", ""),
+                    "last_task_at": metrics.get("last_task_at"),
+                    "avg_latency_ms": metrics.get("avg_latency_ms"),
+                    "token_usage": metrics.get("token_usage"),
+                    "last_error": metrics.get("last_error"),
+                    "success_count": metrics.get("success_count", 0),
+                    "failure_count": metrics.get("failure_count", 0),
+                    "recent_tasks": metrics.get("recent_tasks", []),
+                    "recent_logs": metrics.get("recent_logs", []),
+                }
+            )
+        return payload
 
     @staticmethod
     def _make_default_executor(

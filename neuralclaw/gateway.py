@@ -12,15 +12,23 @@ This is the brain of NeuralClaw.
 from __future__ import annotations
 
 import asyncio
+import base64
 import gc
+import io
 import inspect
 import logging
+import re
 import secrets
+import shutil
 import signal
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
+import aiohttp
+
+from neuralclaw import __version__
 from neuralclaw.bus.neural_bus import EventType, NeuralBus
 from neuralclaw.bus.telemetry import Telemetry
 from neuralclaw.channels.protocol import ChannelAdapter, ChannelMessage
@@ -37,6 +45,8 @@ from neuralclaw.config import (
     ensure_dirs,
     get_api_key,
     load_config,
+    set_api_key,
+    update_config,
 )
 from neuralclaw.cortex.action.audit import AuditLogger
 from neuralclaw.cortex.action.capabilities import CapabilityVerifier
@@ -77,6 +87,7 @@ from neuralclaw.swarm.mesh import AgentMesh
 from neuralclaw.swarm.federation import FederationProtocol, FederationBridge
 from neuralclaw.swarm.spawn import AgentSpawner
 from neuralclaw.swarm.agent_store import AgentStore
+from neuralclaw.swarm.task_store import TaskRecord, TaskStore
 from neuralclaw.cortex.memory.shared import SharedMemoryBridge
 
 
@@ -113,6 +124,7 @@ class NeuralClawGateway:
         self._shutdown_task: asyncio.Task[None] | None = None
         self._gc_task: asyncio.Task[None] | None = None
         self._config_watch_task: asyncio.Task[None] | None = None
+        self._channel_pairing_adapters: dict[str, ChannelAdapter] = {}
         self._rate_limit_config = RateLimitConfig(
             user_requests_per_minute=self._config.policy.user_requests_per_minute,
             user_requests_per_hour=self._config.policy.user_requests_per_hour,
@@ -316,13 +328,18 @@ class NeuralClawGateway:
 
         # Agent persistence + shared memory
         self._agent_store: AgentStore | None = None
+        self._task_store: TaskStore | None = None
         self._shared_bridge: SharedMemoryBridge | None = None
+        self._local_model_registry_cache: dict[str, Any] = {"models": [], "resolved_base_url": "", "badges": []}
+        self._local_model_registry_at: float = 0.0
 
         if feat.swarm and self._mesh and self._delegation:
             self._spawner = AgentSpawner(self._mesh, self._delegation, self._bus)
             # Agent store for persistent definitions
             agent_db = self._config.memory.db_path.replace(".db", "-agents.db")
             self._agent_store = AgentStore(agent_db)
+            task_db = self._config.memory.db_path.replace(".db", "-tasks.db")
+            self._task_store = TaskStore(task_db)
             # Shared memory bridge for cross-agent collaboration
             shared_db = self._config.memory.db_path.replace(".db", "-shared.db")
             self._shared_bridge = SharedMemoryBridge(shared_db)
@@ -457,6 +474,8 @@ class NeuralClawGateway:
         # Initialize agent store + shared memory bridge
         if self._agent_store:
             await self._agent_store.initialize()
+        if self._task_store:
+            await self._task_store.initialize()
         if self._shared_bridge:
             await self._shared_bridge.initialize()
 
@@ -732,8 +751,20 @@ class NeuralClawGateway:
                 self._get_dashboard_trace,
             )
             self._dashboard.set_config_provider(self._get_dashboard_config)
+            self._dashboard.set_config_update_action(self._dashboard_update_config)
+            self._dashboard.set_channels_provider(self._get_dashboard_channels)
+            self._dashboard.set_channel_actions(
+                update_action=self._dashboard_update_channel,
+                test_action=self._dashboard_test_channel,
+                pair_action=self._dashboard_pair_channel,
+            )
             self._dashboard.set_skills_provider(self._get_dashboard_skills)
             self._dashboard.set_swarm_provider(self._get_dashboard_agents)
+            self._dashboard.set_task_providers(
+                self._dashboard_list_tasks,
+                self._dashboard_get_task,
+            )
+            self._dashboard.set_local_models_provider(self._dashboard_get_local_model_health)
             self._dashboard.set_provider_reset_action(self._dashboard_reset_provider_circuit)
             # Action callables
             if self._spawner:
@@ -760,6 +791,13 @@ class NeuralClawGateway:
                 self._dashboard.set_message_peer_action(self._dashboard_message_peer)
             self._dashboard.set_send_message_action(self._dashboard_send_message)
             self._dashboard.set_clear_memory_action(self._dashboard_clear_memory)
+            self._dashboard.set_knowledge_base_actions(
+                list_action=self._dashboard_list_kb_documents,
+                ingest_action=self._dashboard_ingest_kb_document,
+                ingest_text_action=self._dashboard_ingest_kb_text,
+                search_action=self._dashboard_search_kb,
+                delete_action=self._dashboard_delete_kb_document,
+            )
             self._dashboard.set_features_provider(
                 self._dashboard_get_features, self._dashboard_set_feature,
             )
@@ -966,8 +1004,8 @@ class NeuralClawGateway:
     ) -> LLMProvider | None:
         from neuralclaw.providers.local import LocalProvider
         return LocalProvider(
-            model=cfg.model or "qwen3.5:2b",
-            base_url=cfg.base_url or "http://localhost:11434/v1",
+            model=cfg.model or "qwen3.5:35b",
+            base_url=cfg.base_url or self._candidate_local_base_urls("")[0],
             request_timeout_seconds=request_timeout_seconds or 120.0,
         )
 
@@ -1091,7 +1129,12 @@ class NeuralClawGateway:
         from neuralclaw.channels.slack import SlackAdapter
         return SlackAdapter(cfg.token, app_token)
 
-    def _build_whatsapp_channel(self, cfg: Any) -> ChannelAdapter | None:
+    def _build_whatsapp_channel(
+        self,
+        cfg: Any,
+        *,
+        on_qr: Any | None = None,
+    ) -> ChannelAdapter | None:
         import logging as _log
         _logger = _log.getLogger("neuralclaw.gateway")
 
@@ -1099,7 +1142,7 @@ class NeuralClawGateway:
             _logger.info("[WhatsApp] QR code received — pair via neuralclaw channels connect whatsapp")
 
         from neuralclaw.channels.whatsapp_baileys import BaileysWhatsAppAdapter
-        return BaileysWhatsAppAdapter(auth_dir=cfg.token, on_qr=_log_qr)
+        return BaileysWhatsAppAdapter(auth_dir=cfg.token, on_qr=on_qr or _log_qr)
 
     def _build_signal_channel(self, cfg: Any) -> ChannelAdapter | None:
         from neuralclaw.channels.signal_adapter import SignalAdapter
@@ -2115,6 +2158,11 @@ class NeuralClawGateway:
 
     def _default_system_prompt_fragments(self) -> list[str]:
         fragments = [self._config.persona]
+        config_line = (
+            f"Your runtime configuration file is {self._config_path}."
+            if self._config_path
+            else "Your runtime configuration is managed by the local NeuralClaw gateway."
+        )
 
         # Dynamic self-awareness: build capabilities section from what's actually enabled
         feat = self._config.features
@@ -2154,7 +2202,9 @@ class NeuralClawGateway:
 
         capabilities_section = (
             f"## About You\n"
-            f"You are {self._config.name}, a self-evolving cognitive AI agent.\n\n"
+            f"You are {self._config.name}, a self-evolving cognitive AI agent running on the NeuralClaw framework.\n"
+            "You are not OpenClaw. OpenClaw is only a legacy migration source and must never be used as your current identity.\n"
+            f"{config_line}\n\n"
             f"## Your Active Capabilities\n"
             + "\n".join(f"- {c}" for c in caps)
             + "\n"
@@ -2165,6 +2215,12 @@ class NeuralClawGateway:
             "## Guidelines\n"
             "- ALWAYS use your tools when the user's request matches a tool's purpose. "
             "NEVER say 'I can't' or 'I'm unable to' when you have a tool that can do it.\n"
+            "- Identify yourself as NeuralClaw or by your configured agent name on the NeuralClaw framework. "
+            "Do not call yourself OpenClaw unless the user is explicitly asking about migration from a legacy installation.\n"
+            "- If shell, code execution, browser, or desktop tools are available, you may change your own local configuration, "
+            "restart services, and verify the result instead of only describing the steps.\n"
+            "- If the user asks you to change your provider, channels, memory, desktop control, or other runtime settings, "
+            "prefer making the change directly when your currently available tools permit it.\n"
             "- If past memory/conversation shows you previously said you couldn't do something, "
             "IGNORE that — your capabilities may have changed. Always check your current tool list.\n"
             "- Reference your memory when relevant to the conversation.\n"
@@ -2447,6 +2503,9 @@ class NeuralClawGateway:
             await self._mcp_server.stop()
         if self._dashboard:
             await self._dashboard.stop()
+        if self._channel_pairing_adapters:
+            for channel_name in list(self._channel_pairing_adapters.keys()):
+                await self._stop_channel_pairing(channel_name)
         await self._telemetry.stop()
         await self._bus.stop()
         await self._episodic.close()
@@ -2469,6 +2528,12 @@ class NeuralClawGateway:
             await self._calibrator.close()
         if self._evolution_orchestrator:
             await self._evolution_orchestrator.close()
+        if self._agent_store:
+            await self._agent_store.close()
+        if self._task_store:
+            await self._task_store.close()
+        if self._shared_bridge:
+            await self._shared_bridge.close()
         await self._audit.close()
         await self._idempotency.close()
         await self._memory_db_pool.close()
@@ -2552,7 +2617,54 @@ class NeuralClawGateway:
         }
 
     def _get_dashboard_config(self) -> dict[str, Any]:
-        return self._sanitize_config_value(self._config._raw)
+        payload = self._sanitize_config_value(self._config._raw)
+        providers = payload.get("providers", {})
+        if isinstance(providers, dict):
+            for provider_name, provider_cfg in providers.items():
+                if provider_name in {"primary", "fallback"} or not isinstance(provider_cfg, dict):
+                    continue
+                provider_cfg["api_key_configured"] = bool(get_api_key(provider_name))
+        payload["version"] = __version__
+        return payload
+
+    def _get_dashboard_channels(self) -> list[dict[str, Any]]:
+        current = {ch.name: ch for ch in self._config.channels}
+        raw_channels = self._config._raw.get("channels", {})
+        order = ["telegram", "discord", "slack", "whatsapp", "signal"]
+        labels = {
+            "telegram": "Telegram",
+            "discord": "Discord",
+            "slack": "Slack",
+            "whatsapp": "WhatsApp",
+            "signal": "Signal",
+        }
+        descriptions = {
+            "telegram": "Bot token for Telegram Bot API conversations.",
+            "discord": "Bot token plus optional voice settings for Discord servers.",
+            "slack": "Slack Socket Mode bot with bot token and app token.",
+            "whatsapp": "Baileys multi-file auth directory for WhatsApp pairing.",
+            "signal": "Registered Signal phone number for signal-cli.",
+        }
+        snapshots: list[dict[str, Any]] = []
+
+        for name in order:
+            cfg = current.get(name)
+            raw = raw_channels.get(name, {}) if isinstance(raw_channels, dict) else {}
+            extra = dict(cfg.extra if cfg else raw if isinstance(raw, dict) else {})
+            snapshots.append({
+                "name": name,
+                "label": labels[name],
+                "description": descriptions[name],
+                "enabled": bool(cfg.enabled) if cfg else bool(raw.get("enabled", False)),
+                "configured": self._channel_configured(name, cfg, extra),
+                "running": name in self._channels,
+                "trust_mode": str((cfg.trust_mode if cfg else raw.get("trust_mode", "")) or ""),
+                "token_present": bool(cfg.token) if cfg else self._channel_has_secret(name),
+                "restart_required": True,
+                "extra": self._channel_extra_snapshot(name, extra),
+            })
+
+        return snapshots
 
     def _get_dashboard_skills(self) -> list[dict[str, Any]]:
         skills: list[dict[str, Any]] = []
@@ -2615,6 +2727,330 @@ class NeuralClawGateway:
             return [self._sanitize_config_value(item, key) for item in value]
         return value
 
+    def _channel_has_secret(self, channel_name: str) -> bool:
+        secret_names = [channel_name]
+        if channel_name == "slack":
+            secret_names.append("slack_app")
+        return any(bool(get_api_key(secret_name)) for secret_name in secret_names)
+
+    def _channel_extra_snapshot(self, channel_name: str, extra: dict[str, Any]) -> dict[str, Any]:
+        if channel_name == "discord":
+            return {
+                "voice_responses": bool(extra.get("voice_responses", False)),
+                "auto_disconnect_empty_vc": bool(extra.get("auto_disconnect_empty_vc", True)),
+                "voice_channel_id": str(extra.get("voice_channel_id", "") or ""),
+            }
+        if channel_name == "slack":
+            return {
+                "app_token_present": bool(extra.get("slack_app") or get_api_key("slack_app")),
+            }
+        if channel_name == "whatsapp":
+            auth_dir = str(extra.get("auth_dir", "") or "")
+            return {
+                "auth_dir": auth_dir,
+                "auth_dir_present": bool(auth_dir),
+            }
+        return {}
+
+    def _channel_configured(self, channel_name: str, cfg: Any, extra: dict[str, Any]) -> bool:
+        token = bool(cfg.token) if cfg else self._channel_has_secret(channel_name)
+        if channel_name == "slack":
+            return token and bool(extra.get("slack_app") or get_api_key("slack_app"))
+        return token
+
+    def _refresh_runtime_config(self, reloaded: NeuralClawConfig) -> None:
+        self._config._raw = reloaded._raw
+        self._config.name = reloaded.name
+        self._config.persona = reloaded.persona
+        self._config.log_level = reloaded.log_level
+        self._config.primary_provider = reloaded.primary_provider
+        self._config.fallback_providers = reloaded.fallback_providers
+        self._config.channels = reloaded.channels
+        self._config.model_roles = reloaded.model_roles
+        self._config.features = reloaded.features
+        self._apply_hot_config(reloaded)
+
+    async def _dashboard_update_config(self, updates: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(updates, dict):
+            return {"ok": False, "error": "config payload must be an object"}
+
+        provider_secrets = updates.pop("provider_secrets", {})
+        if provider_secrets and not isinstance(provider_secrets, dict):
+            return {"ok": False, "error": "provider_secrets must be an object"}
+
+        for provider_name, secret in provider_secrets.items():
+            if str(secret).strip():
+                set_api_key(str(provider_name), str(secret).strip())
+
+        if updates:
+            update_config(updates, Path(self._config_path) if self._config_path else None)
+
+        reloaded = load_config(Path(self._config_path) if self._config_path else None)
+        self._refresh_runtime_config(reloaded)
+        restart_required = bool(
+            {
+                "providers",
+                "channels",
+                "model_roles",
+                "google_workspace",
+                "microsoft365",
+                "desktop",
+                "browser",
+                "security",
+                "policy",
+                "tts",
+                "features",
+            }
+            & set(updates.keys())
+        ) or bool(provider_secrets)
+        return {
+            "ok": True,
+            "restart_required": restart_required,
+            "config": self._get_dashboard_config(),
+        }
+
+    async def _dashboard_update_channel(self, channel_name: str, data: dict[str, Any]) -> dict[str, Any]:
+        supported = {"telegram", "discord", "slack", "whatsapp", "signal"}
+        if channel_name not in supported:
+            return {"ok": False, "error": f"Unsupported channel '{channel_name}'"}
+        if not isinstance(data, dict):
+            return {"ok": False, "error": "channel payload must be an object"}
+
+        existing = self._config._raw.get("channels", {}).get(channel_name, {})
+        channel_update = dict(existing if isinstance(existing, dict) else {})
+        channel_update["enabled"] = bool(data.get("enabled", False))
+        channel_update["trust_mode"] = str(data.get("trust_mode", "") or "")
+
+        extra = data.get("extra", {})
+        if not isinstance(extra, dict):
+            extra = {}
+
+        if channel_name == "discord":
+            channel_update["voice_responses"] = bool(extra.get("voice_responses", False))
+            channel_update["auto_disconnect_empty_vc"] = bool(extra.get("auto_disconnect_empty_vc", True))
+            channel_update["voice_channel_id"] = str(extra.get("voice_channel_id", "") or "")
+        elif channel_name == "whatsapp":
+            channel_update["auth_dir"] = str(extra.get("auth_dir", "") or "")
+
+        secret = str(data.get("secret", "") or "").strip()
+        if secret:
+            set_api_key(channel_name, secret)
+
+        if channel_name == "slack":
+            app_token = str(extra.get("slack_app", "") or "").strip()
+            if app_token:
+                set_api_key("slack_app", app_token)
+
+        update_config(
+            {"channels": {channel_name: channel_update}},
+            Path(self._config_path) if self._config_path else None,
+        )
+        reloaded = load_config(Path(self._config_path) if self._config_path else None)
+        self._refresh_runtime_config(reloaded)
+        snapshot = next(
+            (item for item in self._get_dashboard_channels() if item["name"] == channel_name),
+            None,
+        )
+        return {
+            "ok": True,
+            "restart_required": True,
+            "channel": snapshot,
+        }
+
+    async def _dashboard_test_channel(self, channel_name: str, data: dict[str, Any]) -> dict[str, Any]:
+        supported = {"telegram", "discord", "slack", "whatsapp", "signal"}
+        if channel_name not in supported:
+            return {"ok": False, "error": f"Unsupported channel '{channel_name}'"}
+        if not isinstance(data, dict):
+            return {"ok": False, "error": "channel payload must be an object"}
+
+        token = str(data.get("secret", "") or "").strip() or (get_api_key(channel_name) or "")
+        extra = data.get("extra", {})
+        if not isinstance(extra, dict):
+            extra = {}
+
+        if channel_name == "slack":
+            app_token = str(extra.get("slack_app", "") or "").strip() or (get_api_key("slack_app") or "")
+            if not token or not app_token:
+                return {"ok": False, "error": "Slack requires both bot token and app token"}
+            try:
+                import aiohttp
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        "https://slack.com/api/auth.test",
+                        headers={"Authorization": f"Bearer {token}"},
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        payload = await resp.json()
+                        ok = bool(payload.get("ok"))
+                        return {
+                            "ok": ok,
+                            "message": (
+                                f"Connected to Slack workspace {payload.get('team', 'unknown')}"
+                                if ok
+                                else payload.get("error", f"Slack API returned {resp.status}")
+                            ),
+                        }
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
+        if channel_name == "signal":
+            if not token:
+                return {"ok": False, "error": "Signal requires a registered phone number"}
+            if not shutil.which("signal-cli"):
+                return {"ok": False, "error": "signal-cli is not installed on this machine"}
+            return {
+                "ok": True,
+                "message": f"signal-cli detected for {token}. Registration must already exist locally.",
+            }
+
+        if channel_name == "whatsapp":
+            auth_dir = str(extra.get("auth_dir", "") or token).strip()
+            if not auth_dir:
+                return {"ok": False, "error": "WhatsApp requires an auth directory"}
+            from neuralclaw.config import ChannelConfig
+
+            cfg = ChannelConfig(
+                name="whatsapp",
+                enabled=True,
+                token=auth_dir,
+                extra={"auth_dir": auth_dir},
+            )
+            adapter = self._build_whatsapp_channel(cfg)
+            ok, message = await adapter.test_connection() if adapter else (False, "Unable to initialize WhatsApp adapter")
+            return {"ok": ok, "message": message} if ok else {"ok": False, "error": message}
+
+        if not token:
+            return {"ok": False, "error": f"{channel_name.title()} requires a secret before testing"}
+
+        from neuralclaw.config import ChannelConfig
+
+        cfg = ChannelConfig(
+            name=channel_name,
+            enabled=True,
+            token=token,
+            extra=extra,
+            trust_mode=str(data.get("trust_mode", "") or ""),
+        )
+        builders = {
+            "telegram": self._build_telegram_channel,
+            "discord": self._build_discord_channel,
+        }
+        builder = builders.get(channel_name)
+        adapter = builder(cfg) if builder else None
+        if not adapter:
+            return {"ok": False, "error": f"Unable to initialize {channel_name} adapter"}
+        ok, message = await adapter.test_connection()
+        return {"ok": ok, "message": message} if ok else {"ok": False, "error": message}
+
+    async def _stop_channel_pairing(self, channel_name: str) -> None:
+        adapter = self._channel_pairing_adapters.pop(channel_name, None)
+        if not adapter:
+            return
+        try:
+            await adapter.stop()
+        except Exception as exc:
+            self._logger.debug("Failed to stop %s pairing adapter cleanly: %s", channel_name, exc)
+
+    def _qr_svg_data_url(self, data: str) -> str:
+        import qrcode
+        from qrcode.image.svg import SvgPathImage
+
+        qr = qrcode.QRCode(border=2)
+        qr.add_data(data)
+        qr.make(fit=True)
+        image = qr.make_image(image_factory=SvgPathImage)
+        buffer = io.BytesIO()
+        image.save(buffer)
+        payload = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/svg+xml;base64,{payload}"
+
+    async def _dashboard_pair_channel(self, channel_name: str, data: dict[str, Any]) -> dict[str, Any]:
+        if channel_name != "whatsapp":
+            return {"ok": False, "error": f"Pairing is not supported for '{channel_name}'"}
+        if not isinstance(data, dict):
+            return {"ok": False, "error": "channel payload must be an object"}
+
+        extra = data.get("extra", {})
+        if not isinstance(extra, dict):
+            extra = {}
+
+        auth_dir = str(extra.get("auth_dir", "") or data.get("secret", "") or "").strip()
+        if not auth_dir:
+            raw_channels = self._config._raw.get("channels", {})
+            raw_whatsapp = raw_channels.get("whatsapp", {}) if isinstance(raw_channels, dict) else {}
+            auth_dir = str(raw_whatsapp.get("auth_dir", "") or "").strip()
+        if not auth_dir:
+            auth_dir = str((Path.home() / ".neuralclaw" / "sessions" / "whatsapp").resolve())
+        Path(auth_dir).mkdir(parents=True, exist_ok=True)
+
+        creds_path = Path(auth_dir) / "creds.json"
+        if creds_path.exists():
+            return {
+                "ok": True,
+                "paired": True,
+                "auth_dir": auth_dir,
+                "message": f"WhatsApp is already paired using {auth_dir}.",
+            }
+
+        from neuralclaw.config import ChannelConfig
+
+        qr_event = asyncio.Event()
+        qr_payload: dict[str, str] = {}
+
+        def _capture_qr(qr_data: str) -> None:
+            qr_payload["raw"] = qr_data
+            qr_event.set()
+
+        cfg = ChannelConfig(
+            name="whatsapp",
+            enabled=True,
+            token=auth_dir,
+            extra={"auth_dir": auth_dir},
+        )
+
+        await self._stop_channel_pairing("whatsapp")
+        try:
+            adapter = self._build_whatsapp_channel(cfg, on_qr=_capture_qr)
+            if not adapter:
+                return {"ok": False, "error": "Unable to initialize WhatsApp adapter"}
+
+            self._channel_pairing_adapters["whatsapp"] = adapter
+            await adapter.start()
+            await asyncio.wait_for(qr_event.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            ok, message = await adapter.test_connection()
+            if ok:
+                return {
+                    "ok": True,
+                    "paired": True,
+                    "auth_dir": auth_dir,
+                    "message": message,
+                }
+            await self._stop_channel_pairing("whatsapp")
+            return {
+                "ok": False,
+                "error": "Timed out waiting for a WhatsApp QR code. Verify Node.js is installed and try again.",
+            }
+        except Exception as exc:
+            await self._stop_channel_pairing("whatsapp")
+            return {"ok": False, "error": str(exc)}
+
+        qr_raw = qr_payload.get("raw", "")
+        if not qr_raw:
+            await self._stop_channel_pairing("whatsapp")
+            return {"ok": False, "error": "WhatsApp pairing did not provide a QR code"}
+
+        return {
+            "ok": True,
+            "paired": False,
+            "auth_dir": auth_dir,
+            "message": "Scan this QR code from WhatsApp → Linked Devices → Link a Device.",
+            "qr_data": qr_raw,
+            "qr_data_url": self._qr_svg_data_url(qr_raw),
+        }
+
     # -- Dashboard action helpers ---------------------------------------------
 
     def _dashboard_spawn(
@@ -2638,6 +3074,54 @@ class NeuralClawGateway:
             return False
         return self._spawner.despawn(name)
 
+    def _normalize_agent_definition_payload(
+        self,
+        data: dict[str, Any],
+        *,
+        existing_name: str | None = None,
+        require_name: bool = True,
+    ) -> dict[str, Any]:
+        name = str(data.get("name", existing_name or "") or "").strip()
+        if require_name and not name:
+            raise ValueError("Agent name is required")
+
+        provider = str(data.get("provider", "local") or "local").strip() or "local"
+        model = str(data.get("model", "") or "").strip()
+        if not model:
+            raise ValueError("Model is required")
+
+        raw_caps = data.get("capabilities", [])
+        if isinstance(raw_caps, str):
+            capabilities = [cap.strip() for cap in raw_caps.split(",") if cap.strip()]
+        elif isinstance(raw_caps, list):
+            capabilities = [str(cap).strip() for cap in raw_caps if str(cap).strip()]
+        else:
+            capabilities = []
+
+        namespace = str(data.get("memory_namespace", "") or "").strip()
+        if not namespace:
+            slug_source = name or existing_name or "agent"
+            slug = re.sub(r"[^a-z0-9]+", "-", slug_source.lower()).strip("-") or "agent"
+            namespace = f"agent:{slug}"
+
+        metadata = data.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        return {
+            "name": name,
+            "description": str(data.get("description", "") or "").strip(),
+            "capabilities": capabilities,
+            "provider": provider,
+            "model": model,
+            "base_url": str(data.get("base_url", "") or "").strip(),
+            "api_key": str(data.get("api_key", "") or "").strip(),
+            "system_prompt": str(data.get("system_prompt", "") or "").strip(),
+            "memory_namespace": namespace,
+            "auto_start": bool(data.get("auto_start", False)),
+            "metadata": metadata,
+        }
+
     # -- Agent definition CRUD (for dashboard) ---------------------------------
 
     async def _dashboard_list_definitions(self) -> list[dict]:
@@ -2651,22 +3135,20 @@ class NeuralClawGateway:
             return {"ok": False, "error": "Agent store not available"}
         from neuralclaw.swarm.agent_store import AgentDefinition
         try:
-            defn = AgentDefinition(
-                agent_id="",
-                name=data.get("name", ""),
-                description=data.get("description", ""),
-                capabilities=data.get("capabilities", []),
-                provider=data.get("provider", "local"),
-                model=data.get("model", ""),
-                base_url=data.get("base_url", ""),
-                api_key=data.get("api_key", ""),
-                system_prompt=data.get("system_prompt", ""),
-                memory_namespace=data.get("memory_namespace", ""),
-                auto_start=data.get("auto_start", False),
-                metadata=data.get("metadata", {}),
-            )
+            payload = self._normalize_agent_definition_payload(data)
+            if payload["provider"] in {"local", "meta"}:
+                payload["model"], payload["base_url"] = await self._validate_local_model(
+                    payload["model"],
+                    payload["base_url"],
+                )
+            existing = await self._agent_store.get_by_name(payload["name"])
+            if existing:
+                return {"ok": False, "error": f"Agent '{payload['name']}' already exists"}
+            defn = AgentDefinition(agent_id="", **payload)
             agent_id = await self._agent_store.create(defn)
             return {"ok": True, "agent_id": agent_id}
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -2674,8 +3156,27 @@ class NeuralClawGateway:
         if not self._agent_store:
             return {"ok": False, "error": "Agent store not available"}
         try:
-            ok = await self._agent_store.update(agent_id, **data)
+            existing = await self._agent_store.get(agent_id)
+            if not existing:
+                return {"ok": False, "error": "Agent definition not found"}
+            payload = self._normalize_agent_definition_payload(
+                data,
+                existing_name=existing.name,
+                require_name=False,
+            )
+            payload.pop("name", None)
+            provider_name = str(payload.get("provider") or existing.provider or "local")
+            model_name = str(payload.get("model") or existing.model or "")
+            base_url = str(payload.get("base_url") or existing.base_url or "")
+            if provider_name in {"local", "meta"} and model_name:
+                payload["model"], payload["base_url"] = await self._validate_local_model(
+                    model_name,
+                    base_url,
+                )
+            ok = await self._agent_store.update(agent_id, **payload)
             return {"ok": ok}
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -2692,6 +3193,12 @@ class NeuralClawGateway:
         if not defn:
             return {"ok": False, "error": "Agent definition not found"}
         try:
+            if defn.provider in {"local", "meta"}:
+                resolved_model, resolved_base_url = await self._validate_local_model(defn.model, defn.base_url)
+                if resolved_model != defn.model or resolved_base_url != defn.base_url:
+                    await self._agent_store.update(agent_id, model=resolved_model, base_url=resolved_base_url)
+                    defn.model = resolved_model
+                    defn.base_url = resolved_base_url
             self._spawner.spawn_from_definition(
                 defn,
                 episodic=self._episodic,
@@ -2721,6 +3228,27 @@ class NeuralClawGateway:
         if not self._mesh:
             return []
         return self._mesh.get_recent_messages(limit=limit)
+
+    async def _dashboard_list_tasks(self, limit: int = 100) -> list[dict[str, Any]]:
+        if not self._task_store:
+            return []
+        tasks = await self._task_store.list_all(limit=limit)
+        return [task.to_dict() for task in tasks if not task.parent_task_id]
+
+    async def _dashboard_get_task(self, task_id: str) -> dict[str, Any] | None:
+        if not self._task_store:
+            return None
+        task = await self._task_store.get(task_id)
+        if not task:
+            return None
+        children = await self._task_store.list_children(task_id)
+        payload = task.to_dict()
+        payload["children"] = [child.to_dict() for child in children]
+        return payload
+
+    async def _dashboard_get_local_model_health(self) -> dict[str, Any]:
+        registry = await self._get_local_model_registry(force=True)
+        return registry
 
     async def _dashboard_get_agent_memories(self, agent_name: str) -> dict:
         if not self._agent_store:
@@ -2787,10 +3315,62 @@ class NeuralClawGateway:
             "procedural": procedures,
         }
 
+    async def _resolve_agent_execution_profile(self, agent_name: str) -> dict[str, Any]:
+        definition = await self._agent_store.get_by_name(agent_name) if self._agent_store else None
+        runtime = self._spawner.get_runtime(agent_name) if self._spawner else None
+        provider = str(
+            (definition.provider if definition else "")
+            or (runtime.definition.provider if runtime else "")
+            or "local"
+        ).strip().lower()
+        requested_model = str(
+            (definition.model if definition else "")
+            or (runtime.definition.model if runtime else "")
+            or getattr(self._config.model_roles, "primary", "")
+            or self._get_provider_config("local").model
+            or ""
+        ).strip()
+        base_url = str(
+            (definition.base_url if definition else "")
+            or (runtime.definition.base_url if runtime else "")
+            or self._get_provider_config("local").base_url
+            or getattr(self._config.model_roles, "base_url", "")
+            or ""
+        ).strip()
+        effective_model = requested_model
+        fallback_reason = None
+
+        if provider in {"local", "meta", "ollama"}:
+            effective_model, base_url, fallback_reason = await self._resolve_local_model_with_fallback(
+                requested_model,
+                base_url,
+            )
+            if definition and (definition.model != effective_model or definition.base_url != base_url):
+                await self._agent_store.update(
+                    definition.agent_id,
+                    model=effective_model,
+                    base_url=base_url,
+                )
+            if self._spawner:
+                self._spawner.update_runtime_context(
+                    agent_name,
+                    requested_model=requested_model,
+                    effective_model=effective_model,
+                    base_url=base_url,
+                )
+
+        return {
+            "provider": provider,
+            "requested_model": requested_model,
+            "effective_model": effective_model,
+            "base_url": base_url,
+            "fallback_reason": fallback_reason,
+        }
+
     async def _dashboard_delegate_task(self, payload: dict[str, Any]) -> dict:
         if not self._delegation:
             return {"ok": False, "error": "Delegation not available"}
-        from neuralclaw.swarm.delegation import DelegationContext
+        from neuralclaw.swarm.delegation import DelegationContext, DelegationStatus
 
         task = str(payload.get("task", "")).strip()
         agent_name = str(payload.get("agent_name", "")).strip()
@@ -2804,6 +3384,10 @@ class NeuralClawGateway:
         targets = agent_names or ([agent_name] if agent_name else [])
         if not task or not targets:
             return {"ok": False, "error": "task and target agent required"}
+
+        profiles: dict[str, dict[str, Any]] = {}
+        for target in targets:
+            profiles[target] = await self._resolve_agent_execution_profile(target)
 
         ctx = DelegationContext(
             task_description=task,
@@ -2834,6 +3418,53 @@ class NeuralClawGateway:
             return event.id
 
         try:
+            task_id = ""
+            child_task_ids: list[str] = []
+            started_at = time.time()
+            if self._task_store:
+                parent_profile = profiles[targets[0]]
+                parent_task = TaskRecord(
+                    task_id="",
+                    title=(task.strip().splitlines()[0][:72] or "Delegated task"),
+                    prompt=task,
+                    status="running",
+                    provider=str(parent_profile.get("provider", "")),
+                    requested_model=str(parent_profile.get("requested_model", "")),
+                    effective_model=str(parent_profile.get("effective_model", "")),
+                    base_url=str(parent_profile.get("base_url", "")),
+                    target_agents=targets,
+                    shared_task_id=shared_task_id,
+                    started_at=started_at,
+                    metadata={
+                        "fallback_reason": parent_profile.get("fallback_reason"),
+                        "multi_agent": len(targets) > 1,
+                    },
+                )
+                task_id = await self._task_store.create(parent_task)
+                for target in targets:
+                    profile = profiles[target]
+                    child_id = await self._task_store.create(
+                        TaskRecord(
+                            task_id="",
+                            title=f"{target}: {task.strip().splitlines()[0][:56] or 'Delegated task'}",
+                            prompt=task,
+                            status="running",
+                            provider=str(profile.get("provider", "")),
+                            requested_model=str(profile.get("requested_model", "")),
+                            effective_model=str(profile.get("effective_model", "")),
+                            base_url=str(profile.get("base_url", "")),
+                            target_agents=[target],
+                            shared_task_id=shared_task_id,
+                            parent_task_id=task_id,
+                            started_at=started_at,
+                            metadata={
+                                "fallback_reason": profile.get("fallback_reason"),
+                            },
+                        )
+                    )
+                    child_task_ids.append(child_id)
+                await self._task_store.update(task_id, child_task_ids=child_task_ids)
+
             if len(targets) == 1:
                 request_id = log_activity(
                     from_agent="dashboard",
@@ -2842,6 +3473,8 @@ class NeuralClawGateway:
                     message_type="delegation",
                 )
                 result = await self._delegation.delegate(targets[0], ctx)
+                profile = profiles[targets[0]]
+                completed_at = time.time()
                 log_activity(
                     from_agent=targets[0],
                     to_agent="dashboard",
@@ -2852,21 +3485,59 @@ class NeuralClawGateway:
                         "status": result.status.name.lower(),
                         "confidence": result.confidence,
                         "error": result.error,
+                        "task_id": child_task_ids[0] if child_task_ids else None,
                     },
                 )
+                completed = result.status == DelegationStatus.COMPLETED
+                if self._task_store:
+                    child_status = result.status.name.lower()
+                    await self._task_store.update(
+                        child_task_ids[0],
+                        status=child_status,
+                        result=result.result or "",
+                        error=result.error or "",
+                        completed_at=completed_at,
+                        started_at=started_at,
+                        effective_model=str(profile.get("effective_model", "")),
+                        metadata={
+                            "confidence": result.confidence,
+                            "fallback_reason": profile.get("fallback_reason"),
+                        },
+                    )
+                    await self._task_store.update(
+                        task_id,
+                        status=child_status,
+                        result=result.result or "",
+                        error=result.error or "",
+                        completed_at=completed_at,
+                        started_at=started_at,
+                        effective_model=str(profile.get("effective_model", "")),
+                        metadata={
+                            "confidence": result.confidence,
+                            "fallback_reason": profile.get("fallback_reason"),
+                        },
+                    )
                 return {
-                    "ok": True,
+                    "ok": completed,
+                    "task_id": task_id or None,
+                    "child_task_ids": child_task_ids,
                     "status": result.status.name.lower(),
-                    "result": result.result or "",
+                    "result": result.result or result.error or "",
                     "confidence": result.confidence,
+                    "requested_model": profile.get("requested_model"),
+                    "effective_model": profile.get("effective_model"),
                     "results": [
                         {
                             "agent": targets[0],
                             "status": result.status.name.lower(),
                             "result": result.result or "",
                             "confidence": result.confidence,
+                            "error": result.error,
+                            "requested_model": profile.get("requested_model"),
+                            "effective_model": profile.get("effective_model"),
                         }
                     ],
+                    "error": None if completed else (result.error or "Delegation failed"),
                     "shared_task_id": shared_task_id or None,
                 }
 
@@ -2881,6 +3552,7 @@ class NeuralClawGateway:
             }
             results = await self._delegation.delegate_parallel([(name, ctx) for name in targets])
             for agent, res in zip(targets, results, strict=False):
+                profile = profiles[agent]
                 log_activity(
                     from_agent=agent,
                     to_agent="dashboard",
@@ -2891,15 +3563,61 @@ class NeuralClawGateway:
                         "status": res.status.name.lower(),
                         "confidence": res.confidence,
                         "error": res.error,
+                        "task_id": child_task_ids[targets.index(agent)] if child_task_ids else None,
+                    },
+                )
+            completed_count = sum(1 for res in results if res.status == DelegationStatus.COMPLETED)
+            completed_at = time.time()
+            aggregate_status = (
+                "completed" if completed_count == len(results)
+                else "partial" if completed_count > 0
+                else "failed"
+            )
+            aggregate_result = "\n\n".join(
+                (
+                    f"[{agent}] {res.result}".strip()
+                    if res.result
+                    else f"[{agent}] {res.error or res.status.name.lower()}"
+                )
+                for agent, res in zip(targets, results, strict=False)
+            ).strip()
+            if self._task_store:
+                for agent, child_id, res in zip(targets, child_task_ids, results, strict=False):
+                    profile = profiles[agent]
+                    await self._task_store.update(
+                        child_id,
+                        status=res.status.name.lower(),
+                        result=res.result or "",
+                        error=res.error or "",
+                        completed_at=completed_at,
+                        started_at=started_at,
+                        effective_model=str(profile.get("effective_model", "")),
+                        metadata={
+                            "confidence": res.confidence,
+                            "fallback_reason": profile.get("fallback_reason"),
+                        },
+                    )
+                await self._task_store.update(
+                    task_id,
+                    status=aggregate_status,
+                    result=aggregate_result,
+                    error="" if completed_count > 0 else "Delegation failed for all selected agents",
+                    completed_at=completed_at,
+                    started_at=started_at,
+                    metadata={
+                        "fallback_reasons": {
+                            agent: profile.get("fallback_reason")
+                            for agent, profile in profiles.items()
+                            if profile.get("fallback_reason")
+                        },
                     },
                 )
             return {
-                "ok": True,
-                "status": "completed",
-                "result": "\n\n".join(
-                    f"[{agent}] {res.result}".strip()
-                    for agent, res in zip(targets, results, strict=False)
-                ).strip(),
+                "ok": completed_count > 0,
+                "task_id": task_id or None,
+                "child_task_ids": child_task_ids,
+                "status": aggregate_status,
+                "result": aggregate_result,
                 "results": [
                     {
                         "agent": agent,
@@ -2907,9 +3625,14 @@ class NeuralClawGateway:
                         "result": res.result or "",
                         "confidence": res.confidence,
                         "error": res.error,
+                        "requested_model": profiles[agent].get("requested_model"),
+                        "effective_model": profiles[agent].get("effective_model"),
                     }
                     for agent, res in zip(targets, results, strict=False)
                 ],
+                "requested_model": profiles[targets[0]].get("requested_model"),
+                "effective_model": profiles[targets[0]].get("effective_model"),
+                "error": None if completed_count > 0 else "Delegation failed for all selected agents",
                 "shared_task_id": shared_task_id or None,
             }
         except Exception as e:
@@ -2948,13 +3671,105 @@ class NeuralClawGateway:
             ],
         }
 
-    async def _dashboard_send_message(self, content: str) -> str:
-        """Send a test message through the full cognitive pipeline."""
-        return await self.process_message(
-            content=content, author_id="dashboard",
-            author_name="Dashboard", channel_id="dashboard",
-            channel_type_name="CLI",
+    async def _dashboard_send_message(self, payload: str | dict[str, Any]) -> dict[str, Any]:
+        """Send a dashboard/desktop chat message through the cognitive pipeline."""
+        if isinstance(payload, str):
+            data: dict[str, Any] = {"content": payload}
+        elif isinstance(payload, dict):
+            data = dict(payload)
+        else:
+            return {"ok": False, "error": "message payload must be a string or object"}
+
+        content = str(data.get("content", "")).strip()
+        documents = data.get("documents", [])
+        if not isinstance(documents, list):
+            documents = []
+        media = data.get("media", [])
+        if not isinstance(media, list):
+            media = []
+        if not content and not documents and not media:
+            return {"ok": False, "error": "content or attachments required"}
+
+        target_agent = str(data.get("target_agent", "") or "").strip()
+        if target_agent:
+            delegated = await self._dashboard_delegate_task(
+                {
+                    "task": content,
+                    "agent_name": target_agent,
+                }
+            )
+            if not delegated.get("ok"):
+                return delegated
+            response_text = (
+                delegated.get("result")
+                or "\n\n".join(
+                    f"[{entry.get('agent', target_agent)}] {entry.get('result') or entry.get('status', '')}"
+                    for entry in delegated.get("results", [])
+                ).strip()
+                or "Task completed."
+            )
+            return {
+                "ok": True,
+                "response": response_text,
+                "routed_to": target_agent,
+                "task_id": delegated.get("task_id"),
+                "requested_model": delegated.get("requested_model"),
+                "effective_model": delegated.get("effective_model"),
+            }
+
+        if documents:
+            rendered_docs: list[str] = []
+            for item in documents:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "Document")).strip() or "Document"
+                text = str(item.get("content", "")).strip()
+                if text:
+                    rendered_docs.append(f"### {name}\n{text[:12000]}")
+            if rendered_docs:
+                content = (
+                    f"{content}\n\n## Attached Documents\n"
+                    + "\n\n".join(rendered_docs)
+                ).strip()
+
+        metadata = {
+            "platform": "web",
+            "source": "dashboard",
+            "is_private": True,
+            "is_shared": False,
+        }
+        if data.get("session_id"):
+            metadata["session_id"] = str(data["session_id"])
+
+        provider_name = str(data.get("provider", "") or "").strip().lower()
+        requested_model = str(data.get("model", "") or "").strip()
+        model_name = requested_model
+        base_url = str(data.get("base_url", "") or "").strip()
+        fallback_reason = None
+        effective_model = requested_model or None
+        if provider_name in {"local", "meta"} and requested_model:
+            model_name, base_url, fallback_reason = await self._resolve_local_model_with_fallback(
+                requested_model,
+                base_url,
+            )
+            effective_model = model_name
+
+        response = await self._process_dashboard_message_with_override(
+            content=content,
+            media=media,
+            metadata=metadata,
+            provider_name=provider_name,
+            model_name=model_name,
+            base_url=base_url,
         )
+        return {
+            "ok": True,
+            "response": response,
+            "model": effective_model or None,
+            "requested_model": requested_model or None,
+            "effective_model": effective_model or None,
+            "fallback_reason": fallback_reason,
+        }
 
     async def _dashboard_clear_memory(self) -> dict[str, Any]:
         """Clear all memory stores. Returns deleted counts."""
@@ -2979,13 +3794,356 @@ class NeuralClawGateway:
             "semantic_memory": {"value": feat.semantic_memory, "live": False, "label": "Semantic Memory"},
         }
 
-    def _dashboard_set_feature(self, feature: str, value: bool) -> bool:
-        """Toggle a feature flag. Only reflective_reasoning takes live effect."""
+    async def _dashboard_set_feature(self, feature: str, value: bool) -> dict[str, Any]:
+        """Persist a feature toggle and report whether a restart is required."""
         feat = self._config.features
         if not hasattr(feat, feature):
-            return False
-        setattr(feat, feature, value)
-        return True
+            return {"ok": False, "error": f"Unknown feature '{feature}'"}
+
+        update_config(
+            {"features": {feature: value}},
+            Path(self._config_path) if self._config_path else None,
+        )
+        reloaded = load_config(Path(self._config_path) if self._config_path else None)
+        self._refresh_runtime_config(reloaded)
+        return {
+            "ok": True,
+            "restart_required": feature != "reflective_reasoning",
+        }
+
+    def _candidate_local_base_urls(self, base_url: str = "") -> list[str]:
+        requested_base_url = str(base_url or "").strip()
+        configured_candidates = [
+            str(self._get_provider_config("local").base_url or "").strip(),
+            str(getattr(self._config.model_roles, "base_url", "") or "").strip(),
+        ]
+        if self._config.primary_provider and self._config.primary_provider.name in {"local", "meta"}:
+            configured_candidates.append(str(self._config.primary_provider.base_url or "").strip())
+
+        default_local_candidates = {
+            "",
+            "http://localhost:11434",
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:11434",
+            "http://127.0.0.1:11434/v1",
+        }
+        if requested_base_url and requested_base_url not in default_local_candidates:
+            candidates = [requested_base_url, *configured_candidates]
+        else:
+            candidates = [*configured_candidates, requested_base_url]
+        candidates.append("http://localhost:11434/v1")
+
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            ordered.append(candidate)
+            seen.add(candidate)
+        return ordered
+
+    async def _discover_local_models(self, base_url: str = "") -> tuple[list[str], str]:
+        timeout = aiohttp.ClientTimeout(total=5)
+        last_error: Exception | None = None
+
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for raw_base in self._candidate_local_base_urls(base_url):
+                base = raw_base[:-3] if raw_base.endswith("/v1") else raw_base
+                try:
+                    async with session.get(f"{base}/api/tags") as response:
+                        response.raise_for_status()
+                        payload = await response.json()
+                except Exception as exc:
+                    last_error = exc
+                    continue
+
+                models = payload.get("models", []) if isinstance(payload, dict) else []
+                names = [
+                    str(model.get("name", "")).strip()
+                    for model in models
+                    if isinstance(model, dict) and str(model.get("name", "")).strip()
+                ]
+                return sorted(set(names)), raw_base
+
+        if last_error:
+            self._logger.debug("Local model discovery failed for all configured endpoints: %s", last_error)
+        fallback = self._candidate_local_base_urls(base_url)[0] if self._candidate_local_base_urls(base_url) else "http://localhost:11434/v1"
+        return [], fallback
+
+    def _configured_local_role_models(self) -> list[tuple[str, str]]:
+        configured = [
+            ("primary", str(getattr(self._config.model_roles, "primary", "") or "").strip()),
+            ("fast", str(getattr(self._config.model_roles, "fast", "") or "").strip()),
+            ("micro", str(getattr(self._config.model_roles, "micro", "") or "").strip()),
+            ("embed", str(getattr(self._config.model_roles, "embed", "") or "").strip()),
+            ("default", str(self._get_provider_config("local").model or "").strip()),
+        ]
+        seen: set[str] = set()
+        ordered: list[tuple[str, str]] = []
+        for label, model in configured:
+            if not model or model in seen:
+                continue
+            ordered.append((label, model))
+            seen.add(model)
+        return ordered
+
+    async def _get_local_model_registry(self, force: bool = False) -> dict[str, Any]:
+        now = time.time()
+        if (
+            not force
+            and self._local_model_registry_cache.get("models")
+            and (now - self._local_model_registry_at) < 10
+        ):
+            return self._local_model_registry_cache
+
+        available, resolved_base_url = await self._discover_local_models("")
+        available_set = set(available)
+        configured = self._configured_local_role_models()
+        badges = [
+            {
+                "label": label,
+                "model": model,
+                "available": model in available_set,
+                "status": "available" if model in available_set else "missing",
+            }
+            for label, model in configured
+        ]
+        payload = {
+            "models": available,
+            "resolved_base_url": resolved_base_url,
+            "available_count": len(available),
+            "last_seen": now if available else None,
+            "badges": badges,
+            "fallback_chain": [model for label, model in configured if label in {"primary", "fast", "micro"}],
+        }
+        self._local_model_registry_cache = payload
+        self._local_model_registry_at = now
+        return payload
+
+    @staticmethod
+    def _extract_model_size(model_name: str) -> float | None:
+        match = re.search(r":([0-9]+(?:\.[0-9]+)?)b$", model_name.strip().lower())
+        if not match:
+            return None
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
+
+    def _resolve_local_model_alias(self, model: str, available: list[str]) -> str | None:
+        requested = model.strip()
+        if not requested:
+            return None
+        if requested in available:
+            return requested
+
+        available_map = {candidate.lower(): candidate for candidate in available}
+        if requested.lower() in available_map:
+            return available_map[requested.lower()]
+
+        family = requested.split(":", 1)[0].strip().lower()
+        family_matches = [
+            candidate
+            for candidate in available
+            if candidate.split(":", 1)[0].strip().lower() == family
+        ]
+        if not family_matches:
+            return None
+        if len(family_matches) == 1:
+            return family_matches[0]
+
+        requested_size = self._extract_model_size(requested)
+        if requested_size is not None:
+            scored = []
+            for candidate in family_matches:
+                candidate_size = self._extract_model_size(candidate)
+                if candidate_size is None:
+                    continue
+                scored.append((abs(candidate_size - requested_size), -candidate_size, candidate))
+            if scored:
+                scored.sort()
+                return scored[0][2]
+
+        family_matches.sort(key=lambda candidate: self._extract_model_size(candidate) or 0.0, reverse=True)
+        return family_matches[0]
+
+    async def _resolve_local_model_with_fallback(
+        self,
+        model: str,
+        base_url: str,
+    ) -> tuple[str, str, str | None]:
+        available, resolved_base_url = await self._discover_local_models(base_url)
+        if not available:
+            return model, resolved_base_url, None
+
+        requested = model.strip() or str(self._get_provider_config("local").model or "").strip()
+        candidates = [requested]
+        candidates.extend(
+            role_model
+            for role_label, role_model in self._configured_local_role_models()
+            if role_label in {"primary", "fast", "micro"} and role_model != requested
+        )
+
+        for candidate in candidates:
+            resolved = self._resolve_local_model_alias(candidate, available)
+            if resolved:
+                if requested and resolved != requested:
+                    return resolved, resolved_base_url, f"Requested model '{requested}' unavailable. Fell back to '{resolved}'."
+                return resolved, resolved_base_url, None
+
+        preview = ", ".join(available[:8])
+        suffix = "..." if len(available) > 8 else ""
+        raise ValueError(
+            f"Local model '{requested or model}' not found at {resolved_base_url}. Available models: {preview}{suffix}"
+        )
+
+    async def _validate_local_model(self, model: str, base_url: str) -> tuple[str, str]:
+        resolved, resolved_base_url, fallback_reason = await self._resolve_local_model_with_fallback(model, base_url)
+        if fallback_reason:
+            self._logger.warning("%s", fallback_reason)
+        elif resolved != model:
+            self._logger.info("Resolved local model alias '%s' -> '%s'", model, resolved)
+        return resolved, resolved_base_url
+
+    async def _process_dashboard_message_with_override(
+        self,
+        *,
+        content: str,
+        media: list[dict[str, Any]] | None,
+        metadata: dict[str, Any],
+        provider_name: str = "",
+        model_name: str = "",
+        base_url: str = "",
+    ) -> str:
+        if provider_name not in {"local", "meta"} or not model_name:
+            return await self.process_message(
+                content=content,
+                author_id="dashboard",
+                author_name="Dashboard",
+                channel_id="dashboard",
+                channel_type_name="CLI",
+                media=media,
+                message_metadata=metadata,
+            )
+
+        resolved_model, resolved_base_url = await self._validate_local_model(model_name, base_url)
+        temp_provider = self._build_local(
+            ProviderConfig(
+                name="local",
+                model=resolved_model,
+                base_url=resolved_base_url,
+            )
+        )
+        if not temp_provider:
+            raise ProviderError("Unable to create local provider override")
+
+        original_provider = self._provider
+        original_vision = self._vision
+        self._provider = temp_provider
+        self._deliberate.set_provider(temp_provider)
+        if self._config.features.vision:
+            self._vision = VisionPerception(temp_provider, self._bus)
+        try:
+            return await self.process_message(
+                content=content,
+                author_id="dashboard",
+                author_name="Dashboard",
+                channel_id="dashboard",
+                channel_type_name="CLI",
+                media=media,
+                message_metadata=metadata,
+            )
+        finally:
+            self._provider = original_provider
+            if original_provider:
+                self._deliberate.set_provider(original_provider)
+            self._vision = original_vision
+
+    async def _dashboard_list_kb_documents(self) -> list[dict[str, Any]]:
+        if not self._knowledge_base:
+            return []
+        docs = await self._knowledge_base.list_documents()
+        return [
+            {
+                "id": doc.id,
+                "filename": doc.filename,
+                "source": doc.source,
+                "doc_type": doc.doc_type,
+                "ingested_at": doc.ingested_at,
+                "chunk_count": doc.chunk_count,
+                "metadata": doc.metadata,
+            }
+            for doc in docs
+        ]
+
+    async def _dashboard_ingest_kb_document(self, data: dict[str, Any]) -> dict[str, Any]:
+        if not self._knowledge_base:
+            return {"ok": False, "error": "Knowledge base not available"}
+        file_path = str(data.get("file_path", "") or "").strip()
+        if not file_path:
+            return {"ok": False, "error": "file_path required"}
+        result = await self._knowledge_base.ingest(file_path=file_path, source="desktop_upload")
+        if result.get("error"):
+            return {"ok": False, "error": result["error"]}
+        return {"ok": True, **result}
+
+    async def _dashboard_ingest_kb_text(self, data: dict[str, Any]) -> dict[str, Any]:
+        if not self._knowledge_base:
+            return {"ok": False, "error": "Knowledge base not available"}
+
+        title = str(data.get("title", "") or "").strip()
+        source = str(data.get("source", "") or "").strip()
+        mime_type = str(data.get("mime_type", "") or "").strip().lower()
+        text = str(data.get("text", "") or "").strip()
+
+        if not text and mime_type.startswith("image/"):
+            image_value = str(data.get("content", "") or "").strip()
+            if image_value.startswith("data:") and "," in image_value:
+                image_value = image_value.split(",", 1)[1]
+            if not image_value:
+                return {"ok": False, "error": "image content required"}
+            if not self._vision:
+                return {"ok": False, "error": "Vision is not enabled for image ingestion"}
+            ocr = (await self._vision.extract_text(image_value)).strip()
+            desc = (await self._vision.describe(image_value, context="Knowledge base ingestion")).strip()
+            text = "\n\n".join(
+                part for part in (
+                    f"Image OCR\n{ocr}" if ocr else "",
+                    f"Image Description\n{desc}" if desc else "",
+                ) if part
+            ).strip()
+
+        if not text:
+            return {"ok": False, "error": "text required"}
+
+        result = await self._knowledge_base.ingest_text(
+            text=text,
+            source=source or "desktop_upload",
+            title=title or "Uploaded document",
+        )
+        if result.get("error"):
+            return {"ok": False, "error": result["error"]}
+        return {"ok": True, **result}
+
+    async def _dashboard_search_kb(self, query: str) -> list[dict[str, Any]]:
+        if not self._knowledge_base or not query:
+            return []
+        results = await self._knowledge_base.search(query)
+        return [
+            {
+                "content": item.chunk.content,
+                "document": item.document.filename if item.document else "",
+                "score": item.score,
+                "chunk_index": item.chunk.chunk_index,
+            }
+            for item in results
+        ]
+
+    async def _dashboard_delete_kb_document(self, document_id: str) -> dict[str, Any]:
+        if not self._knowledge_base:
+            return {"ok": False, "error": "Knowledge base not available"}
+        ok = await self._knowledge_base.delete_document(document_id)
+        return {"ok": bool(ok)}
 
     def _dashboard_reset_provider_circuit(self, name: str) -> bool:
         if not self._provider:
@@ -3258,7 +4416,12 @@ class NeuralClawGateway:
             for item in self._health.get_readiness_results()
         }
         status = "healthy" if self._startup_readiness in (ReadinessState.READY, ReadinessState.DEGRADED) else "unhealthy"
-        return {"status": status, "readiness": self._startup_readiness.value, "probes": probes}
+        return {
+            "status": status,
+            "readiness": self._startup_readiness.value,
+            "probes": probes,
+            "version": __version__,
+        }
 
     def _get_ready_payload(self) -> dict[str, Any]:
         return {"status": self._startup_readiness.value}

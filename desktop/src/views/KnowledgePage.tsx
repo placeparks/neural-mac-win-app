@@ -1,90 +1,118 @@
-// NeuralClaw Desktop — Knowledge Base Page
-
-import { useState, useEffect, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Header from '../components/layout/Header';
+import {
+  deleteKnowledgeDocument,
+  getKnowledgeDocuments,
+  ingestKnowledgeText,
+  searchKnowledgeBase,
+  type KBDocument,
+  type KBSearchResult,
+} from '../lib/api';
 
-interface KBDocument {
-  id: string;
-  filename: string;
-  source: string;
-  doc_type: string;
-  ingested_at: string;
-  chunk_count: number;
-}
+async function readKnowledgeFile(file: File): Promise<{ text: string; source: string; mimeType: string }> {
+  if (file.type.startsWith('image/')) {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+      reader.readAsDataURL(file);
+    });
+    return {
+      text: `Image asset uploaded: ${file.name}\n\nThis image was added from the desktop knowledge base uploader.`,
+      source: dataUrl,
+      mimeType: file.type || 'image/png',
+    };
+  }
 
-interface KBSearchResult {
-  content: string;
-  document: string;
-  score: number;
-  chunk_index: number;
+  const text = await file.text();
+  return {
+    text,
+    source: file.name,
+    mimeType: file.type || 'text/plain',
+  };
 }
 
 export default function KnowledgePage() {
   const [documents, setDocuments] = useState<KBDocument[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<KBSearchResult[]>([]);
+  const [loading, setLoading] = useState(true);
   const [searching, setSearching] = useState(false);
   const [ingesting, setIngesting] = useState(false);
-  const [ingestPath, setIngestPath] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [endpointAvailable, setEndpointAvailable] = useState(true);
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [selectedFileName, setSelectedFileName] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadDocuments = useCallback(async () => {
+    setLoading(true);
     try {
-      const result = await invoke<string>('get_kb_documents');
-      const parsed = JSON.parse(result);
-      setDocuments(Array.isArray(parsed) ? parsed : parsed.documents || []);
-      setError(null);
-      setEndpointAvailable(true);
-    } catch {
-      // Endpoint may not exist — show empty state, not error
+      const next = await getKnowledgeDocuments();
+      setDocuments(next);
+      setMessage(null);
+    } catch (error: any) {
+      setMessage({ ok: false, text: error?.message || 'Failed to load knowledge base documents.' });
       setDocuments([]);
-      setEndpointAvailable(false);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => { loadDocuments(); }, [loadDocuments]);
+  useEffect(() => {
+    void loadDocuments();
+  }, [loadDocuments]);
 
-  const handleSearch = async () => {
-    if (!searchQuery.trim()) return;
-    setSearching(true);
-    setError(null);
-    try {
-      const result = await invoke<string>('search_kb', { query: searchQuery });
-      const parsed = JSON.parse(result);
-      setSearchResults(Array.isArray(parsed) ? parsed : parsed.results || []);
-    } catch {
-      setError('Search failed. Try using chat: "search knowledge base for..."');
-    } finally {
-      setSearching(false);
-    }
-  };
-
-  const handleIngest = async () => {
-    if (!ingestPath.trim()) return;
+  const handleFileUpload = async (file: File | null) => {
+    if (!file) return;
     setIngesting(true);
-    setError(null);
+    setMessage(null);
+    setSelectedFileName(file.name);
     try {
-      await invoke<string>('ingest_kb_document', { filePath: ingestPath });
-      setIngestPath('');
-      await loadDocuments();
-    } catch {
-      setError('Ingest failed via REST. Try using chat: "ingest file ' + ingestPath + '"');
+      const payload = await readKnowledgeFile(file);
+      const result = await ingestKnowledgeText({
+        title: file.name,
+        text: payload.text,
+        source: payload.source,
+        mimeType: payload.mimeType,
+        content: payload.text,
+      });
+      if (!result.ok) {
+        setMessage({ ok: false, text: result.error || 'Knowledge ingest failed.' });
+      } else {
+        setMessage({ ok: true, text: `Ingested ${result.filename || file.name} into the knowledge base.` });
+        await loadDocuments();
+      }
+    } catch (error: any) {
+      setMessage({ ok: false, text: error?.message || 'Failed to read the selected file.' });
     } finally {
       setIngesting(false);
     }
   };
 
-  const handleDelete = async (docId: string) => {
+  const handleSearch = async () => {
+    if (!searchQuery.trim()) return;
+    setSearching(true);
+    setMessage(null);
     try {
-      await invoke<string>('delete_kb_document', { documentId: docId });
+      const results = await searchKnowledgeBase(searchQuery.trim());
+      setSearchResults(results);
+    } catch (error: any) {
+      setMessage({ ok: false, text: error?.message || 'Knowledge search failed.' });
+      setSearchResults([]);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const handleDelete = async (documentId: string) => {
+    try {
+      const result = await deleteKnowledgeDocument(documentId);
+      if (!result.ok) {
+        setMessage({ ok: false, text: 'Failed to delete document.' });
+        return;
+      }
       await loadDocuments();
-    } catch {
-      setError('Delete failed. Try using chat: "delete document..."');
+    } catch (error: any) {
+      setMessage({ ok: false, text: error?.message || 'Failed to delete document.' });
     }
   };
 
@@ -93,55 +121,54 @@ export default function KnowledgePage() {
       <Header title="Knowledge Base" />
       <div className="app-content">
         <div className="page-header">
-          <h1>📚 Knowledge Base</h1>
-          <p>Upload and search documents to give NeuralClaw context about your data.</p>
+          <h1>Knowledge Base</h1>
+          <p>Upload text, docs, JSON, CSV, markdown, or images so NeuralClaw can retrieve them later.</p>
         </div>
 
         <div className="page-body">
-          {error && (
-            <div className="info-box" style={{ background: 'var(--accent-red-muted)', borderColor: 'rgba(248,81,73,0.3)', marginBottom: 16 }}>
-              <span className="info-icon">!</span>
-              <span>{error}</span>
+          {message && (
+            <div
+              className="info-box"
+              style={{
+                marginBottom: 16,
+                background: message.ok ? 'var(--accent-green-muted)' : 'var(--accent-red-muted)',
+                borderColor: message.ok ? 'rgba(63, 185, 80, 0.3)' : 'rgba(248, 81, 73, 0.3)',
+              }}
+            >
+              <span className="info-icon">{message.ok ? '✓' : '!'}</span>
+              <span>{message.text}</span>
             </div>
           )}
 
-          {/* Quick Chat Commands Info */}
-          {!endpointAvailable && (
-            <div className="info-box" style={{ marginBottom: 16 }}>
-              <span className="info-icon">💡</span>
-              <span>Knowledge Base operations work through chat. Try these commands:</span>
-            </div>
-          )}
-
-          {/* Ingest Section */}
           <div className="card" style={{ marginBottom: 16 }}>
             <div className="card-header">
-              <span className="card-title">Ingest Document</span>
+              <span className="card-title">Upload to Knowledge Base</span>
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                className="input-field input-mono"
-                type="text"
-                placeholder="File path (e.g., ~/documents/report.pdf)"
-                value={ingestPath}
-                onChange={(e) => setIngestPath(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleIngest()}
-                style={{ flex: 1 }}
-              />
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
               <button
                 className="btn btn-primary"
-                onClick={handleIngest}
-                disabled={!ingestPath.trim() || ingesting}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={ingesting}
               >
-                {ingesting ? <><span className="spinner" style={{ width: 14, height: 14 }} /> Ingesting...</> : 'Ingest'}
+                {ingesting ? 'Uploading...' : 'Choose File'}
               </button>
+              <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                {selectedFileName || 'Supports text, markdown, csv, json, html, and images.'}
+              </span>
             </div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
-              Supported: .txt, .md, .html, .csv, .pdf — or use chat: "ingest file /path/to/doc.pdf"
-            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              hidden
+              accept="image/*,.txt,.md,.markdown,.csv,.json,.html,.htm,.xml"
+              onChange={(event) => {
+                const file = event.target.files?.[0] || null;
+                void handleFileUpload(file);
+                event.currentTarget.value = '';
+              }}
+            />
           </div>
 
-          {/* Search Section */}
           <div className="card" style={{ marginBottom: 16 }}>
             <div className="card-header">
               <span className="card-title">Search Knowledge Base</span>
@@ -149,36 +176,31 @@ export default function KnowledgePage() {
             <div style={{ display: 'flex', gap: 8 }}>
               <input
                 className="input-field"
-                type="text"
-                placeholder="Search query..."
+                placeholder="Search across ingested knowledge..."
                 value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                style={{ flex: 1 }}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void handleSearch();
+                  }
+                }}
               />
-              <button
-                className="btn btn-secondary"
-                onClick={handleSearch}
-                disabled={!searchQuery.trim() || searching}
-              >
-                {searching ? <><span className="spinner" style={{ width: 14, height: 14 }} /> Searching...</> : 'Search'}
+              <button className="btn btn-secondary" onClick={() => { void handleSearch(); }} disabled={searching || !searchQuery.trim()}>
+                {searching ? 'Searching...' : 'Search'}
               </button>
             </div>
 
             {searchResults.length > 0 && (
-              <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{searchResults.length} result(s)</div>
-                {searchResults.map((r, i) => (
-                  <div key={i} style={{
-                    padding: '10px 14px', background: 'var(--bg-tertiary)',
-                    borderRadius: 'var(--radius-sm)', fontSize: 13,
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                      <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{r.document}</span>
-                      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Score: {(r.score * 100).toFixed(1)}%</span>
+              <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
+                {searchResults.map((result, index) => (
+                  <div key={`${result.document}-${result.chunk_index}-${index}`} className="card" style={{ padding: 14 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
+                      <strong>{result.document}</strong>
+                      <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{(result.score * 100).toFixed(1)}%</span>
                     </div>
-                    <div style={{ color: 'var(--text-secondary)', lineHeight: 1.4 }}>
-                      {r.content.length > 300 ? r.content.slice(0, 300) + '...' : r.content}
+                    <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                      {result.content}
                     </div>
                   </div>
                 ))}
@@ -186,41 +208,54 @@ export default function KnowledgePage() {
             )}
           </div>
 
-          {/* Documents List */}
-          <div className="card" style={{ marginBottom: 16 }}>
+          <div className="card">
             <div className="card-header">
               <span className="card-title">Documents ({documents.length})</span>
-              <button className="btn btn-ghost btn-sm" onClick={loadDocuments}>Refresh</button>
+              <button className="btn btn-secondary btn-sm" onClick={() => { void loadDocuments(); }}>
+                Refresh
+              </button>
             </div>
+
             {loading ? (
-              <div style={{ textAlign: 'center', padding: 20, color: 'var(--text-muted)' }}>
-                <span className="spinner" style={{ width: 20, height: 20 }} /> Loading...
+              <div style={{ display: 'flex', justifyContent: 'center', padding: 24 }}>
+                <div className="spinner spinner-lg" />
               </div>
             ) : documents.length === 0 ? (
               <div className="empty-state" style={{ padding: 24 }}>
-                <span className="empty-icon">📄</span>
-                <h3>No Documents</h3>
-                <p>Ingest documents above or via chat to build your knowledge base.</p>
+                <span className="empty-icon">K</span>
+                <h3>No Knowledge Added Yet</h3>
+                <p>Upload a document or image above to start building the desktop knowledge base.</p>
               </div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'grid', gap: 8 }}>
                 {documents.map((doc) => (
-                  <div key={doc.id} style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                    padding: '10px 14px', background: 'var(--bg-tertiary)',
-                    borderRadius: 'var(--radius-sm)',
-                  }}>
+                  <div
+                    key={doc.id}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: 12,
+                      padding: '12px 14px',
+                      borderRadius: 'var(--radius-sm)',
+                      background: 'var(--bg-tertiary)',
+                    }}
+                  >
                     <div>
-                      <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)' }}>{doc.filename}</div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', gap: 12 }}>
-                        <span>{doc.doc_type?.toUpperCase()}</span>
+                      <div style={{ fontWeight: 600, marginBottom: 4 }}>{doc.filename}</div>
+                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 12, color: 'var(--text-muted)' }}>
+                        <span>{doc.doc_type}</span>
                         <span>{doc.chunk_count} chunks</span>
-                        <span>{new Date(doc.ingested_at).toLocaleDateString()}</span>
+                        <span>{new Date(doc.ingested_at * 1000).toLocaleString()}</span>
                       </div>
                     </div>
                     <button
                       className="btn btn-danger btn-sm"
-                      onClick={() => handleDelete(doc.id)}
+                      onClick={() => {
+                        if (window.confirm(`Delete ${doc.filename} from the knowledge base?`)) {
+                          void handleDelete(doc.id);
+                        }
+                      }}
                     >
                       Delete
                     </button>
@@ -228,26 +263,6 @@ export default function KnowledgePage() {
                 ))}
               </div>
             )}
-          </div>
-
-          {/* Chat Commands Reference */}
-          <div className="card">
-            <div className="card-header">
-              <span className="card-title">Chat Commands</span>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, fontSize: 13 }}>
-              {[
-                ['ingest file /path/to/doc.pdf', 'Add a document to KB'],
-                ['search knowledge base for "topic"', 'Semantic search'],
-                ['list ingested documents', 'Show all documents'],
-                ['remove the last ingested file', 'Delete a document'],
-              ].map(([cmd, desc]) => (
-                <div key={cmd} style={{ display: 'flex', gap: 12, padding: '6px 0' }}>
-                  <code style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent-blue)', minWidth: 280 }}>{cmd}</code>
-                  <span style={{ color: 'var(--text-muted)' }}>{desc}</span>
-                </div>
-              ))}
-            </div>
           </div>
         </div>
       </div>

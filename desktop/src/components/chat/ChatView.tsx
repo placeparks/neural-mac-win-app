@@ -1,6 +1,7 @@
 // NeuralClaw Desktop - Chat View
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { getProviderDefaults, getProviderModels, type ModelOption } from '../../lib/api';
 import { useChat } from '../../hooks/useChat';
 import MessageBubble from './MessageBubble';
 import InputBar from './InputBar';
@@ -18,6 +19,7 @@ export default function ChatView() {
     activeSessionId,
     messages,
     draft,
+    metadata,
     initialized,
     isStreaming,
     currentStreamContent,
@@ -29,8 +31,12 @@ export default function ChatView() {
     renameSession,
     deleteSession,
     updateDraft,
+    setSessionMetadata,
+    resetLocalChats,
   } = useChat();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [localModels, setLocalModels] = useState<ModelOption[]>([]);
+  const [localBaseUrl, setLocalBaseUrl] = useState('http://localhost:11434/v1');
 
   useEffect(() => {
     void loadHistory();
@@ -39,6 +45,52 @@ export default function ChatView() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isStreaming, currentStreamContent]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getProviderDefaults('local')
+      .then((defaults) => {
+        if (!cancelled && defaults.baseUrl.trim()) {
+          setLocalBaseUrl(defaults.baseUrl.trim());
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const provider = metadata.selectedProvider || 'local';
+    const baseUrl = metadata.baseUrl || localBaseUrl;
+    if (!['local', 'meta'].includes(provider)) {
+      setLocalModels([]);
+      return;
+    }
+
+    let cancelled = false;
+    getProviderModels(provider, baseUrl)
+      .then((models) => {
+        if (!cancelled) setLocalModels(models);
+      })
+      .catch(() => {
+        if (!cancelled) setLocalModels([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [localBaseUrl, metadata.baseUrl, metadata.selectedProvider]);
+
+  const routeParts = [
+    metadata.targetAgent ? `Agent ${metadata.targetAgent}` : 'NeuralClaw',
+    metadata.selectedModel
+      ? (metadata.effectiveModel && metadata.effectiveModel !== metadata.selectedModel
+        ? `${metadata.selectedModel} -> ${metadata.effectiveModel}`
+        : metadata.selectedModel)
+      : 'auto',
+  ];
+  const routeLabel = routeParts.join(' | ');
 
   return (
     <div className="chat-shell">
@@ -84,6 +136,16 @@ export default function ChatView() {
                   <span className="chat-session-title">{session.title}</span>
                   <span className="chat-session-time">{formatSessionTime(session.lastMessageAt)}</span>
                 </div>
+                {session.metadata?.targetAgent && (
+                  <div className="chat-session-badge">Agent: {session.metadata.targetAgent}</div>
+                )}
+                {session.metadata?.selectedModel && (
+                  <div className="chat-session-subtitle">
+                    {session.metadata.effectiveModel && session.metadata.effectiveModel !== session.metadata.selectedModel
+                      ? `${session.metadata.selectedModel} -> ${session.metadata.effectiveModel}`
+                      : session.metadata.selectedModel}
+                  </div>
+                )}
                 <div className="chat-session-preview">
                   {session.draft ? `Draft: ${session.draft}` : session.preview || 'No messages yet'}
                 </div>
@@ -146,16 +208,16 @@ export default function ChatView() {
         <div className="chat-messages">
           {messages.length === 0 && !currentStreamContent ? (
             <div className="chat-empty">
-              <span className="empty-icon">🧠</span>
+              <span className="empty-icon">NC</span>
               <h2>NeuralClaw</h2>
               <p>
-                Sessions now persist locally. Start a conversation and pick up where you left off later.
+                Sessions persist locally. Use agent-bound sessions, switch local models, and attach docs or images from here.
               </p>
             </div>
           ) : (
             <>
-              {messages.map((msg, i) => (
-                <MessageBubble key={`${msg.timestamp || i}-${msg.role}-${i}`} message={msg} />
+              {messages.map((msg, index) => (
+                <MessageBubble key={`${msg.timestamp || index}-${msg.role}-${index}`} message={msg} />
               ))}
               {isStreaming && currentStreamContent && (
                 <MessageBubble
@@ -174,10 +236,29 @@ export default function ChatView() {
         <InputBar
           value={draft}
           onChange={updateDraft}
-          onSend={(message) => void sendMessage(message)}
+          onSend={(message, attachments) => void sendMessage(message, attachments)}
           disabled={isStreaming}
+          routeLabel={routeLabel}
+          modelOptions={localModels}
+          selectedModel={metadata.selectedModel || ''}
+          onModelChange={(model) => {
+            void setSessionMetadata({
+              ...metadata,
+              selectedProvider: 'local',
+              baseUrl: metadata.baseUrl || localBaseUrl,
+              selectedModel: model || null,
+            });
+          }}
         />
-        <StatusBar onClear={() => void clearChatHistory()} sessionCount={sessions.length} />
+        <StatusBar
+          onClear={() => void clearChatHistory()}
+          onResetAll={() => {
+            if (window.confirm('Reset all local desktop chats and start fresh?')) {
+              void resetLocalChats();
+            }
+          }}
+          sessionCount={sessions.length}
+        />
       </div>
     </div>
   );

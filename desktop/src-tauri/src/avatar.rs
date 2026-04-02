@@ -149,6 +149,19 @@ pub fn open_main_window_internal(app: &AppHandle, target_view: Option<String>) -
     Ok(())
 }
 
+pub fn hide_avatar_window_internal(
+    app: &AppHandle,
+    avatar_state: &Mutex<AvatarWindowState>,
+) -> Result<AvatarWindowState, String> {
+    let next_state = {
+        let mut state = avatar_state.lock().map_err(|err| err.to_string())?;
+        state.visible = false;
+        state.clone()
+    };
+    apply_window_state(app, &next_state)?;
+    Ok(next_state)
+}
+
 #[tauri::command]
 pub fn get_avatar_state(state: State<'_, Mutex<AvatarWindowState>>) -> Result<AvatarWindowState, String> {
     let state = state.lock().map_err(|err| err.to_string())?;
@@ -254,6 +267,14 @@ pub fn update_avatar_settings(
 #[tauri::command]
 pub fn open_main_window(app: AppHandle, target_view: Option<String>) -> Result<(), String> {
     open_main_window_internal(&app, target_view)
+}
+
+#[tauri::command]
+pub fn hide_avatar_window(
+    app: AppHandle,
+    state: State<'_, Mutex<AvatarWindowState>>,
+) -> Result<AvatarWindowState, String> {
+    hide_avatar_window_internal(&app, state.inner())
 }
 
 #[tauri::command]

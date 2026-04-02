@@ -1,4 +1,4 @@
-// NeuralClaw Desktop — Message Bubble
+// NeuralClaw Desktop - Message Bubble
 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -18,16 +18,16 @@ export default function MessageBubble({ message }: Props) {
   return (
     <div className={`message-row ${isUser ? 'user' : 'assistant'}`}>
       <div className={`message-avatar ${isUser ? 'user' : 'bot'}`}>
-        {isUser ? '👤' : '🧠'}
+        {isUser ? 'You' : 'NC'}
       </div>
-      <div>
+      <div className={`message-stack ${isUser ? 'user' : 'assistant'}`}>
         <div className={`message-content ${isUser ? 'user' : 'bot'}`}>
           {isUser ? (
-            message.content
+            <div className="message-plain-text">{message.content}</div>
           ) : (
             <>
-              {message.tool_calls?.map((tc, i) => (
-                <ToolCallCard key={i} toolCall={tc} />
+              {message.tool_calls?.map((tc, index) => (
+                <ToolCallCard key={index} toolCall={tc} />
               ))}
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {message.content}

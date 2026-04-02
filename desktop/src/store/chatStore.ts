@@ -1,13 +1,21 @@
 // NeuralClaw Desktop - Chat Store
 
 import { create } from 'zustand';
-import type { ChatMessage, DesktopChatBootstrap, DesktopChatSession, DesktopChatSessionPayload, ToolCall } from '../lib/api';
+import type {
+  ChatMessage,
+  ChatSessionMetadata,
+  DesktopChatBootstrap,
+  DesktopChatSession,
+  DesktopChatSessionPayload,
+  ToolCall,
+} from '../lib/api';
 
 interface ChatState {
   sessions: DesktopChatSession[];
   activeSessionId: string | null;
   messages: ChatMessage[];
   draft: string;
+  metadata: ChatSessionMetadata;
   initialized: boolean;
   isStreaming: boolean;
   currentStreamContent: string;
@@ -18,6 +26,7 @@ interface ChatState {
   setSessionPayload: (payload: DesktopChatSessionPayload) => void;
   setSessions: (sessions: DesktopChatSession[]) => void;
   setDraft: (draft: string) => void;
+  setMetadata: (metadata: ChatSessionMetadata) => void;
   addMessage: (msg: ChatMessage, sessionId?: string | null) => void;
   replaceMessages: (msgs: ChatMessage[]) => void;
   clearMessages: () => void;
@@ -34,6 +43,7 @@ export const useChatStore = create<ChatState>((set) => ({
   activeSessionId: null,
   messages: [],
   draft: '',
+  metadata: {},
   initialized: false,
   isStreaming: false,
   currentStreamContent: '',
@@ -45,6 +55,7 @@ export const useChatStore = create<ChatState>((set) => ({
     activeSessionId: payload.activeSessionId,
     messages: payload.messages,
     draft: payload.draft,
+    metadata: payload.sessions.find((session) => session.sessionId === payload.activeSessionId)?.metadata || {},
     initialized: true,
   }),
 
@@ -52,12 +63,15 @@ export const useChatStore = create<ChatState>((set) => ({
     activeSessionId: payload.activeSessionId,
     messages: payload.messages,
     draft: payload.draft,
+    metadata: payload.metadata || {},
     initialized: true,
   }),
 
   setSessions: (sessions) => set({ sessions }),
 
   setDraft: (draft) => set({ draft }),
+
+  setMetadata: (metadata) => set({ metadata }),
 
   addMessage: (msg, sessionId) =>
     set((state) => {

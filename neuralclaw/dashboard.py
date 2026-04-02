@@ -25,6 +25,20 @@ except ImportError:
     web = None  # type: ignore
 
 
+if web is not None:
+    @web.middleware
+    async def _cors_middleware(request: Any, handler: Any) -> Any:
+        if request.method == "OPTIONS":
+            response = web.Response(status=204)
+        else:
+            response = await handler(request)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Max-Age"] = "86400"
+        return response
+
+
 # ---------------------------------------------------------------------------
 # Dashboard HTML (embedded — no external dependencies)
 # ---------------------------------------------------------------------------
@@ -647,6 +661,9 @@ class Dashboard:
         self._config_provider: Any = None
         self._skills_provider: Any = None
         self._swarm_provider: Any = None
+        self._tasks_provider: Any = None
+        self._task_detail_provider: Any = None
+        self._local_models_provider: Any = None
 
         # Action callables
         self._spawn_action: Any = None
@@ -658,6 +675,16 @@ class Dashboard:
         self._set_feature_action: Any = None
         self._message_peer_action: Any = None
         self._provider_reset_action: Any = None
+        self._update_config_action: Any = None
+        self._channels_provider: Any = None
+        self._channel_update_action: Any = None
+        self._channel_test_action: Any = None
+        self._channel_pair_action: Any = None
+        self._kb_list_action: Any = None
+        self._kb_ingest_action: Any = None
+        self._kb_ingest_text_action: Any = None
+        self._kb_search_action: Any = None
+        self._kb_delete_action: Any = None
 
         # Agent definition CRUD
         self._agent_def_list: Any = None
@@ -709,11 +736,48 @@ class Dashboard:
     def set_config_provider(self, provider: Any) -> None:
         self._config_provider = provider
 
+    def set_config_update_action(self, action: Any) -> None:
+        self._update_config_action = action
+
+    def set_channels_provider(self, provider: Any) -> None:
+        self._channels_provider = provider
+
+    def set_channel_actions(
+        self,
+        update_action: Any = None,
+        test_action: Any = None,
+        pair_action: Any = None,
+    ) -> None:
+        self._channel_update_action = update_action
+        self._channel_test_action = test_action
+        self._channel_pair_action = pair_action
+
     def set_skills_provider(self, provider: Any) -> None:
         self._skills_provider = provider
 
     def set_swarm_provider(self, provider: Any) -> None:
         self._swarm_provider = provider
+
+    def set_task_providers(self, list_provider: Any = None, detail_provider: Any = None) -> None:
+        self._tasks_provider = list_provider
+        self._task_detail_provider = detail_provider
+
+    def set_local_models_provider(self, provider: Any) -> None:
+        self._local_models_provider = provider
+
+    def set_knowledge_base_actions(
+        self,
+        list_action: Any = None,
+        ingest_action: Any = None,
+        ingest_text_action: Any = None,
+        search_action: Any = None,
+        delete_action: Any = None,
+    ) -> None:
+        self._kb_list_action = list_action
+        self._kb_ingest_action = ingest_action
+        self._kb_ingest_text_action = ingest_text_action
+        self._kb_search_action = search_action
+        self._kb_delete_action = delete_action
 
     # -- Action setters --
 
@@ -792,7 +856,7 @@ class Dashboard:
             print("[Dashboard] aiohttp not installed — dashboard unavailable")
             return
 
-        self._app = web.Application()
+        self._app = web.Application(middlewares=[_cors_middleware])
         # GET routes
         self._app.router.add_get("/", self._handle_index)
         self._app.router.add_get("/api/stats", self._handle_stats)
@@ -808,6 +872,10 @@ class Dashboard:
         self._app.router.add_get("/ready", self._handle_ready)
         self._app.router.add_get("/metrics", self._handle_metrics)
         self._app.router.add_get("/config", self._handle_config)
+        self._app.router.add_get("/api/channels", self._handle_channels)
+        self._app.router.add_get("/api/tasks", self._handle_tasks)
+        self._app.router.add_get("/api/tasks/{task_id}", self._handle_task_detail)
+        self._app.router.add_get("/api/models/local-health", self._handle_local_models)
         self._app.router.add_get("/skills", self._handle_skills)
         self._app.router.add_get("/swarm", self._handle_swarm)
         self._app.router.add_get("/ws/traces", self._handle_ws)
@@ -819,6 +887,15 @@ class Dashboard:
         self._app.router.add_post("/api/federation/join", self._handle_federation_join)
         self._app.router.add_post("/api/memory/clear", self._handle_memory_clear)
         self._app.router.add_post("/api/features", self._handle_set_feature)
+        self._app.router.add_post("/api/config", self._handle_config_update)
+        self._app.router.add_post("/api/channels/{channel_name}", self._handle_channel_update)
+        self._app.router.add_post("/api/channels/{channel_name}/test", self._handle_channel_test)
+        self._app.router.add_post("/api/channels/{channel_name}/pair", self._handle_channel_pair)
+        self._app.router.add_get("/api/kb/documents", self._handle_kb_documents)
+        self._app.router.add_post("/api/kb/ingest", self._handle_kb_ingest)
+        self._app.router.add_post("/api/kb/ingest-text", self._handle_kb_ingest_text)
+        self._app.router.add_post("/api/kb/search", self._handle_kb_search)
+        self._app.router.add_delete("/api/kb/documents/{document_id}", self._handle_kb_delete)
         self._app.router.add_post("/api/federation/message", self._handle_message_peer)
         self._app.router.add_post("/api/provider/reset-circuit", self._handle_provider_reset)
         # Agent definition CRUD routes
@@ -889,6 +966,30 @@ class Dashboard:
         data = self._bus_provider() if self._bus_provider else []
         return web.json_response(data)
 
+    async def _handle_tasks(self, request: Any) -> Any:
+        limit = int(request.query.get("limit", "100"))
+        data = self._tasks_provider(limit) if self._tasks_provider else []
+        if asyncio.iscoroutine(data):
+            data = await data
+        return web.json_response(data)
+
+    async def _handle_task_detail(self, request: Any) -> Any:
+        task_id = str(request.match_info.get("task_id", "")).strip()
+        if not task_id:
+            return web.json_response({"error": "task_id required"}, status=400)
+        data = self._task_detail_provider(task_id) if self._task_detail_provider else None
+        if asyncio.iscoroutine(data):
+            data = await data
+        if not data:
+            return web.json_response({"error": "Task not found"}, status=404)
+        return web.json_response(data)
+
+    async def _handle_local_models(self, request: Any) -> Any:
+        data = self._local_models_provider() if self._local_models_provider else {"models": [], "badges": []}
+        if asyncio.iscoroutine(data):
+            data = await data
+        return web.json_response(data)
+
     async def _handle_get_features(self, request: Any) -> Any:
         features = self._get_features_action() if self._get_features_action else {}
         return web.json_response(features)
@@ -938,6 +1039,12 @@ class Dashboard:
 
     async def _handle_config(self, request: Any) -> Any:
         payload = self._config_provider() if self._config_provider else {}
+        if asyncio.iscoroutine(payload):
+            payload = await payload
+        return web.json_response(payload)
+
+    async def _handle_channels(self, request: Any) -> Any:
+        payload = self._channels_provider() if self._channels_provider else []
         if asyncio.iscoroutine(payload):
             payload = await payload
         return web.json_response(payload)
@@ -995,9 +1102,14 @@ class Dashboard:
             content = str(body.get("content", "")).strip()
             if not content:
                 return web.json_response({"ok": False, "error": "content required"}, status=400)
-            response = self._send_message_action(content)
+            payload = dict(body)
+            payload["content"] = content
+            response = self._send_message_action(payload)
             if asyncio.iscoroutine(response):
                 response = await response
+            if isinstance(response, dict) and "ok" in response:
+                status = 200 if response.get("ok", False) else 400
+                return web.json_response(response, status=status)
             return web.json_response({"ok": True, "response": response})
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
@@ -1037,8 +1149,132 @@ class Dashboard:
             value = bool(body.get("value", False))
             if not feature:
                 return web.json_response({"ok": False, "error": "feature required"}, status=400)
-            ok = self._set_feature_action(feature, value)
-            return web.json_response({"ok": bool(ok)})
+            result = self._set_feature_action(feature, value)
+            if asyncio.iscoroutine(result):
+                result = await result
+            if isinstance(result, dict):
+                status = 200 if result.get("ok", False) else 400
+                return web.json_response(result, status=status)
+            return web.json_response({"ok": bool(result)})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_config_update(self, request: Any) -> Any:
+        if not self._update_config_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            body = await request.json()
+            result = self._update_config_action(body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_channel_update(self, request: Any) -> Any:
+        if not self._channel_update_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            channel_name = str(request.match_info.get("channel_name", "")).strip()
+            body = await request.json()
+            result = self._channel_update_action(channel_name, body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_channel_test(self, request: Any) -> Any:
+        if not self._channel_test_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            channel_name = str(request.match_info.get("channel_name", "")).strip()
+            body = await request.json()
+            result = self._channel_test_action(channel_name, body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_channel_pair(self, request: Any) -> Any:
+        if not self._channel_pair_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            channel_name = str(request.match_info.get("channel_name", "")).strip()
+            body = await request.json()
+            result = self._channel_pair_action(channel_name, body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_kb_documents(self, request: Any) -> Any:
+        if not self._kb_list_action:
+            return web.json_response({"ok": False, "error": "Knowledge base not available"}, status=503)
+        try:
+            result = self._kb_list_action()
+            if asyncio.iscoroutine(result):
+                result = await result
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_kb_ingest(self, request: Any) -> Any:
+        if not self._kb_ingest_action:
+            return web.json_response({"ok": False, "error": "Knowledge base not available"}, status=503)
+        try:
+            body = await request.json()
+            result = self._kb_ingest_action(body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_kb_ingest_text(self, request: Any) -> Any:
+        if not self._kb_ingest_text_action:
+            return web.json_response({"ok": False, "error": "Knowledge base not available"}, status=503)
+        try:
+            body = await request.json()
+            result = self._kb_ingest_text_action(body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_kb_search(self, request: Any) -> Any:
+        if not self._kb_search_action:
+            return web.json_response({"ok": False, "error": "Knowledge base not available"}, status=503)
+        try:
+            body = await request.json()
+            result = self._kb_search_action(str(body.get("query", "")).strip())
+            if asyncio.iscoroutine(result):
+                result = await result
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_kb_delete(self, request: Any) -> Any:
+        if not self._kb_delete_action:
+            return web.json_response({"ok": False, "error": "Knowledge base not available"}, status=503)
+        try:
+            document_id = str(request.match_info.get("document_id", "")).strip()
+            if not document_id:
+                return web.json_response({"ok": False, "error": "document_id required"}, status=400)
+            result = self._kb_delete_action(document_id)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
 

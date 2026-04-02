@@ -176,6 +176,29 @@ pub async fn delete_kb_document(document_id: String) -> Result<String, String> {
     resp.text().await.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn ingest_kb_text(
+    title: String,
+    text: String,
+    source: Option<String>,
+    mime_type: Option<String>,
+    content: Option<String>,
+) -> Result<String, String> {
+    let resp = client()
+        .post(format!("{}/api/kb/ingest-text", DASHBOARD_URL))
+        .json(&serde_json::json!({
+            "title": title,
+            "text": text,
+            "source": source.unwrap_or_default(),
+            "mime_type": mime_type.unwrap_or_default(),
+            "content": content.unwrap_or_default(),
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    resp.text().await.map_err(|e| e.to_string())
+}
+
 // ── Workflows ────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -320,7 +343,8 @@ pub async fn validate_api_key(provider: String, api_key: String, endpoint: Optio
         }
         "local" | "meta" => {
             // Ollama — no key needed, just check connectivity
-            let base = endpoint.as_deref().unwrap_or("http://localhost:11434");
+            let raw = endpoint.as_deref().unwrap_or("http://localhost:11434");
+            let base = raw.strip_suffix("/v1").unwrap_or(raw);
             let resp = client
                 .get(format!("{}/api/tags", base))
                 .send()
@@ -334,4 +358,84 @@ pub async fn validate_api_key(provider: String, api_key: String, endpoint: Optio
     };
 
     Ok(serde_json::json!({ "valid": result }).to_string())
+}
+
+#[tauri::command]
+pub async fn list_provider_models(
+    provider: String,
+    endpoint: Option<String>,
+    api_key: Option<String>,
+) -> Result<String, String> {
+    let provider_id = provider.trim().to_lowercase();
+    let http = client();
+
+    let models = match provider_id.as_str() {
+        "local" | "meta" => {
+            let raw = endpoint
+                .as_deref()
+                .unwrap_or("http://localhost:11434/v1");
+            let base = raw.strip_suffix("/v1").unwrap_or(raw);
+            let resp = http
+                .get(format!("{}/api/tags", base))
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            let payload: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            payload
+                .get("models")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|item| {
+                    let name = item.get("name").and_then(|value| value.as_str())?.trim().to_string();
+                    if name.is_empty() {
+                        return None;
+                    }
+                    let size = item
+                        .get("details")
+                        .and_then(|details| details.get("parameter_size"))
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    Some(serde_json::json!({
+                        "name": name,
+                        "description": if size.is_empty() { "Detected from Ollama" } else { size },
+                        "icon": "L"
+                    }))
+                })
+                .collect::<Vec<_>>()
+        }
+        _ => {
+            let base = endpoint.unwrap_or_default();
+            if base.trim().is_empty() {
+                return Ok(serde_json::json!({ "models": [] }).to_string());
+            }
+            let mut req = http.get(format!("{}/models", base.trim_end_matches('/')));
+            if let Some(secret) = api_key.filter(|value| !value.trim().is_empty()) {
+                req = req.header("Authorization", format!("Bearer {}", secret));
+            }
+            let resp = req.send().await.map_err(|e| e.to_string())?;
+            let payload: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+            payload
+                .get("data")
+                .and_then(|value| value.as_array())
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|item| {
+                    let name = item.get("id").and_then(|value| value.as_str())?.trim().to_string();
+                    if name.is_empty() {
+                        return None;
+                    }
+                    Some(serde_json::json!({
+                        "name": name,
+                        "description": "Available from provider",
+                        "icon": provider_id.chars().next().unwrap_or('M').to_string(),
+                    }))
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+
+    Ok(serde_json::json!({ "models": models }).to_string())
 }

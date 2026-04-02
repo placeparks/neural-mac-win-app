@@ -6,12 +6,14 @@ import { useAppStore } from './store/appStore';
 import { useHealth } from './hooks/useHealth';
 import { useBackend } from './hooks/useBackend';
 import Sidebar from './components/layout/Sidebar';
+import ToastViewport from './components/layout/ToastViewport';
 import WizardShell from './wizard/WizardShell';
 import LockView from './views/LockView';
 import ChatPage from './views/ChatPage';
 import SettingsPage from './views/SettingsPage';
 import MemoryPage from './views/MemoryPage';
 import KnowledgePage from './views/KnowledgePage';
+import TasksPage from './views/TasksPage';
 import WorkflowPage from './views/WorkflowPage';
 import DashboardPage from './views/DashboardPage';
 import AboutPage from './views/AboutPage';
@@ -67,6 +69,7 @@ export default function App() {
       case 'settings': return <SettingsPage />;
       case 'memory': return <MemoryPage />;
       case 'knowledge': return <KnowledgePage />;
+      case 'tasks': return <TasksPage />;
       case 'workflows': return <WorkflowPage />;
       case 'agents':
         return (
@@ -86,6 +89,7 @@ export default function App() {
       <main className="app-main">
         {renderView()}
       </main>
+      <ToastViewport />
     </div>
   );
 }

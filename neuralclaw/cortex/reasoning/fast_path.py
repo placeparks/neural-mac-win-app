@@ -119,7 +119,7 @@ class FastPathReasoner:
         elif text in _IDENTITY_PATTERNS or any(text.startswith(p) for p in _IDENTITY_PATTERNS):
             result = FastPathResult(
                 content=(
-                    f"I'm **{self._agent_name}**, a self-evolving cognitive AI assistant. "
+                    f"I'm **{self._agent_name}**, running on the **NeuralClaw** framework as a self-evolving cognitive AI assistant. "
                     "I can help you with web searches, manage your calendar, "
                     "execute code, and much more — all while learning from our interactions "
                     "to serve you better over time."

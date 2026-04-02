@@ -5,6 +5,7 @@ import { wsManager } from '../lib/ws';
 import { useAppStore } from '../store/appStore';
 import { useChatStore } from '../store/chatStore';
 import { useAvatarState } from '../avatar/useAvatarState';
+import { useTaskStore } from '../store/taskStore';
 import type { WSEvent } from '../lib/ws';
 import { saveDesktopChatMessage } from '../lib/api';
 
@@ -100,12 +101,68 @@ export function useBackend() {
       resetStream();
     });
 
+    const pollTasks = async () => {
+      const taskState = useTaskStore.getState();
+      const previousStatuses = { ...taskState.knownStatuses };
+      const tasks = await taskState.loadTasks(60);
+      for (const task of tasks) {
+        const previous = previousStatuses[task.task_id];
+        if (!previous && task.status === 'running') {
+          useAppStore.getState().pushToast({
+            title: 'Task started',
+            description: `${task.target_agents.join(', ')} is working on ${task.title}.`,
+            level: 'info',
+          });
+        }
+        if (previous && previous !== task.status) {
+          if (task.status === 'completed') {
+            useAppStore.getState().pushToast({
+              title: 'Task completed',
+              description: `${task.title} finished for ${task.target_agents.join(', ')}.`,
+              level: 'success',
+            });
+          } else if (task.status === 'partial') {
+            useAppStore.getState().pushToast({
+              title: 'Task partially completed',
+              description: `${task.title} returned mixed agent results.`,
+              level: 'warning',
+            });
+          } else if (task.status === 'failed') {
+            useAppStore.getState().pushToast({
+              title: 'Task failed',
+              description: task.error || `${task.title} failed.`,
+              level: 'error',
+            });
+          }
+        }
+        if (
+          task.requested_model
+          && task.effective_model
+          && task.requested_model !== task.effective_model
+          && previous !== task.status
+        ) {
+          useAppStore.getState().pushToast({
+            title: 'Model failover',
+            description: `${task.requested_model} was unavailable. NeuralClaw used ${task.effective_model}.`,
+            level: 'warning',
+          });
+        }
+      }
+      useTaskStore.getState().noteKnownStatuses();
+    };
+
+    void pollTasks();
+    const taskTimer = window.setInterval(() => {
+      void pollTasks();
+    }, 4000);
+
     return () => {
       unsubStatus();
       unsubDelta();
       unsubResponse();
       unsubComplete();
       unsubError();
+      window.clearInterval(taskTimer);
       wsManager.disconnect();
     };
   }, [appendStreamToken, setConnectionStatus, setSessions, setStreaming, resetStream]);

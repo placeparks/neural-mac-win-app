@@ -4,6 +4,15 @@ import { create } from 'zustand';
 
 export type ConnectionStatus = 'connected' | 'disconnected' | 'connecting';
 export type AppView = 'lock' | 'wizard' | 'app';
+export type ToastLevel = 'info' | 'success' | 'error' | 'warning';
+
+export interface AppToast {
+  id: string;
+  title: string;
+  description: string;
+  level: ToastLevel;
+  createdAt: number;
+}
 
 interface AppState {
   // Connection
@@ -28,6 +37,11 @@ interface AppState {
   backendVersion: string;
   backendUptime: number;
   setBackendInfo: (version: string, uptime: number) => void;
+
+  // Toasts
+  toasts: AppToast[];
+  pushToast: (toast: Omit<AppToast, 'id' | 'createdAt'>) => void;
+  removeToast: (id: string) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -52,4 +66,19 @@ export const useAppStore = create<AppState>((set) => ({
   backendVersion: '',
   backendUptime: 0,
   setBackendInfo: (version, uptime) => set({ backendVersion: version, backendUptime: uptime }),
+
+  toasts: [],
+  pushToast: (toast) => set((state) => ({
+    toasts: [
+      ...state.toasts,
+      {
+        ...toast,
+        id: Math.random().toString(36).slice(2, 10),
+        createdAt: Date.now(),
+      },
+    ].slice(-6),
+  })),
+  removeToast: (id) => set((state) => ({
+    toasts: state.toasts.filter((toast) => toast.id !== id),
+  })),
 }));

@@ -2345,7 +2345,7 @@ dependencies = [
 
 [[package]]
 name = "neuralclaw-desktop"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "reqwest 0.12.28",
  "rusqlite",

@@ -8,8 +8,12 @@ import AgentCreateForm from '../components/agents/AgentCreateForm';
 import AgentActivityFeed from '../components/agents/AgentActivityFeed';
 import DelegateTaskModal from '../components/agents/DelegateTaskModal';
 import { useAgentStore } from '../store/agentStore';
-import { AgentDefinition } from '../lib/api';
-import { updateAgentDefinition } from '../lib/api';
+import {
+  AgentDefinition,
+  createDesktopChatSessionWithMetadata,
+  getProviderDefaults,
+  updateAgentDefinition,
+} from '../lib/api';
 
 export default function AgentsPage() {
   const {
@@ -21,6 +25,7 @@ export default function AgentsPage() {
   const [editingAgent, setEditingAgent] = useState<AgentDefinition | null>(null);
   const [showDelegate, setShowDelegate] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
     loadAll();
@@ -35,17 +40,22 @@ export default function AgentsPage() {
   const handleSave = useCallback(async (data: Partial<AgentDefinition>) => {
     setSaving(true);
     clearError();
+    setFormError(null);
     if (editingAgent) {
       const result = await updateAgentDefinition(editingAgent.agent_id, data);
       if (result.ok) {
         await loadAll();
         setEditingAgent(null);
+      } else {
+        setFormError(result.error || 'Failed to update agent');
       }
     } else {
       const result = await createAgent(data);
       if (result.ok) {
         await loadAll();
         setShowCreate(false);
+      } else {
+        setFormError(result.error || 'Failed to create agent');
       }
     }
     setSaving(false);
@@ -53,8 +63,28 @@ export default function AgentsPage() {
 
   const handleCancel = () => {
     clearError();
+    setFormError(null);
     setShowCreate(false);
     setEditingAgent(null);
+  };
+
+  const handleTalkToAgent = async (definition: AgentDefinition) => {
+    let baseUrl = definition.base_url || '';
+    if ((!baseUrl || baseUrl.startsWith('http://localhost:11434')) && ['local', 'meta'].includes(definition.provider || '')) {
+      try {
+        const defaults = await getProviderDefaults('local');
+        baseUrl = defaults.baseUrl || baseUrl;
+      } catch {
+        // Keep the agent definition base URL if config lookup fails.
+      }
+    }
+    await createDesktopChatSessionWithMetadata(`Agent: ${definition.name}`, {
+      targetAgent: definition.name,
+      selectedProvider: definition.provider || 'local',
+      selectedModel: definition.model || null,
+      baseUrl: baseUrl || 'http://localhost:11434/v1',
+    });
+    window.dispatchEvent(new CustomEvent('neuralclaw:navigate', { detail: 'chat' }));
   };
 
   return (
@@ -95,7 +125,7 @@ export default function AgentsPage() {
               <AgentCreateForm
                 initial={editingAgent}
                 saving={saving}
-                error={error}
+                error={formError || error}
                 onSave={handleSave}
                 onCancel={handleCancel}
               />
@@ -131,6 +161,7 @@ export default function AgentsPage() {
                   running={running.find((r) => r.name === defn.name)}
                   onSpawn={() => spawnAgent(defn.agent_id)}
                   onDespawn={() => despawnAgent(defn.agent_id)}
+                  onTalk={() => { void handleTalkToAgent(defn); }}
                   onEdit={() => { setEditingAgent(defn); setShowCreate(false); }}
                   onDelete={() => deleteAgent(defn.agent_id)}
                 />
