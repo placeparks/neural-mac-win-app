@@ -75,7 +75,7 @@ jobs:
           releaseBody: 'See the assets for download links and the latest.json for auto-update.'
           releaseDraft: false
           prerelease: false
-          includeUpdaterJson: true
+          includeUpdaterJson: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -86,21 +86,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Check if latest.json exists
-        id: check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ github.ref_name }}"
-          # Check if latest.json is already in the release
-          EXISTS=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets -q '.assets[].name' | grep -c "latest.json" || true)
-          echo "exists=$EXISTS" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@v4
-        if: steps.check.outputs.exists == '0'
 
       - name: Generate and upload latest.json
-        if: steps.check.outputs.exists == '0'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -169,6 +157,21 @@ jobs:
           WIN_MSI_SIG_CONTENT=$(get_sig "$WIN_MSI_SIG")
           WIN_NSIS_SIG_CONTENT=$(get_sig "$WIN_NSIS_SIG")
           LINUX_SIG_CONTENT=$(get_sig "$LINUX_APPIMAGE_SIG")
+
+          # Fail hard if updater signatures are missing; shipping a blank-signature
+          # latest.json breaks in-app updates but looks superficially successful.
+          if [ -z "$MAC_TAR" ] || [ -z "$MAC_SIG" ] || [ -z "$MAC_SIG_CONTENT" ]; then
+            echo "Missing macOS updater asset or signature" >&2
+            exit 1
+          fi
+          if [ -z "${WIN_NSIS:-$WIN_MSI}" ] || [ -z "${WIN_NSIS_SIG_CONTENT:-$WIN_MSI_SIG_CONTENT}" ]; then
+            echo "Missing Windows updater asset or signature" >&2
+            exit 1
+          fi
+          if [ -z "$LINUX_APPIMAGE" ] || [ -z "$LINUX_SIG_CONTENT" ]; then
+            echo "Missing Linux updater asset or signature" >&2
+            exit 1
+          fi
 
           # Build latest.json
           cat > /tmp/latest.json << ENDJSON
