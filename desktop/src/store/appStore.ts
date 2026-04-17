@@ -1,6 +1,7 @@
 // NeuralClaw Desktop — Global App State (Zustand)
 
 import { create } from 'zustand';
+import { deletePersistedValue, getPersistedValue, setPersistedValue } from '../lib/persistence';
 
 export type ConnectionStatus = 'connected' | 'disconnected' | 'connecting';
 export type AppView = 'lock' | 'wizard' | 'app';
@@ -17,7 +18,9 @@ export interface AppToast {
 interface AppState {
   // Connection
   connectionStatus: ConnectionStatus;
+  realtimeStatus: ConnectionStatus;
   setConnectionStatus: (status: ConnectionStatus) => void;
+  setRealtimeStatus: (status: ConnectionStatus) => void;
 
   // Auth
   isLocked: boolean;
@@ -31,7 +34,9 @@ interface AppState {
 
   // Setup
   setupComplete: boolean;
+  persistenceHydrated: boolean;
   setSetupComplete: (complete: boolean) => void;
+  hydratePersistence: () => Promise<void>;
 
   // Backend
   backendVersion: string;
@@ -46,7 +51,9 @@ interface AppState {
 
 export const useAppStore = create<AppState>((set) => ({
   connectionStatus: 'disconnected',
+  realtimeStatus: 'disconnected',
   setConnectionStatus: (status) => set({ connectionStatus: status }),
+  setRealtimeStatus: (status) => set({ realtimeStatus: status }),
 
   isLocked: false,
   biometricEnabled: false,
@@ -56,11 +63,17 @@ export const useAppStore = create<AppState>((set) => ({
   appView: 'wizard',
   setAppView: (view) => set({ appView: view }),
 
-  setupComplete: !!localStorage.getItem('neuralclaw_setup_complete'),
+  setupComplete: false,
+  persistenceHydrated: false,
   setSetupComplete: (complete) => {
-    if (complete) localStorage.setItem('neuralclaw_setup_complete', 'true');
-    else localStorage.removeItem('neuralclaw_setup_complete');
+    void (complete
+      ? setPersistedValue('neuralclaw_setup_complete', true)
+      : deletePersistedValue('neuralclaw_setup_complete'));
     set({ setupComplete: complete });
+  },
+  hydratePersistence: async () => {
+    const setupComplete = await getPersistedValue<boolean>('neuralclaw_setup_complete', false);
+    set({ setupComplete, persistenceHydrated: true });
   },
 
   backendVersion: '',

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import io
 import sys
 import time
 import urllib.error
@@ -40,11 +41,34 @@ from neuralclaw.config import (
 
 import os
 
+HAS_INTERACTIVE_STDIO = True
+
 if sys.platform == "win32":
-    # Force UTF-8 for Windows environments to support the ASCII art banner
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
-    os.environ["PYTHONIOENCODING"] = "utf-8"
+    # GUI-launched frozen builds may not have usable console streams.
+    # Fall back to devnull so startup never hangs on banner/log writes.
+    try:
+        if not sys.stdout or not sys.stderr:
+            raise RuntimeError("missing stdio stream")
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8")
+        os.environ["PYTHONIOENCODING"] = "utf-8"
+        HAS_INTERACTIVE_STDIO = bool(
+            hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+        )
+    except Exception:
+        devnull_out = open(os.devnull, "w", encoding="utf-8")
+        devnull_err = open(os.devnull, "w", encoding="utf-8")
+        sys.stdout = devnull_out
+        sys.stderr = devnull_err
+        HAS_INTERACTIVE_STDIO = False
+else:
+    HAS_INTERACTIVE_STDIO = bool(
+        sys.stdout
+        and hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
+    )
 
 console = Console()
 
@@ -1608,7 +1632,8 @@ def gateway(federation_port, dashboard_port, web_port, name, seed, dev, watchdog
     background/on-login/on-boot process. Use --watchdog to keep the foreground
     gateway alive with automatic crash recovery.
     """
-    console.print(BANNER)
+    if HAS_INTERACTIVE_STDIO:
+        console.print(BANNER)
 
     if watchdog:
         _run_watchdog(
@@ -1689,6 +1714,9 @@ async def _run_gateway(
     from neuralclaw.gateway import NeuralClawGateway
 
     config = load_config()
+    if not HAS_INTERACTIVE_STDIO:
+        config.log_stdout = False
+        config.telemetry_stdout = False
 
     # Apply CLI overrides
     if federation_port is not None:

@@ -1,19 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from neuralclaw.config import NeuralClawConfig, ProviderConfig
-from neuralclaw.cortex.reasoning.deliberate import ConfidenceEnvelope
+from neuralclaw.bus.neural_bus import EventType, NeuralBus
+from neuralclaw.cortex.action.policy import RequestContext
+from neuralclaw.cortex.perception.intake import ChannelType, Signal
+from neuralclaw.cortex.reasoning.deliberate import ConfidenceEnvelope, DeliberativeReasoner, ToolDef
 from neuralclaw.cortex.memory.retrieval import MemoryContext
 from neuralclaw.errors import ProviderError
 from neuralclaw.gateway import NeuralClawGateway
-from neuralclaw.health import ReadinessProbe
+from neuralclaw.health import ReadinessProbe, ReadinessState
 from neuralclaw.providers.app_session import AppSessionProvider
+from neuralclaw.providers.router import LLMResponse, ToolCall
 from neuralclaw.session.runtime import ManagedBrowserSession, SessionRuntimeConfig
 from neuralclaw.skills.manifest import SkillManifest, ToolDefinition
+from neuralclaw.swarm.delegation import DelegationResult, DelegationStatus
+from neuralclaw.swarm.task_store import TaskRecord
 
 
 class DummyProvider:
@@ -47,6 +54,31 @@ def test_gateway_provider_override_uses_configured_proxy(monkeypatch):
     assert router is not None
     assert captured["base_url"] == "http://proxy.local/v1"
     assert captured["model"] == "gpt-4.1"
+
+
+def test_gateway_provider_override_uses_configured_vercel_gateway(monkeypatch):
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="llama3", base_url="http://localhost:11434/v1"),
+        _raw={"providers": {"vercel": {"base_url": "https://ai-gateway.vercel.sh/v1", "model": "openai/gpt-5.4"}}},
+    )
+    gateway = NeuralClawGateway(config, provider_override="vercel")
+
+    captured = {}
+
+    def fake_openai_compatible(provider_name, cfg, *, default_model, default_base_url, request_timeout_seconds=None):
+        captured["provider_name"] = provider_name
+        captured["base_url"] = cfg.base_url
+        captured["model"] = cfg.model
+        captured["default_model"] = default_model
+        captured["default_base_url"] = default_base_url
+        return DummyProvider("vercel")
+
+    monkeypatch.setattr(gateway, "_build_openai_compatible", fake_openai_compatible)
+    router = gateway._build_provider()
+    assert router is not None
+    assert captured["provider_name"] == "vercel"
+    assert captured["base_url"] == "https://ai-gateway.vercel.sh/v1"
+    assert captured["model"] == "openai/gpt-5.4"
 
 
 def test_gateway_provider_override_uses_configured_chatgpt_app(monkeypatch):
@@ -245,6 +277,25 @@ def test_gateway_builds_dedicated_forge_provider_with_relaxed_timeouts():
     assert router._max_retries == 0
     assert router._breaker_config.timeout_seconds == 12
     assert router._breaker_config.slow_call_threshold_ms == 240000
+
+
+def test_confidence_envelope_exposes_contract_fields():
+    envelope = ConfidenceEnvelope(
+        response="done",
+        confidence=0.62,
+        source="tool_verified",
+        uncertainty_factors=["hedging_language"],
+        tool_calls_made=2,
+        evidence_sources=["memory", "tool_execution"],
+        escalation_recommendation="operator_review_recommended",
+        retry_rationale="Needed one corrective retry.",
+    )
+
+    payload = envelope.to_dict()
+
+    assert payload["tool_calls_made"] == 2
+    assert payload["evidence_sources"] == ["memory", "tool_execution"]
+    assert payload["escalation_recommendation"] == "operator_review_recommended"
 
 
 @pytest.mark.asyncio
@@ -529,6 +580,307 @@ async def test_gateway_rate_limits_repeated_messages(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_gateway_pipeline_task_persists_stage_checkpoints(monkeypatch):
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
+    )
+    gateway = NeuralClawGateway(config)
+
+    class FakeTaskStore:
+        def __init__(self):
+            self.records: dict[str, TaskRecord] = {}
+
+        async def create(self, record: TaskRecord) -> str:
+            record.task_id = record.task_id or f"task-{len(self.records) + 1}"
+            self.records[record.task_id] = record
+            return record.task_id
+
+        async def get(self, task_id: str) -> TaskRecord | None:
+            return self.records.get(task_id)
+
+        async def update(self, task_id: str, **kwargs):
+            record = self.records[task_id]
+            for key, value in kwargs.items():
+                setattr(record, key, value)
+            return True
+
+    class FakeDelegation:
+        async def delegate(self, agent: str, ctx):
+            stage_role = ctx.constraints["pipeline_stage_role"]
+            return DelegationResult(
+                delegation_id="",
+                status=DelegationStatus.COMPLETED,
+                result=f"{stage_role} output from {agent}",
+                confidence=0.9,
+                elapsed_seconds=0.25,
+            )
+
+    async def fake_retrieve(_content: str):
+        return MemoryContext()
+
+    gateway._task_store = FakeTaskStore()
+    gateway._delegation = FakeDelegation()
+    gateway._shared_bridge = None
+    monkeypatch.setattr(gateway._retriever, "retrieve", fake_retrieve)
+
+    result = await gateway._dashboard_pipeline_task({
+        "task": "Ship the feature",
+        "agent_names": ["planner", "executor", "reviewer"],
+        "success_criteria": "A reviewed final answer",
+    })
+
+    assert result["ok"] is True
+    assert result["status"] == "completed"
+    task_id = result["task_id"]
+    assert task_id is not None
+    stored = gateway._task_store.records[task_id]
+    checkpoints = stored.metadata["checkpoints"]
+    assert [item["stage_role"] for item in checkpoints] == ["planner", "executor", "reviewer"]
+    assert stored.metadata["plan"]["stages"][0]["agent"] == "planner"
+    assert stored.metadata["review"]["status"] == "approved"
+    assert stored.metadata["steps"][-1]["stage_role"] == "reviewer"
+
+
+@pytest.mark.asyncio
+async def test_gateway_pipeline_task_returns_partial_progress(monkeypatch):
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
+    )
+    gateway = NeuralClawGateway(config)
+
+    class FakeTaskStore:
+        def __init__(self):
+            self.records: dict[str, TaskRecord] = {}
+
+        async def create(self, record: TaskRecord) -> str:
+            record.task_id = record.task_id or f"task-{len(self.records) + 1}"
+            self.records[record.task_id] = record
+            return record.task_id
+
+        async def get(self, task_id: str) -> TaskRecord | None:
+            return self.records.get(task_id)
+
+        async def update(self, task_id: str, **kwargs):
+            record = self.records[task_id]
+            for key, value in kwargs.items():
+                setattr(record, key, value)
+            return True
+
+    class FakeDelegation:
+        async def delegate(self, agent: str, ctx):
+            stage_index = ctx.constraints["pipeline_stage_index"]
+            if stage_index == 0:
+                return DelegationResult(
+                    delegation_id="",
+                    status=DelegationStatus.COMPLETED,
+                    result=f"planned by {agent}",
+                    confidence=0.9,
+                    elapsed_seconds=0.2,
+                )
+            return DelegationResult(
+                delegation_id="",
+                status=DelegationStatus.FAILED,
+                result="",
+                error=f"{agent} failed",
+                confidence=0.1,
+                elapsed_seconds=0.2,
+            )
+
+    async def fake_retrieve(_content: str):
+        return MemoryContext()
+
+    gateway._task_store = FakeTaskStore()
+    gateway._delegation = FakeDelegation()
+    gateway._shared_bridge = None
+    monkeypatch.setattr(gateway._retriever, "retrieve", fake_retrieve)
+
+    result = await gateway._dashboard_pipeline_task({
+        "task": "Try the staged run",
+        "agent_names": ["planner", "reviewer"],
+    })
+
+    assert result["ok"] is True
+    assert result["status"] == "partial"
+    task_id = result["task_id"]
+    assert task_id is not None
+    stored = gateway._task_store.records[task_id]
+    assert stored.status == "partial"
+    assert len(stored.metadata["checkpoints"]) == 2
+    assert stored.metadata["review"]["status"] == "needs_attention"
+
+
+@pytest.mark.asyncio
+async def test_gateway_operator_brief_includes_integration_activity(monkeypatch):
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
+    )
+    gateway = NeuralClawGateway(config)
+
+    async def fake_memory():
+        return {"episodic_count": 2, "semantic_count": 1}
+
+    async def fake_tasks(limit=12):
+        return [
+            {
+                "task_id": "task-1",
+                "title": "GitHub triage",
+                "status": "partial",
+                "result_preview": "CI is failing on the main PR.",
+                "metadata": {
+                    "brief": {
+                        "integration_targets": ["github"],
+                    },
+                },
+            },
+        ]
+
+    async def fake_audit(_filters=None):
+        return {
+            "events": [
+                {
+                    "tool_name": "github_get_pull_request",
+                    "allowed": True,
+                    "success": True,
+                },
+            ],
+            "stats": {"denied_records": 0, "total_records": 1},
+        }
+
+    async def fake_integrations():
+        return {
+            "integrations": [
+                {
+                    "id": "github",
+                    "label": "GitHub",
+                    "category": "developer",
+                    "connected": True,
+                    "summary": "PRs and CI",
+                    "details": {"identity": {"login": "octocat"}},
+                },
+            ],
+        }
+
+    async def fake_kb_docs():
+        return []
+
+    async def fake_running_agents():
+        return []
+
+    monkeypatch.setattr(gateway, "_get_dashboard_memory", fake_memory)
+    monkeypatch.setattr(gateway, "_dashboard_list_tasks", fake_tasks)
+    monkeypatch.setattr(gateway, "_dashboard_get_audit", fake_audit)
+    monkeypatch.setattr(gateway, "_dashboard_list_integrations", fake_integrations)
+    monkeypatch.setattr(gateway, "_dashboard_list_kb_documents", fake_kb_docs)
+    monkeypatch.setattr(gateway, "_dashboard_get_running_agents", fake_running_agents)
+
+    brief = await gateway._dashboard_get_operator_brief()
+
+    assert brief["ok"] is True
+    assert brief["integration_context"][0]["id"] == "github"
+    assert brief["integration_context"][0]["health"] == "warning"
+    assert brief["integration_context"][0]["account"] == "octocat"
+    assert any(action["integration_targets"] == ["github"] for action in brief["recommended_actions"])
+
+
+@pytest.mark.asyncio
+async def test_deliberative_tool_failures_emit_non_empty_error_detail():
+    class BlankError(Exception):
+        def __str__(self) -> str:
+            return ""
+
+    class AuditCapture:
+        def __init__(self) -> None:
+            self.records: list[dict[str, object]] = []
+
+        async def log_action(self, **kwargs):
+            self.records.append(kwargs)
+
+    async def boom_tool(**_kwargs):
+        raise BlankError()
+
+    bus = NeuralBus()
+    audit = AuditCapture()
+    reasoner = DeliberativeReasoner(bus=bus, audit=audit)
+    await bus.start()
+    try:
+        result = await reasoner._execute_tool_call(
+            SimpleNamespace(name="forge_skill", arguments={}),
+            [
+                ToolDef(
+                    name="forge_skill",
+                    description="Forge a skill",
+                    parameters={"type": "object", "properties": {}},
+                    handler=boom_tool,
+                )
+            ],
+            RequestContext(request_id="req-1", user_id="u1", channel_id="dashboard", platform="cli"),
+        )
+        await asyncio.sleep(0)
+        events = [event for event in bus.get_event_log() if event.type == EventType.ACTION_COMPLETE]
+    finally:
+        await bus.stop()
+
+    assert result["error"] == "BlankError()"
+    assert audit.records[-1]["result_preview"] == "BlankError()"
+    assert events[-1].data["error"] == "BlankError()"
+
+
+@pytest.mark.asyncio
+async def test_deliberative_retries_when_reply_only_describes_plan():
+    class StubProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.supports_tools = True
+
+        async def complete(self, messages, tools=None, temperature=0.7, max_tokens=4096):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResponse(content="I'll create the file and wire it up for you.")
+            if self.calls == 2:
+                assert tools is not None
+                return LLMResponse(
+                    tool_calls=[ToolCall(id="tc-1", name="write_file", arguments={"path": "quote.txt"})]
+                )
+            return LLMResponse(content="Created the file and finished the task.")
+
+        async def is_available(self):
+            return True
+
+    async def fake_tool(**_kwargs):
+        return {"ok": True}
+
+    bus = NeuralBus()
+    reasoner = DeliberativeReasoner(bus=bus)
+    reasoner.set_provider(StubProvider())
+    await bus.start()
+    try:
+        envelope = await reasoner.reason(
+            signal=Signal(
+                id="sig-1",
+                channel_type=ChannelType.WEB,
+                channel_id="dashboard",
+                author_id="u1",
+                author_name="User",
+                content="Create the file now",
+            ),
+            memory_ctx=MemoryContext(),
+            tools=[
+                ToolDef(
+                    name="write_file",
+                    description="Write a file",
+                    parameters={"type": "object", "properties": {"path": {"type": "string"}}},
+                    handler=fake_tool,
+                )
+            ],
+        )
+    finally:
+        await bus.stop()
+
+    assert envelope.response == "Created the file and finished the task."
+    assert envelope.tool_calls_made == 1
+
+
+@pytest.mark.asyncio
 async def test_gateway_readiness_failure_raises_provider_error():
     config = NeuralClawConfig(
         primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
@@ -545,3 +897,63 @@ async def test_gateway_readiness_failure_raises_provider_error():
 
     with pytest.raises(ProviderError):
         await gateway._run_startup_readiness()
+
+
+@pytest.mark.asyncio
+async def test_gateway_health_payload_exposes_runtime_contract():
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
+    )
+    gateway = NeuralClawGateway(config)
+    gateway._startup_readiness = ReadinessState.READY
+    gateway._ready_at = 123.0
+
+    payload = gateway._get_health_payload()
+
+    assert payload["runtime"]["process_state"] == "running"
+    assert payload["runtime"]["dashboard_bound"] is True
+    assert "adaptive_ready" in payload["runtime"]
+    assert payload["ready_at"] == 123.0
+
+
+@pytest.mark.asyncio
+async def test_gateway_operator_brief_includes_database_recommendation(monkeypatch):
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
+    )
+    gateway = NeuralClawGateway(config)
+
+    async def fake_memory():
+        return {"episodic_count": 0, "semantic_count": 0}
+
+    async def fake_tasks(limit=12):
+        return []
+
+    async def fake_audit(payload=None):
+        return {"events": [], "stats": {"denied_records": 0, "total_records": 0}}
+
+    async def fake_integrations():
+        return {"integrations": [{
+            "id": "db:sales_db",
+            "label": "sales_db",
+            "category": "database",
+            "connected": True,
+            "summary": "Postgres analytical connection",
+        }]}
+
+    async def fake_kb():
+        return []
+
+    async def fake_agents():
+        return []
+
+    monkeypatch.setattr(gateway, "_get_dashboard_memory", fake_memory)
+    monkeypatch.setattr(gateway, "_dashboard_list_tasks", fake_tasks)
+    monkeypatch.setattr(gateway, "_dashboard_get_audit", fake_audit)
+    monkeypatch.setattr(gateway, "_dashboard_list_integrations", fake_integrations)
+    monkeypatch.setattr(gateway, "_dashboard_list_kb_documents", fake_kb)
+    monkeypatch.setattr(gateway, "_dashboard_get_running_agents", fake_agents)
+
+    brief = await gateway._dashboard_get_operator_brief()
+
+    assert any(action["id"].startswith("database-brief-") for action in brief["recommended_actions"])

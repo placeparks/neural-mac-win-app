@@ -1,6 +1,5 @@
 import { Suspense } from 'react';
 import { Canvas } from '@react-three/fiber';
-import { Environment } from '@react-three/drei';
 import type { AvatarEmotion } from './useAvatarState';
 import VRMAvatar from './VRMAvatar';
 
@@ -9,13 +8,17 @@ interface Props {
   scale: number;
   emotion: AvatarEmotion;
   isSpeaking: boolean;
+  collaborationPulse?: boolean;
+  activityLevel?: number;
 }
 
-export default function AvatarScene({ modelPath, scale, emotion, isSpeaking }: Props) {
+export default function AvatarScene({ modelPath, scale, emotion, isSpeaking, collaborationPulse = false, activityLevel = 0 }: Props) {
   return (
     <Canvas
       camera={{ position: [0, 0.55, 5.1], fov: 24 }}
-      gl={{ alpha: true, antialias: true }}
+      dpr={[1, 1.35]}
+      gl={{ alpha: true, antialias: false, powerPreference: 'low-power' }}
+      performance={{ min: 0.6 }}
       style={{ background: 'transparent' }}
     >
       <ambientLight intensity={1.2} />
@@ -29,8 +32,9 @@ export default function AvatarScene({ modelPath, scale, emotion, isSpeaking }: P
           scale={scale}
           emotion={emotion}
           isSpeaking={isSpeaking}
+          collaborationPulse={collaborationPulse}
+          activityLevel={activityLevel}
         />
-        <Environment preset="city" />
       </Suspense>
     </Canvas>
   );

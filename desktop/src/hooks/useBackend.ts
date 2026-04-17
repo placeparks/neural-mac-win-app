@@ -8,9 +8,10 @@ import { useAvatarState } from '../avatar/useAvatarState';
 import { useTaskStore } from '../store/taskStore';
 import type { WSEvent } from '../lib/ws';
 import { saveDesktopChatMessage } from '../lib/api';
+import { maybeSpeakAssistantReply, stopAssistantSpeech } from '../lib/voiceAssistant';
 
 export function useBackend() {
-  const { setConnectionStatus } = useAppStore();
+  const { setRealtimeStatus } = useAppStore();
   const { appendStreamToken, setStreaming, resetStream, setSessions } = useChatStore();
   const lastFinalizedRef = useRef<string>('');
 
@@ -18,8 +19,26 @@ export function useBackend() {
     wsManager.connect();
 
     const unsubStatus = wsManager.on('status', (event: WSEvent) => {
-      if (event.content === 'connected') setConnectionStatus('connected');
-      else setConnectionStatus('disconnected');
+      if (event.content === 'connected') {
+        setRealtimeStatus('connected');
+      } else if (event.content === 'reconnecting') {
+        setRealtimeStatus('connecting');
+      } else {
+        setRealtimeStatus('disconnected');
+      }
+    });
+
+    // After WS reconnects, the gateway may have restarted with different
+    // state. Re-pull tasks (sessions/agents are pulled lazily) so the UI
+    // reflects reality instead of stale local cache.
+    const unsubReconnected = wsManager.on('reconnected', () => {
+      void useTaskStore.getState().loadTasks(60);
+      // If a chat send was in flight when the gateway died, abort the
+      // streaming spinner so the user can retry.
+      const chatState = useChatStore.getState();
+      if (chatState.isStreaming) {
+        chatState.resetStream();
+      }
     });
 
     const unsubDelta = wsManager.on('response_delta', (event: WSEvent) => {
@@ -55,12 +74,18 @@ export function useBackend() {
             .catch(() => undefined);
         }
         avatar.setLatestResponse(content);
+        avatar.setResponsePreview(content);
+        avatar.setActivityLabel('Answered');
+        avatar.pulseSpeaking(Math.min(7000, Math.max(2200, content.length * 38)));
+        void maybeSpeakAssistantReply(content);
       }
-      avatar.setSpeaking(false);
       avatar.setEmotion('happy');
+      const neutralAt = useAvatarState.getState().emotionUntil;
       window.setTimeout(() => {
         const nextAvatar = useAvatarState.getState();
-        nextAvatar.setEmotion('neutral');
+        if (nextAvatar.emotionUntil === neutralAt) {
+          nextAvatar.setEmotion('neutral');
+        }
       }, 1800);
       resetStream();
     };
@@ -81,8 +106,10 @@ export function useBackend() {
 
     const unsubError = wsManager.on('error', (event: WSEvent) => {
       const avatar = useAvatarState.getState();
+      stopAssistantSpeech();
       avatar.setSpeaking(false);
       avatar.setEmotion('surprised');
+      avatar.setActivityLabel('Needs attention');
       if (event.content) {
         const chatState = useChatStore.getState();
         const targetSessionId = chatState.pendingResponseSessionId || chatState.activeSessionId;
@@ -97,6 +124,8 @@ export function useBackend() {
             .then((sessions) => setSessions(sessions))
             .catch(() => undefined);
         }
+        avatar.setLatestResponse(event.content);
+        avatar.setResponsePreview(event.content);
       }
       resetStream();
     });
@@ -105,6 +134,9 @@ export function useBackend() {
       const taskState = useTaskStore.getState();
       const previousStatuses = { ...taskState.knownStatuses };
       const tasks = await taskState.loadTasks(60);
+      if (taskState.selectedTaskId) {
+        void taskState.loadTask(taskState.selectedTaskId);
+      }
       for (const task of tasks) {
         const previous = previousStatuses[task.task_id];
         if (!previous && task.status === 'running') {
@@ -158,6 +190,7 @@ export function useBackend() {
 
     return () => {
       unsubStatus();
+      unsubReconnected();
       unsubDelta();
       unsubResponse();
       unsubComplete();
@@ -165,7 +198,7 @@ export function useBackend() {
       window.clearInterval(taskTimer);
       wsManager.disconnect();
     };
-  }, [appendStreamToken, setConnectionStatus, setSessions, setStreaming, resetStream]);
+  }, [appendStreamToken, setRealtimeStatus, setSessions, setStreaming, resetStream]);
 
   return { connectionStatus: useAppStore.getState().connectionStatus };
 }

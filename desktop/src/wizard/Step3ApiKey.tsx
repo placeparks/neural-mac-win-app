@@ -1,20 +1,34 @@
-// Step 3: API Key Entry (per selected provider) — Real Validation
-
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useWizardStore } from '../store/wizardStore';
 import { PROVIDER_COLORS } from '../lib/theme';
 
 export default function Step3ApiKey() {
   const {
-    selectedProviders, apiKeys, apiEndpoints,
-    setApiKey, setApiEndpoint, currentKeyProvider,
-    setCurrentKeyProvider, nextStep, prevStep,
+    selectedProviders,
+    apiKeys,
+    apiEndpoints,
+    setApiKey,
+    setApiEndpoint,
+    currentKeyProvider,
+    setCurrentKeyProvider,
+    nextStep,
+    prevStep,
   } = useWizardStore();
   const [showKey, setShowKey] = useState(false);
   const [validating, setValidating] = useState(false);
   const [validated, setValidated] = useState<boolean | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (selectedProviders.length === 0) {
+      setCurrentKeyProvider(0);
+      return;
+    }
+    if (currentKeyProvider > selectedProviders.length - 1) {
+      setCurrentKeyProvider(selectedProviders.length - 1);
+    }
+  }, [currentKeyProvider, selectedProviders, setCurrentKeyProvider]);
 
   const provider = selectedProviders[currentKeyProvider];
   if (!provider) return null;
@@ -22,6 +36,12 @@ export default function Step3ApiKey() {
   const colors = PROVIDER_COLORS[provider];
   const key = apiKeys[provider] || '';
   const endpoint = apiEndpoints[provider] || '';
+  const needsApiKey = provider !== 'local' && provider !== 'meta';
+
+  const resetValidation = () => {
+    setValidated(null);
+    setErrorMsg(null);
+  };
 
   const handleValidate = async () => {
     setValidating(true);
@@ -33,13 +53,13 @@ export default function Step3ApiKey() {
         endpoint: endpoint || null,
       });
       const parsed = JSON.parse(result);
-      setValidated(!!parsed.valid);
+      setValidated(Boolean(parsed.valid));
       if (!parsed.valid) {
-        setErrorMsg('API key was rejected by the provider. Please check and try again.');
+        setErrorMsg('The provider rejected the credentials or endpoint.');
       }
-    } catch (err) {
+    } catch (error) {
       setValidated(false);
-      setErrorMsg(err instanceof Error ? err.message : 'Validation failed. Check your key and network.');
+      setErrorMsg(error instanceof Error ? error.message : 'Validation failed. Check the key and network path.');
     } finally {
       setValidating(false);
     }
@@ -48,111 +68,118 @@ export default function Step3ApiKey() {
   const handleContinue = () => {
     if (currentKeyProvider < selectedProviders.length - 1) {
       setCurrentKeyProvider(currentKeyProvider + 1);
-      setValidated(null);
-      setErrorMsg(null);
       setShowKey(false);
-    } else {
-      nextStep();
+      resetValidation();
+      return;
     }
+    nextStep();
   };
 
   const handleBack = () => {
     if (currentKeyProvider > 0) {
       setCurrentKeyProvider(currentKeyProvider - 1);
-      setValidated(null);
-      setErrorMsg(null);
-    } else {
-      prevStep();
+      setShowKey(false);
+      resetValidation();
+      return;
     }
+    prevStep();
   };
 
-  const osName = navigator.userAgent.includes('Mac') ? 'macOS Keychain, protected by Touch ID'
-    : navigator.userAgent.includes('Win') ? 'Windows Credential Manager, protected by Windows Hello'
-    : 'GNOME Keyring / KDE Wallet, protected by login password';
-
-  const needsApiKey = provider !== 'local' && provider !== 'meta';
+  const osName = navigator.userAgent.includes('Mac')
+    ? 'macOS Keychain'
+    : navigator.userAgent.includes('Win')
+      ? 'Windows Credential Manager'
+      : 'system keyring';
 
   return (
     <>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px' }}>
-        <div style={{ width: 28, height: 28, borderRadius: 6, background: colors.bg, color: colors.text, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 14 }}>
+      <div className="wizard-provider-header">
+        <div className="provider-icon wizard-provider-icon" style={{ background: colors.bg, color: colors.text }}>
           {colors.icon}
         </div>
-        <h2 className="wizard-title" style={{ margin: 0 }}>Configure {colors.label}</h2>
+        <div>
+          <h2 className="wizard-title">Configure {colors.label}</h2>
+          <p className="wizard-subtitle">
+            {needsApiKey
+              ? `Store the API key and optional endpoint for ${colors.label}.`
+              : `Set the endpoint for ${colors.label}. No remote API key is required.`}
+          </p>
+        </div>
       </div>
-      <p className="wizard-subtitle">
-        {needsApiKey
-          ? `Enter your API key to connect NeuralClaw to ${colors.label}.`
-          : `Configure the endpoint for ${colors.label} (no API key needed).`}
-        {selectedProviders.length > 1 && (
-          <span style={{ color: 'var(--text-muted)', marginLeft: 8 }}>
-            ({currentKeyProvider + 1} of {selectedProviders.length})
-          </span>
-        )}
-      </p>
 
-      {needsApiKey && (
-        <div className="input-group" style={{ marginBottom: '16px' }}>
-          <label className="input-label">API Key</label>
-          <div style={{ position: 'relative' }}>
-            <input
-              className="input-field input-mono"
-              type={showKey ? 'text' : 'password'}
-              placeholder="sk-..."
-              value={key}
-              onChange={(e) => { setApiKey(provider, e.target.value); setValidated(null); setErrorMsg(null); }}
-            />
-            <button
-              className="btn btn-ghost btn-sm"
-              style={{ position: 'absolute', right: 4, top: 4 }}
-              onClick={() => setShowKey(!showKey)}
-            >
-              {showKey ? '🙈' : '👁️'}
-            </button>
+      <div className="wizard-inline-summary">
+        <span>Provider {currentKeyProvider + 1} of {selectedProviders.length}</span>
+        <span>Secrets stay local in {osName}.</span>
+      </div>
+
+      <div className="wizard-form-card">
+        {needsApiKey ? (
+          <div className="input-group">
+            <label className="input-label">API Key</label>
+            <div className="wizard-inline-field">
+              <input
+                className="input-field input-mono"
+                type={showKey ? 'text' : 'password'}
+                placeholder="sk-..."
+                value={key}
+                onChange={(event) => {
+                  setApiKey(provider, event.target.value);
+                  resetValidation();
+                }}
+              />
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowKey((value) => !value)}>
+                {showKey ? 'Hide' : 'Show'}
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        ) : null}
 
-      <div className="input-group" style={{ marginBottom: '20px' }}>
-        <label className="input-label">API Endpoint {needsApiKey ? '(optional)' : ''}</label>
-        <input
-          className="input-field input-mono"
-          type="text"
-          placeholder={needsApiKey ? 'https://api.example.com/v1' : 'http://localhost:11434'}
-          value={endpoint}
-          onChange={(e) => { setApiEndpoint(provider, e.target.value); setValidated(null); setErrorMsg(null); }}
-        />
+        <div className="input-group">
+          <label className="input-label">Endpoint {needsApiKey ? '(optional)' : ''}</label>
+          <input
+            className="input-field input-mono"
+            type="text"
+            placeholder={needsApiKey ? 'https://api.example.com/v1' : 'http://localhost:11434'}
+            value={endpoint}
+            onChange={(event) => {
+              setApiEndpoint(provider, event.target.value);
+              resetValidation();
+            }}
+          />
+        </div>
       </div>
 
-      {validated === true && (
+      {validated === true ? (
         <div className="info-box" style={{ background: 'var(--accent-green-muted)', borderColor: 'rgba(63,185,80,0.3)' }}>
-          <span className="info-icon">✅</span>
-          <span>Connected! {needsApiKey ? 'API key verified successfully.' : 'Endpoint is reachable.'}</span>
+          <span className="info-icon">OK</span>
+          <span>{needsApiKey ? 'Credential check passed.' : 'Endpoint is reachable and ready.'}</span>
         </div>
-      )}
-      {validated === false && (
+      ) : validated === false ? (
         <div className="info-box" style={{ background: 'var(--accent-red-muted)', borderColor: 'rgba(248,81,73,0.3)' }}>
-          <span className="info-icon">❌</span>
-          <span>{errorMsg || 'Invalid key. Please check and try again.'}</span>
+          <span className="info-icon">!</span>
+          <span>{errorMsg || 'Validation failed.'}</span>
         </div>
-      )}
-      {validated === null && (
+      ) : (
         <div className="info-box">
-          <span className="info-icon">🔒</span>
-          <span>Your API key is stored in the {osName}. It never leaves your device.</span>
+          <span className="info-icon">i</span>
+          <span>Validate if you want a live check now. You can continue and change this later in Connections.</span>
         </div>
       )}
 
       <div className="wizard-footer">
-        <button className="btn btn-ghost" onClick={handleBack}>← Back</button>
+        <button className="btn btn-ghost" onClick={handleBack}>
+          Back
+        </button>
         <div style={{ display: 'flex', gap: 8 }}>
-          {validated !== true && (
-            <button className="btn btn-secondary" onClick={handleValidate} disabled={(!key && needsApiKey) || validating}>
-              {validating ? <><span className="spinner" style={{ width: 14, height: 14 }} /> Verifying...</> : 'Verify Key'}
-            </button>
-          )}
+          <button
+            className="btn btn-secondary"
+            onClick={() => { void handleValidate(); }}
+            disabled={validating || (needsApiKey && !key)}
+          >
+            {validating ? 'Verifying...' : 'Validate'}
+          </button>
           <button className="btn btn-primary" onClick={handleContinue} disabled={needsApiKey && !key}>
-            Continue →
+            Continue
           </button>
         </div>
       </div>

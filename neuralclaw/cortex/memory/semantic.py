@@ -214,13 +214,24 @@ class SemanticMemory:
             (from_entity.id, relation_type, to_entity.id, self._namespace, self._namespace),
         )
 
-        # If contradiction found with lower confidence, reduce its confidence
-        for eid, ename in existing:
-            if confidence > 0.5:
-                await self._db.execute(
-                    "UPDATE relationships SET confidence = confidence * 0.5 WHERE id = ?",
-                    (eid,),
+        # Predicates that are typically exclusive (entity can only have one at a time)
+        EXCLUSIVE_PREDICATES = frozenset({
+            "works_at", "lives_in", "born_in", "married_to", "capital_of",
+            "ceo_of", "president_of", "located_in", "headquartered_in",
+        })
+
+        # If contradiction found for an exclusive predicate, decay existing relationship
+        if relation_type in EXCLUSIVE_PREDICATES:
+            for eid, ename in existing:
+                # Only decay if the *existing* relationship had reasonable confidence
+                rows = await self._db.execute_fetchall(
+                    "SELECT confidence FROM relationships WHERE id = ?", (eid,),
                 )
+                if rows and rows[0][0] > 0.3:
+                    await self._db.execute(
+                        "UPDATE relationships SET confidence = confidence * 0.5 WHERE id = ?",
+                        (eid,),
+                    )
 
         rel = Relationship(
             id=uuid.uuid4().hex[:12],
@@ -352,6 +363,89 @@ class SemanticMemory:
         )
         return row[0][0] if row else 0
 
+    async def get_by_id(self, entity_id: str) -> Entity | None:
+        """Fetch a single entity by ID."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT id, name, entity_type, attributes_json, created_at, updated_at "
+            "FROM entities WHERE id = ? AND namespace = ?",
+            (entity_id, self._namespace),
+        )
+        return self._row_to_entity(rows[0]) if rows else None
+
+    async def list_entities(
+        self,
+        query: str = "",
+        limit: int = 50,
+    ) -> list[Entity]:
+        """List entities in this namespace for inspection."""
+        assert self._db is not None
+        params: list[object] = [self._namespace]
+        sql = (
+            "SELECT id, name, entity_type, attributes_json, created_at, updated_at "
+            "FROM entities WHERE namespace = ?"
+        )
+        if query.strip():
+            sql += " AND (name LIKE ? OR attributes_json LIKE ?)"
+            like = f"%{query.strip()}%"
+            params.extend([like, like])
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        rows = await self._db.execute_fetchall(sql, tuple(params))
+        return [self._row_to_entity(row) for row in rows]
+
+    async def update_entity(
+        self,
+        entity_id: str,
+        *,
+        name: str | None = None,
+        entity_type: str | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> Entity | None:
+        """Update an entity in-place."""
+        assert self._db is not None
+        current = await self.get_by_id(entity_id)
+        if not current:
+            return None
+
+        next_attributes = {**current.attributes, **(attributes or {})}
+        now = time.time()
+        await self._db.execute(
+            """
+            UPDATE entities
+            SET name = ?, entity_type = ?, attributes_json = ?, updated_at = ?
+            WHERE id = ? AND namespace = ?
+            """,
+            (
+                name or current.name,
+                entity_type or current.entity_type,
+                json.dumps(next_attributes),
+                now,
+                entity_id,
+                self._namespace,
+            ),
+        )
+        await self._db.commit()
+        return await self.get_by_id(entity_id)
+
+    async def delete_entity(self, entity_id: str) -> bool:
+        """Delete an entity and all attached relationships."""
+        assert self._db is not None
+        await self._db.execute(
+            "DELETE FROM relationships WHERE (from_entity_id = ? OR to_entity_id = ?) AND namespace = ?",
+            (entity_id, entity_id, self._namespace),
+        )
+        await self._db.execute(
+            "DELETE FROM entities WHERE id = ? AND namespace = ?",
+            (entity_id, self._namespace),
+        )
+        await self._db.commit()
+        return True
+
+    async def pin_entity(self, entity_id: str) -> Entity | None:
+        """Mark an entity as pinned for desktop inspection."""
+        return await self.update_entity(entity_id, attributes={"pinned": True})
+
     async def clear(self) -> int:
         """Delete all entities and relationships in this namespace."""
         assert self._db is not None
@@ -369,6 +463,35 @@ class SemanticMemory:
             (self._namespace,),
         )
         await self._db.commit()
+        return count
+
+    async def prune(self, keep_days: int = 180) -> int:
+        """Delete stale entities and relationships older than the retention window."""
+        assert self._db is not None
+        cutoff = time.time() - (keep_days * 86400)
+        row = await self._db.execute_fetchall(
+            "SELECT COUNT(*) FROM entities WHERE namespace = ? AND updated_at < ?",
+            (self._namespace, cutoff),
+        )
+        count = row[0][0] if row else 0
+        if count <= 0:
+            return 0
+        rows = await self._db.execute_fetchall(
+            "SELECT id FROM entities WHERE namespace = ? AND updated_at < ?",
+            (self._namespace, cutoff),
+        )
+        entity_ids = [row[0] for row in rows]
+        if entity_ids:
+            placeholders = ",".join("?" for _ in entity_ids)
+            await self._db.execute(
+                f"DELETE FROM relationships WHERE namespace = ? AND (from_entity_id IN ({placeholders}) OR to_entity_id IN ({placeholders}))",
+                (self._namespace, *entity_ids, *entity_ids),
+            )
+            await self._db.execute(
+                f"DELETE FROM entities WHERE namespace = ? AND id IN ({placeholders})",
+                (self._namespace, *entity_ids),
+            )
+            await self._db.commit()
         return count
 
     async def close(self) -> None:

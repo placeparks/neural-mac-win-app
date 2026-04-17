@@ -18,6 +18,10 @@ pub struct ChatSessionMetadata {
     pub selected_model: Option<String>,
     pub selected_provider: Option<String>,
     pub base_url: Option<String>,
+    pub teaching_mode: Option<bool>,
+    pub autonomy_mode: Option<String>,
+    pub project_context_id: Option<String>,
+    pub channel_style_profile: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -27,6 +31,10 @@ pub struct ChatSessionMetadataInput {
     pub selected_model: Option<String>,
     pub selected_provider: Option<String>,
     pub base_url: Option<String>,
+    pub teaching_mode: Option<bool>,
+    pub autonomy_mode: Option<String>,
+    pub project_context_id: Option<String>,
+    pub channel_style_profile: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +61,7 @@ pub struct PersistedChatMessage {
     pub confidence: Option<f64>,
     #[serde(rename = "tool_calls")]
     pub tool_calls: Vec<Value>,
+    pub metadata: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,6 +91,7 @@ pub struct PersistedChatMessageInput {
     pub confidence: Option<f64>,
     #[serde(rename = "tool_calls")]
     pub tool_calls: Option<Vec<Value>>,
+    pub metadata: Option<Value>,
 }
 
 fn now_ms() -> i64 {
@@ -126,6 +136,7 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
             timestamp TEXT NOT NULL,
             confidence REAL,
             tool_calls_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
             created_at INTEGER NOT NULL,
             FOREIGN KEY(session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE
         );
@@ -154,6 +165,13 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
             [],
         )
         .map_err(|e| format!("failed to migrate chat session metadata: {e}"))?;
+    }
+    if !has_column(&conn, "chat_messages", "metadata_json")? {
+        conn.execute(
+            "ALTER TABLE chat_messages ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'",
+            [],
+        )
+        .map_err(|e| format!("failed to migrate chat message metadata: {e}"))?;
     }
     Ok(conn)
 }
@@ -353,7 +371,7 @@ fn load_messages(conn: &Connection, session_id: &str) -> Result<Vec<PersistedCha
     let mut stmt = conn
         .prepare(
             "
-            SELECT message_id, role, content, timestamp, confidence, tool_calls_json
+            SELECT message_id, role, content, timestamp, confidence, tool_calls_json, metadata_json
             FROM chat_messages
             WHERE session_id = ?1
             ORDER BY created_at ASC, rowid ASC
@@ -365,6 +383,8 @@ fn load_messages(conn: &Connection, session_id: &str) -> Result<Vec<PersistedCha
         .query_map(params![session_id], |row| {
             let tool_calls_json: String = row.get(5)?;
             let tool_calls = serde_json::from_str::<Vec<Value>>(&tool_calls_json).unwrap_or_default();
+            let metadata_json: String = row.get(6)?;
+            let metadata = serde_json::from_str::<Value>(&metadata_json).unwrap_or(Value::Object(Default::default()));
             Ok(PersistedChatMessage {
                 message_id: row.get(0)?,
                 role: row.get(1)?,
@@ -372,6 +392,7 @@ fn load_messages(conn: &Connection, session_id: &str) -> Result<Vec<PersistedCha
                 timestamp: row.get(3)?,
                 confidence: row.get(4)?,
                 tool_calls,
+                metadata,
             })
         })
         .map_err(|e| format!("failed to load chat messages: {e}"))?;
@@ -571,11 +592,13 @@ pub fn save_chat_message(
         .unwrap_or_else(|| now.to_string());
     let tool_calls_json = serde_json::to_string(&message.tool_calls.unwrap_or_default())
         .map_err(|e| format!("failed to serialize tool calls: {e}"))?;
+    let metadata_json = serde_json::to_string(&message.metadata.unwrap_or(Value::Object(Default::default())))
+        .map_err(|e| format!("failed to serialize message metadata: {e}"))?;
 
     conn.execute(
         "
-        INSERT INTO chat_messages (message_id, session_id, role, content, timestamp, confidence, tool_calls_json, created_at)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        INSERT INTO chat_messages (message_id, session_id, role, content, timestamp, confidence, tool_calls_json, metadata_json, created_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ",
         params![
             Uuid::new_v4().to_string(),
@@ -585,6 +608,7 @@ pub fn save_chat_message(
             timestamp,
             message.confidence,
             tool_calls_json,
+            metadata_json,
             now,
         ],
     )

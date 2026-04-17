@@ -25,7 +25,7 @@ class AgentDefinition:
     name: str
     description: str = ""
     capabilities: list[str] = field(default_factory=list)
-    provider: str = "local"
+    provider: str = "primary"
     model: str = ""
     base_url: str = ""
     api_key: str = ""
@@ -70,7 +70,7 @@ class AgentStore:
                 name TEXT UNIQUE NOT NULL,
                 description TEXT DEFAULT '',
                 capabilities TEXT DEFAULT '[]',
-                provider TEXT DEFAULT 'local',
+                provider TEXT DEFAULT 'primary',
                 model TEXT DEFAULT '',
                 base_url TEXT DEFAULT '',
                 api_key TEXT DEFAULT '',

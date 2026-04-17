@@ -1201,14 +1201,21 @@ If you need more info to design good domain-specific tools, put questions in "cl
         # --- Fix 4: Ensure tool functions accept **kwargs for flexibility ---
         # Find all async def tool_name(...) and ensure they won't break on extra params
         for t in spec.tools:
-            # Check if the function exists and add **kwargs if not present
-            pattern = rf"(async\s+def\s+{re.escape(t.name)}\s*\([^)]*)"
-            match = re.search(pattern, code)
+            # Match signature including multi-line and find the closing paren
+            pattern = rf"(async\s+def\s+{re.escape(t.name)}\s*\()([^)]*)\)"
+            match = re.search(pattern, code, re.DOTALL)
             if match:
-                sig = match.group(1)
-                if "**" not in sig:
-                    # Add **kwargs before closing paren
-                    code = code.replace(sig, sig.rstrip() + ", **_extra")
+                prefix = match.group(1)  # "async def name("
+                params = match.group(2)  # everything between parens
+                if "**" not in params:
+                    params_stripped = params.rstrip()
+                    if params_stripped:
+                        # Has existing params — append with comma
+                        new_sig = f"{prefix}{params_stripped}, **_extra)"
+                    else:
+                        # Empty params — no leading comma
+                        new_sig = f"{prefix}**_extra)"
+                    code = code.replace(match.group(0), new_sig)
 
         # --- Fix 5: Fix string handler references in get_manifest() ---
         # LLMs often write handler="func_name" instead of handler=func_name
@@ -1564,8 +1571,14 @@ try:
     _bound = _sig.bind(**_dummy_kwargs)
     print("  SIG_OK: {t.name}")
 except TypeError as _e:
-    # Try without required params that have defaults
-    print(f"  SIG_WARN: {t.name}: {{_e}}")
+    # Filter to only params the function actually accepts
+    _accepted = {{k for k, v in _sig.parameters.items() if v.kind not in (_ins.Parameter.VAR_POSITIONAL, _ins.Parameter.VAR_KEYWORD)}}
+    _filtered = {{k: v for k, v in _dummy_kwargs.items() if k in _accepted}}
+    try:
+        _bound = _sig.bind(**_filtered)
+        print("  SIG_OK: {t.name} (filtered)")
+    except TypeError as _e2:
+        print(f"  SIG_WARN: {t.name}: {{_e2}}")
 """)
 
         all_tool_tests = "\n".join(tool_tests)
@@ -1596,7 +1609,10 @@ print("FORGE_TEST_OK:", manifest.name, "tools:", len(manifest.tools))
                     {"role": "system", "content": (
                         "Fix the Python error in this NeuralClaw skill code. Return only the fixed code. "
                         "CRITICAL: The file MUST contain a get_manifest() function that returns a SkillManifest. "
-                        "Each tool handler MUST accept exactly the parameters declared in its ToolDefinition. "
+                        "Each tool handler MUST accept exactly the parameters declared in its ToolDefinition, "
+                        "plus **_extra at the end for forward compatibility. "
+                        "If a function has no params, use: async def name(**_extra). "
+                        "If it has params, use: async def name(param1: str, param2: int, **_extra). "
                         "Do NOT use external APIs or base URLs unless the original code already had them working."
                     )},
                     {"role": "user", "content": f"ERROR:\n{error[:500]}\n\nCODE:\n{code[:3000]}\n\nFix the error. Return only Python code."},

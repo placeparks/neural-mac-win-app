@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { TaskDetail, TaskRecord, getTask, getTasks } from '../lib/api';
+import { TaskDetail, TaskRecord, approveTask, getTask, getTasks, rejectTask } from '../lib/api';
 
 interface TaskStoreState {
   tasks: TaskRecord[];
@@ -14,6 +14,8 @@ interface TaskStoreState {
   loadTask: (taskId: string) => Promise<TaskDetail | null>;
   selectTask: (taskId: string | null) => void;
   noteKnownStatuses: () => void;
+  approveTaskById: (taskId: string, note?: string) => Promise<boolean>;
+  rejectTaskById: (taskId: string, reason?: string) => Promise<boolean>;
 }
 
 export const useTaskStore = create<TaskStoreState>()(persist(
@@ -29,7 +31,26 @@ export const useTaskStore = create<TaskStoreState>()(persist(
       set({ loading: true, error: null });
       try {
         const tasks = await getTasks(limit);
-        set({ tasks, loading: false });
+        set((state) => ({
+          tasks,
+          loading: false,
+          taskDetails: Object.fromEntries(
+            Object.entries(state.taskDetails).map(([taskId, detail]) => {
+              const task = tasks.find((entry) => entry.task_id === taskId);
+              if (!task) {
+                return [taskId, detail];
+              }
+              return [
+                taskId,
+                {
+                  ...detail,
+                  ...task,
+                  children: detail.children,
+                },
+              ];
+            }),
+          ),
+        }));
         return tasks;
       } catch (error: any) {
         set({ loading: false, error: error?.message || 'Failed to load tasks.' });
@@ -56,6 +77,48 @@ export const useTaskStore = create<TaskStoreState>()(persist(
     noteKnownStatuses: () => set((state) => ({
       knownStatuses: Object.fromEntries(state.tasks.map((task) => [task.task_id, task.status])),
     })),
+
+    approveTaskById: async (taskId, note) => {
+      try {
+        const res = await approveTask(taskId, { note });
+        if (!res.ok) {
+          set({ error: res.error || 'Failed to approve task.' });
+          return false;
+        }
+        const tasks = await getTasks(100);
+        const detail = await getTask(taskId).catch(() => null);
+        set((state) => ({
+          tasks,
+          taskDetails: detail ? { ...state.taskDetails, [taskId]: detail } : state.taskDetails,
+          error: null,
+        }));
+        return true;
+      } catch (error: any) {
+        set({ error: error?.message || 'Failed to approve task.' });
+        return false;
+      }
+    },
+
+    rejectTaskById: async (taskId, reason) => {
+      try {
+        const res = await rejectTask(taskId, { reason });
+        if (!res.ok) {
+          set({ error: res.error || 'Failed to reject task.' });
+          return false;
+        }
+        const tasks = await getTasks(100);
+        const detail = await getTask(taskId).catch(() => null);
+        set((state) => ({
+          tasks,
+          taskDetails: detail ? { ...state.taskDetails, [taskId]: detail } : state.taskDetails,
+          error: null,
+        }));
+        return true;
+      } catch (error: any) {
+        set({ error: error?.message || 'Failed to reject task.' });
+        return false;
+      }
+    },
   }),
   {
     name: 'neuralclaw-task-store',

@@ -1,12 +1,13 @@
 {
   "name": "neuralclaw-desktop",
   "private": true,
-  "version": "1.4.0",
+  "version": "1.5.7",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "build:release": "node ./scripts/build-release.mjs",
+    "smoke:release:win": "powershell -ExecutionPolicy Bypass -File .\\scripts\\smoke-release-win.ps1",
     "preview": "vite preview",
     "tauri": "tauri"
   },

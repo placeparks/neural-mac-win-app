@@ -1,8 +1,9 @@
-import { MouseEvent as ReactMouseEvent, useEffect, useMemo, useRef, useState } from 'react';
-import AvatarScene from './AvatarScene';
+import { MouseEvent as ReactMouseEvent, Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import AvatarChatOverlay from './AvatarChatOverlay';
 import { useAvatarState, type AvatarAnchor } from './useAvatarState';
-import { createSharedTask, delegateTask, getAgentActivity, getRunningAgents, type AgentActivityEvent, type RunningAgent } from '../lib/api';
+import { captureAssistantScreen, createSharedTask, delegateTask, getAgentActivity, getRunningAgents, type AgentActivityEvent, type RunningAgent } from '../lib/api';
+
+const AvatarScene = lazy(() => import('./AvatarScene'));
 
 const PRESET_LABELS: Array<{ anchor: AvatarAnchor; label: string }> = [
   { anchor: 'bottom-right', label: 'Bottom Right' },
@@ -16,14 +17,19 @@ export default function AvatarWindow() {
   const {
     hydrate,
     modelPath,
+    renderMode,
     scale,
     emotion,
     isSpeaking,
+    latestResponse,
+    responsePreview,
+    activityLabel,
     position,
     inputOpen,
     setInputOpen,
     setPosition,
     setAnchor,
+    setRenderMode,
     openMainApp,
     hide,
     collaborationPulse,
@@ -40,6 +46,10 @@ export default function AvatarWindow() {
   const [selectedAgents, setSelectedAgents] = useState<string[]>([]);
   const [delegateBusy, setDelegateBusy] = useState(false);
   const [delegateStatus, setDelegateStatus] = useState<string | null>(null);
+  const [screenBusy, setScreenBusy] = useState(false);
+  const [screenPreview, setScreenPreview] = useState<{ dataUrl: string; width: number; height: number } | null>(null);
+  const [sceneEnabled, setSceneEnabled] = useState(false);
+  const [clipboardBusy, setClipboardBusy] = useState(false);
   const dragStart = useRef<{ mouseX: number; mouseY: number; originX: number; originY: number } | null>(null);
 
   useEffect(() => {
@@ -142,6 +152,26 @@ export default function AvatarWindow() {
     };
   }, [setPosition]);
 
+  useEffect(() => {
+    if (renderMode === 'lite') {
+      setSceneEnabled(false);
+      return;
+    }
+
+    if (renderMode === 'full') {
+      setSceneEnabled(true);
+      return;
+    }
+
+    const enableScene = () => setSceneEnabled(true);
+    if ('requestIdleCallback' in window) {
+      const callbackId = window.requestIdleCallback(enableScene, { timeout: 1200 });
+      return () => window.cancelIdleCallback(callbackId);
+    }
+    const timeoutId = globalThis.setTimeout(enableScene, 180);
+    return () => globalThis.clearTimeout(timeoutId);
+  }, [renderMode]);
+
   const onPointerDown = (event: ReactMouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement;
     if (event.button !== 0) return;
@@ -158,6 +188,30 @@ export default function AvatarWindow() {
     () => `avatar-window-shell${collaborationPulse ? ' collaborating' : ''}`,
     [collaborationPulse],
   );
+
+  const sceneEmotion = useMemo(() => {
+    if (collaborationPulse) return 'collaborating';
+    if (delegateBusy || inputOpen) return 'focused';
+    return emotion;
+  }, [collaborationPulse, delegateBusy, emotion, inputOpen]);
+
+  const headline = useMemo(() => {
+    if (delegateBusy) return 'Coordinating agents';
+    if (inputOpen) return 'Listening';
+    if (responsePreview) return responsePreview;
+    if (latestResponse) return latestResponse;
+    return 'Ambient copilot online';
+  }, [delegateBusy, inputOpen, latestResponse, responsePreview]);
+  const stagePlaceholderText = renderMode === 'lite' ? 'Lite avatar mode' : 'Preparing avatar...';
+  const stageClassName = `avatar-stage${renderMode === 'lite' ? ' lite' : ''}`;
+  const quickViews = [
+    { id: 'chat', label: 'Chat' },
+    { id: 'tasks', label: 'Tasks' },
+    { id: 'dashboard', label: 'Dash' },
+    { id: 'database', label: 'DB' },
+    { id: 'agents', label: 'Agents' },
+    { id: 'settings', label: 'Settings' },
+  ] as const;
 
   const toggleAgent = (agentName: string) => {
     setSelectedAgents((current) =>
@@ -210,9 +264,52 @@ export default function AvatarWindow() {
       setEmotion('surprised');
     } finally {
       setDelegateBusy(false);
+      const neutralAt = useAvatarState.getState().emotionUntil;
       window.setTimeout(() => {
-        useAvatarState.getState().setEmotion('neutral');
+        const avatar = useAvatarState.getState();
+        if (avatar.emotionUntil === neutralAt) {
+          avatar.setEmotion('neutral');
+        }
       }, 1500);
+    }
+  };
+
+  const refreshScreenPreview = async () => {
+    setScreenBusy(true);
+    try {
+      const result = await captureAssistantScreen();
+      if (!result.ok || !result.data_url) {
+        throw new Error(result.error || 'Screen preview unavailable');
+      }
+      setScreenPreview({
+        dataUrl: result.data_url,
+        width: Number(result.width || 0),
+        height: Number(result.height || 0),
+      });
+      setLatestResponse('Live desktop view refreshed.');
+      useAvatarState.getState().setResponsePreview('Screen ready');
+      useAvatarState.getState().setActivityLabel('Screen aware');
+      setEmotion('focused');
+    } catch (error: any) {
+      setLatestResponse(error?.message || 'Screen preview unavailable.');
+      setEmotion('surprised');
+    } finally {
+      setScreenBusy(false);
+    }
+  };
+
+  const copyLatestResponse = async () => {
+    if (!latestResponse.trim()) return;
+    setClipboardBusy(true);
+    try {
+      await navigator.clipboard.writeText(latestResponse);
+      setLatestResponse('Latest response copied to clipboard.');
+      setEmotion('happy');
+    } catch {
+      setLatestResponse('Clipboard access failed.');
+      setEmotion('surprised');
+    } finally {
+      globalThis.setTimeout(() => setClipboardBusy(false), 600);
     }
   };
 
@@ -226,13 +323,21 @@ export default function AvatarWindow() {
         setContextMenu({ x: event.clientX, y: event.clientY });
       }}
     >
-      <div className="avatar-stage" onDoubleClick={() => setInputOpen(true)}>
-        <AvatarScene
-          modelPath={modelPath}
-          scale={scale}
-          emotion={emotion}
-          isSpeaking={isSpeaking}
-        />
+      <div className={stageClassName} onDoubleClick={() => setInputOpen(true)}>
+        {sceneEnabled ? (
+          <Suspense fallback={<div className="avatar-stage-placeholder">Loading avatar scene...</div>}>
+            <AvatarScene
+              modelPath={modelPath}
+              scale={scale}
+              emotion={sceneEmotion}
+              isSpeaking={isSpeaking}
+              collaborationPulse={collaborationPulse}
+              activityLevel={runningCount + recentActivity.length}
+            />
+          </Suspense>
+        ) : (
+          <div className="avatar-stage-placeholder">{stagePlaceholderText}</div>
+        )}
       </div>
 
       <div className="avatar-status-pill">
@@ -240,9 +345,24 @@ export default function AvatarWindow() {
         <span>{runningCount} agent{runningCount === 1 ? '' : 's'}</span>
       </div>
 
+      <div className="avatar-command-marquee">
+        <div className="avatar-command-label">{activityLabel}</div>
+        <div className="avatar-command-text">{headline}</div>
+      </div>
+
       <div className="avatar-action-strip">
         <button type="button" className="avatar-chip-btn" onClick={() => setInputOpen(true)}>
           Ask
+        </button>
+        <button
+          type="button"
+          className="avatar-chip-btn"
+          onClick={() => { void setRenderMode(renderMode === 'lite' ? 'auto' : 'lite'); }}
+        >
+          {renderMode === 'lite' ? 'Auto' : 'Lite'}
+        </button>
+        <button type="button" className="avatar-chip-btn" onClick={() => { void refreshScreenPreview(); }}>
+          {screenBusy ? 'Seeing...' : 'Screen'}
         </button>
         <button
           type="button"
@@ -262,6 +382,55 @@ export default function AvatarWindow() {
       {deckOpen && (
         <div className="avatar-agent-panel" onClick={(event) => event.stopPropagation()}>
           <div className="avatar-panel-title">Agent Desk</div>
+
+          <div className="avatar-panel-metrics">
+            <div className="avatar-panel-metric">
+              <span>Agents</span>
+              <strong>{runningCount}</strong>
+            </div>
+            <div className="avatar-panel-metric">
+              <span>Mode</span>
+              <strong>{renderMode}</strong>
+            </div>
+            <div className="avatar-panel-metric">
+              <span>Activity</span>
+              <strong>{recentActivity.length}</strong>
+            </div>
+          </div>
+
+          <div className="avatar-quick-grid">
+            {quickViews.map((view) => (
+              <button
+                key={view.id}
+                type="button"
+                className="avatar-quick-link"
+                onClick={() => { void openMainApp(view.id); }}
+              >
+                {view.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="avatar-mode-row">
+            {(['auto', 'lite', 'full'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={`avatar-agent-chip${renderMode === mode ? ' selected' : ''}`}
+                onClick={() => { void setRenderMode(mode); }}
+              >
+                {mode}
+              </button>
+            ))}
+            <button
+              type="button"
+              className="avatar-chip-btn"
+              disabled={!latestResponse.trim() || clipboardBusy}
+              onClick={() => { void copyLatestResponse(); }}
+            >
+              {clipboardBusy ? 'Copying...' : 'Copy Reply'}
+            </button>
+          </div>
 
           {runningAgents.length === 0 ? (
             <div className="avatar-panel-empty">
@@ -316,6 +485,21 @@ export default function AvatarWindow() {
           {delegateStatus && (
             <div className="avatar-panel-status">
               {delegateStatus}
+            </div>
+          )}
+
+          {screenPreview && (
+            <div className="avatar-screen-card">
+              <div className="avatar-screen-header">
+                <span>Desktop peek</span>
+                <button type="button" className="avatar-chip-btn" onClick={() => { void refreshScreenPreview(); }}>
+                  Refresh
+                </button>
+              </div>
+              <img src={screenPreview.dataUrl} alt="Avatar desktop preview" className="avatar-screen-image" />
+              <div className="avatar-screen-meta">
+                {screenPreview.width} x {screenPreview.height}
+              </div>
             </div>
           )}
 

@@ -2,7 +2,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { create } from 'zustand';
 
 export type AvatarAnchor = 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left' | 'taskbar' | 'free';
-export type AvatarEmotion = 'neutral' | 'thinking' | 'happy' | 'surprised';
+export type AvatarEmotion = 'neutral' | 'thinking' | 'happy' | 'surprised' | 'focused' | 'collaborating';
+export type AvatarRenderMode = 'auto' | 'lite' | 'full';
 
 export interface AvatarStatePayload {
   visible: boolean;
@@ -12,6 +13,7 @@ export interface AvatarStatePayload {
   isSpeaking: boolean;
   modelPath: string;
   scale: number;
+  renderMode: AvatarRenderMode;
 }
 
 interface AvatarState extends AvatarStatePayload {
@@ -19,6 +21,10 @@ interface AvatarState extends AvatarStatePayload {
   inputOpen: boolean;
   hydrated: boolean;
   collaborationPulse: boolean;
+  responsePreview: string;
+  activityLabel: string;
+  speakingUntil: number;
+  emotionUntil: number;
   hydrate: () => Promise<void>;
   toggleVisible: () => Promise<void>;
   hide: () => Promise<void>;
@@ -27,12 +33,16 @@ interface AvatarState extends AvatarStatePayload {
   anchorToTaskbar: () => Promise<void>;
   setScale: (scale: number) => Promise<void>;
   setModelPath: (modelPath: string) => Promise<void>;
+  setRenderMode: (renderMode: AvatarRenderMode) => Promise<void>;
   saveModelFile: (file: File) => Promise<void>;
   setEmotion: (emotion: AvatarEmotion) => void;
   setSpeaking: (isSpeaking: boolean) => void;
   setLatestResponse: (content: string) => void;
   setInputOpen: (open: boolean) => void;
   setCollaborationPulse: (value: boolean) => void;
+  setResponsePreview: (content: string) => void;
+  setActivityLabel: (content: string) => void;
+  pulseSpeaking: (durationMs?: number) => void;
   openMainApp: (targetView?: string) => Promise<void>;
 }
 
@@ -44,6 +54,7 @@ const defaultState: AvatarStatePayload = {
   isSpeaking: false,
   modelPath: '',
   scale: 1,
+  renderMode: 'auto',
 };
 
 export const useAvatarState = create<AvatarState>((set, get) => ({
@@ -52,6 +63,10 @@ export const useAvatarState = create<AvatarState>((set, get) => ({
   inputOpen: false,
   hydrated: false,
   collaborationPulse: false,
+  responsePreview: '',
+  activityLabel: 'Ready',
+  speakingUntil: 0,
+  emotionUntil: 0,
 
   hydrate: async () => {
     try {
@@ -102,6 +117,11 @@ export const useAvatarState = create<AvatarState>((set, get) => ({
     set(state);
   },
 
+  setRenderMode: async (renderMode) => {
+    const state = await invoke<AvatarStatePayload>('update_avatar_settings', { renderMode });
+    set(state);
+  },
+
   saveModelFile: async (file) => {
     const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
     const modelPath = await invoke<string>('save_avatar_model', {
@@ -111,7 +131,7 @@ export const useAvatarState = create<AvatarState>((set, get) => ({
     await get().setModelPath(modelPath);
   },
 
-  setEmotion: (emotion) => set({ emotion }),
+  setEmotion: (emotion) => set({ emotion, emotionUntil: Date.now() + 1800 }),
 
   setSpeaking: (isSpeaking) => set({ isSpeaking }),
 
@@ -120,6 +140,21 @@ export const useAvatarState = create<AvatarState>((set, get) => ({
   setInputOpen: (open) => set({ inputOpen: open }),
 
   setCollaborationPulse: (value) => set({ collaborationPulse: value }),
+
+  setResponsePreview: (content) => set({ responsePreview: content }),
+
+  setActivityLabel: (content) => set({ activityLabel: content }),
+
+  pulseSpeaking: (durationMs = 2400) => {
+    const until = Date.now() + durationMs;
+    set({ isSpeaking: true, speakingUntil: until });
+    window.setTimeout(() => {
+      const current = get().speakingUntil;
+      if (current <= Date.now()) {
+        set({ isSpeaking: false });
+      }
+    }, durationMs + 80);
+  },
 
   openMainApp: async (targetView) => {
     await invoke('open_main_window', { targetView });

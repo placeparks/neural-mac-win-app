@@ -12,6 +12,7 @@ import {
   deleteDesktopChatSession,
   getChatBootstrap,
   getProviderDefaults,
+  getPrimaryProviderDefaults,
   renameDesktopChatSession,
   resetAllDesktopChatSessions,
   saveDesktopChatDraft,
@@ -22,6 +23,7 @@ import {
 } from '../lib/api';
 import { useChatStore } from '../store/chatStore';
 import { useAvatarState } from '../avatar/useAvatarState';
+import { maybeSpeakAssistantReply, stopAssistantSpeech } from '../lib/voiceAssistant';
 
 const DRAFT_SAVE_DELAY = 250;
 
@@ -130,22 +132,33 @@ export function useChat() {
       await switchSession(existing.sessionId);
       return existing.sessionId;
     }
+    let resolvedProvider = metadata.selectedProvider || '';
+    let resolvedModel = metadata.selectedModel || '';
     let resolvedBaseUrl = metadata.baseUrl || '';
     if (!resolvedBaseUrl) {
       try {
-        const defaults = await getProviderDefaults('local');
+        const defaults = await getProviderDefaults(resolvedProvider || 'primary');
+        resolvedProvider = resolvedProvider || defaults.provider || defaults.primary;
+        resolvedModel = resolvedModel || defaults.model || '';
         resolvedBaseUrl = defaults.baseUrl || '';
       } catch {
-        resolvedBaseUrl = '';
+        try {
+          const defaults = await getPrimaryProviderDefaults();
+          resolvedProvider = resolvedProvider || defaults.provider || defaults.primary;
+          resolvedModel = resolvedModel || defaults.model || '';
+          resolvedBaseUrl = defaults.baseUrl || '';
+        } catch {
+          resolvedBaseUrl = '';
+        }
       }
     }
     return createSession(`Agent: ${agentName}`, {
       targetAgent: agentName,
-      selectedProvider: 'local',
-      selectedModel: metadata.selectedModel || null,
-      baseUrl: resolvedBaseUrl || 'http://localhost:11434/v1',
+      selectedProvider: resolvedProvider || null,
+      selectedModel: resolvedModel || null,
+      baseUrl: resolvedBaseUrl || null,
     });
-  }, [createSession, metadata.baseUrl, metadata.selectedModel, sessions, switchSession]);
+  }, [createSession, metadata.baseUrl, metadata.selectedModel, metadata.selectedProvider, sessions, switchSession]);
 
   const updateDraft = useCallback((content: string) => {
     setDraft(content);
@@ -154,6 +167,12 @@ export function useChat() {
 
   const sendMessage = useCallback(async (content: string, attachments: ChatAttachmentPayload[] = []) => {
     if ((!content.trim() && attachments.length === 0) || isStreaming) return;
+    const avatar = useAvatarState.getState();
+    stopAssistantSpeech();
+    avatar.setEmotion('thinking');
+    avatar.setSpeaking(false);
+    avatar.setActivityLabel(attachments.length ? `Reviewing ${attachments.length} attachment${attachments.length === 1 ? '' : 's'}` : 'Thinking');
+    avatar.setResponsePreview(content.trim() || 'Working from attachments');
 
     let sessionId = activeSessionId;
     if (!sessionId) {
@@ -201,6 +220,10 @@ export function useChat() {
         provider: metadata.selectedProvider || null,
         baseUrl: metadata.baseUrl || null,
         sessionId,
+        teachingMode: metadata.teachingMode ?? null,
+        autonomyMode: metadata.autonomyMode || null,
+        projectContextId: metadata.projectContextId || null,
+        channelStyleProfile: metadata.channelStyleProfile || null,
         media,
         documents,
       });
@@ -211,6 +234,10 @@ export function useChat() {
           selectedModel: metadata.selectedModel || response.requested_model || metadata.selectedModel || null,
           effectiveModel: response.effective_model || metadata.effectiveModel || null,
           fallbackReason: response.fallback_reason || null,
+          teachingMode: metadata.teachingMode ?? null,
+          autonomyMode: metadata.autonomyMode || null,
+          projectContextId: metadata.projectContextId || null,
+          channelStyleProfile: metadata.channelStyleProfile || null,
         };
         await updateDesktopChatSessionMetadata(sessionId, nextMetadata);
         setMetadata(nextMetadata);
@@ -222,26 +249,49 @@ export function useChat() {
           ? (response.response || 'Done.')
           : (response.error || 'Failed to send message.'),
         timestamp: new Date().toISOString(),
+        metadata: {
+          requestedModel: response.requested_model || null,
+          effectiveModel: response.effective_model || null,
+          fallbackReason: response.fallback_reason || null,
+          memoryProvenance: response.memory_provenance || [],
+          memoryScopes: response.memory_scopes || [],
+          confidenceContract: response.confidence_contract || {},
+        },
       };
 
       addMessage(assistantMessage, sessionId);
       const updatedSessions = await saveDesktopChatMessage(sessionId, assistantMessage);
       setSessions(updatedSessions);
 
-      const avatar = useAvatarState.getState();
       avatar.setLatestResponse(assistantMessage.content);
+      avatar.setResponsePreview(assistantMessage.content);
       avatar.setEmotion(response.ok ? 'happy' : 'surprised');
-      avatar.setSpeaking(false);
+      avatar.setActivityLabel(response.ok ? 'Answered' : 'Needs attention');
+      if (response.ok) {
+        avatar.pulseSpeaking(Math.min(7000, Math.max(2200, assistantMessage.content.length * 38)));
+        void maybeSpeakAssistantReply(assistantMessage.content);
+      }
+      else avatar.setSpeaking(false);
     } catch (error: any) {
+      stopAssistantSpeech();
       const errorMsg: ChatMessage = {
         role: 'assistant',
         content: error?.message || 'Connection to the backend is unavailable. Start NeuralClaw and retry.',
         timestamp: new Date().toISOString(),
+        metadata: {
+          memoryProvenance: [],
+          memoryScopes: [],
+          confidenceContract: {},
+        },
       };
       addMessage(errorMsg, sessionId);
       const erroredSessions = await saveDesktopChatMessage(sessionId, errorMsg);
       setSessions(erroredSessions);
-      useAvatarState.getState().setEmotion('surprised');
+      const avatar = useAvatarState.getState();
+      avatar.setEmotion('surprised');
+      avatar.setActivityLabel('Backend issue');
+      avatar.setLatestResponse(errorMsg.content);
+      avatar.setResponsePreview(errorMsg.content);
     } finally {
       resetStream();
     }

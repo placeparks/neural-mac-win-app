@@ -143,12 +143,21 @@ class BaileysWhatsAppAdapter(ChannelAdapter):
         auth_dir: str = ".baileys_auth",
         *,
         on_qr: Callable[[str], Any] | None = None,
+        on_pairing_code: Callable[[str], Any] | None = None,
+        phone_number: str = "",
+        allow_self_chat: bool = True,
+        allow_contact_chats: bool = False,
     ) -> None:
         super().__init__()
         self._auth_dir = auth_dir
         self._on_qr = on_qr
+        self._on_pairing_code = on_pairing_code
+        self._phone_number = phone_number
+        self._allow_self_chat = allow_self_chat
+        self._allow_contact_chats = allow_contact_chats
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
         self._connected = asyncio.Event()
         self._fatal = False
         self._fatal_message = ""
@@ -178,9 +187,11 @@ class BaileysWhatsAppAdapter(ChannelAdapter):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            cwd=str(bridge_dir),
         )
 
         self._reader_task = asyncio.create_task(self._read_loop())
+        self._stderr_task = asyncio.create_task(self._stderr_loop())
         logger.info("[WhatsApp-Baileys] Bridge started — waiting for QR or auth")
 
     async def stop(self) -> None:
@@ -195,6 +206,12 @@ class BaileysWhatsAppAdapter(ChannelAdapter):
             self._reader_task.cancel()
             try:
                 await self._reader_task
+            except asyncio.CancelledError:
+                pass
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
             except asyncio.CancelledError:
                 pass
         logger.info("[WhatsApp-Baileys] Bridge stopped")
@@ -234,6 +251,12 @@ class BaileysWhatsAppAdapter(ChannelAdapter):
                 event_type = data.get("type")
 
                 if event_type == "message":
+                    logger.info(
+                        "[WhatsApp-Baileys] Inbound message chat=%s from=%s from_me=%s",
+                        data.get("chat_id", ""),
+                        data.get("from", "unknown"),
+                        bool(data.get("from_me", False)),
+                    )
                     msg = ChannelMessage(
                         content=data.get("content", ""),
                         author_id=data.get("from", "unknown"),
@@ -253,6 +276,14 @@ class BaileysWhatsAppAdapter(ChannelAdapter):
                     logger.info("[WhatsApp-Baileys] QR code received")
                     if self._on_qr:
                         result = self._on_qr(qr_data)
+                        if asyncio.iscoroutine(result):
+                            await result
+
+                elif event_type == "pairing_code":
+                    code = data.get("code", "")
+                    logger.info("[WhatsApp-Baileys] Pairing code received: %s", code)
+                    if self._on_pairing_code:
+                        result = self._on_pairing_code(code)
                         if asyncio.iscoroutine(result):
                             await result
 
@@ -281,6 +312,27 @@ class BaileysWhatsAppAdapter(ChannelAdapter):
                 logger.error("[WhatsApp-Baileys] Read error: %s", exc)
                 await asyncio.sleep(1)
 
+    async def _stderr_loop(self) -> None:
+        """Read bridge stderr so startup failures do not collapse into QR timeouts."""
+        assert self._process and self._process.stderr
+
+        while True:
+            try:
+                line = await self._process.stderr.readline()
+                if not line:
+                    break
+                message = line.decode(errors="replace").strip()
+                if not message:
+                    continue
+                logger.warning("[WhatsApp-Baileys][stderr] %s", message)
+                if not self._fatal_message:
+                    self._fatal_message = message
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.error("[WhatsApp-Baileys] stderr read error: %s", exc)
+                await asyncio.sleep(1)
+
     # ------------------------------------------------------------------
     # Connectivity check
     # ------------------------------------------------------------------
@@ -302,36 +354,74 @@ class BaileysWhatsAppAdapter(ChannelAdapter):
     def _get_bridge_script(self) -> str:
         """Return the embedded Node.js Baileys bridge."""
         return """
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+const { makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestWaWebVersion } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
 
 const AUTH_DIR = '__AUTH_DIR__';
+const PHONE_NUMBER = '__PHONE_NUMBER__';
+const ALLOW_SELF_CHAT = __ALLOW_SELF_CHAT__;
+const ALLOW_CONTACT_CHATS = __ALLOW_CONTACT_CHATS__;
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 3000;
 let retryCount = 0;
 let gotQR = false;
+let pairingRequested = false;
+const sentMessageIds = new Map();
+
+function rememberSentMessageId(id) {
+    if (!id) return;
+    sentMessageIds.set(id, Date.now());
+    setTimeout(() => sentMessageIds.delete(id), 5 * 60 * 1000);
+}
 
 async function start() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const latest = await fetchLatestWaWebVersion().catch(() => null);
 
     const sock = makeWASocket({
         auth: state,
+        version: latest?.version,
         printQRInTerminal: false,
-        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
         generateHighQualityLinkPreview: true,
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
+    // Pairing code flow: wait 5s from socket creation so the WS handshake
+    // to WhatsApp servers completes (~1-2s) and the registration frame
+    // settles before we call requestPairingCode.
+    if (PHONE_NUMBER && !pairingRequested && !state.creds?.registered) {
+        const credsFile = AUTH_DIR + '/creds.json';
+        if (fs.existsSync(credsFile)) {
+            // Already paired — tell the caller and skip pairing code
+            console.log(JSON.stringify({ type: 'pairing_code', code: '' }));
+            console.log(JSON.stringify({ type: 'connected' }));
+        } else {
+            pairingRequested = true;
+            setTimeout(async () => {
+                try {
+                    const code = await sock.requestPairingCode(PHONE_NUMBER);
+                    console.log(JSON.stringify({ type: 'pairing_code', code: code }));
+                } catch (err) {
+                    pairingRequested = false;
+                    console.log(JSON.stringify({ type: 'fatal', message: 'Pairing code request failed: ' + String(err) }));
+                }
+            }, 5000);
+        }
+    }
+
+    sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
-        if (qr) {
+
+        if (qr && !PHONE_NUMBER) {
             gotQR = true;
             retryCount = 0;
             console.log(JSON.stringify({ type: 'qr', data: qr }));
         }
+
         if (connection === 'open') {
             retryCount = 0;
             console.log(JSON.stringify({ type: 'connected' }));
@@ -346,7 +436,7 @@ async function start() {
             }
 
             retryCount++;
-            if (retryCount > MAX_RETRIES && !gotQR) {
+            if (retryCount > MAX_RETRIES && !gotQR && !pairingRequested) {
                 console.log(JSON.stringify({
                     type: 'fatal',
                     message: 'Failed to connect after ' + MAX_RETRIES + ' attempts (reason: ' + reason + '). Check your network or Node.js version.',
@@ -355,18 +445,23 @@ async function start() {
             }
 
             const delay = Math.min(RETRY_DELAY_MS * retryCount, 15000);
+            pairingRequested = false;
             setTimeout(() => start(), delay);
         }
     });
 
     sock.ev.on('messages.upsert', async ({ messages }) => {
         for (const msg of messages) {
-            if (!msg.message || msg.key.fromMe) continue;
+            if (!msg.message) continue;
             const text = msg.message.conversation
                 || msg.message.extendedTextMessage?.text
                 || '';
             if (!text) continue;
             const jid = msg.key.remoteJid || '';
+            if (!jid || jid === 'status@broadcast') continue;
+            if (msg.key.fromMe && !ALLOW_SELF_CHAT) continue;
+            if (!msg.key.fromMe && !ALLOW_CONTACT_CHATS) continue;
+            if (msg.key.fromMe && sentMessageIds.has(msg.key.id || '')) continue;
             let name = msg.pushName || 'Unknown';
             console.log(JSON.stringify({
                 type: 'message',
@@ -374,6 +469,8 @@ async function start() {
                 from: jid,
                 name: name,
                 chat_id: jid,
+                from_me: !!msg.key.fromMe,
+                message_id: msg.key.id || '',
                 timestamp: msg.messageTimestamp,
             }));
         }
@@ -383,7 +480,8 @@ async function start() {
         try {
             const cmd = JSON.parse(data.toString().trim());
             if (cmd.type === 'send') {
-                await sock.sendMessage(cmd.to, { text: cmd.content });
+                const result = await sock.sendMessage(cmd.to, { text: cmd.content });
+                rememberSentMessageId(result?.key?.id);
             }
         } catch (e) {
             console.error('stdin parse error:', e.message);
@@ -395,4 +493,12 @@ start().catch(err => {
     console.log(JSON.stringify({ type: 'fatal', message: String(err) }));
     process.exit(1);
 });
-""".replace("__AUTH_DIR__", self._auth_dir.replace("\\", "\\\\").replace("'", "\\'"))
+""".replace(
+            "__AUTH_DIR__", self._auth_dir.replace("\\", "\\\\").replace("'", "\\'")
+        ).replace(
+            "__PHONE_NUMBER__", self._phone_number
+        ).replace(
+            "__ALLOW_SELF_CHAT__", "true" if self._allow_self_chat else "false"
+        ).replace(
+            "__ALLOW_CONTACT_CHATS__", "true" if self._allow_contact_chats else "false"
+        )

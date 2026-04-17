@@ -1,5 +1,11 @@
 """
 Async provider circuit breaker with OPEN / HALF_OPEN / CLOSED states.
+
+Fixes applied:
+- State transition from OPEN→HALF_OPEN now happens exclusively inside
+  ``call()`` under the lock (avoids race condition).
+- HALF_OPEN permits only a single probe request via ``_half_open_sem``;
+  concurrent callers fail fast with CircuitOpenError.
 """
 
 from __future__ import annotations
@@ -39,21 +45,27 @@ class CircuitBreaker:
     _success_count: int = field(default=0, init=False)
     _last_failure: float = field(default=0.0, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    # Permits only 1 concurrent probe in HALF_OPEN state
+    _half_open_sem: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(1), init=False
+    )
 
     @property
     def state(self) -> CircuitState:
-        if (
-            self._state == CircuitState.OPEN
-            and self._last_failure
-            and time.monotonic() - self._last_failure >= self.config.timeout_seconds
-        ):
-            self._state = CircuitState.HALF_OPEN
-            self._success_count = 0
+        """Read-only state snapshot. Transition logic lives in ``call()``."""
         return self._state
 
     async def call(self, coro: Awaitable[Any] | Callable[[], Awaitable[Any]]) -> Any:
+        # --- Determine effective state under lock ---
         async with self._lock:
-            state = self.state
+            if (
+                self._state == CircuitState.OPEN
+                and self._last_failure
+                and time.monotonic() - self._last_failure >= self.config.timeout_seconds
+            ):
+                self._state = CircuitState.HALF_OPEN
+                self._success_count = 0
+            state = self._state
 
         if state == CircuitState.OPEN:
             if not callable(coro) and hasattr(coro, "close"):
@@ -66,6 +78,19 @@ class CircuitBreaker:
                 f"Circuit '{self.name}' is open. Retrying in {remaining:.1f}s."
             )
 
+        # --- HALF_OPEN: only one probe at a time ---
+        if state == CircuitState.HALF_OPEN:
+            if not self._half_open_sem._value:          # noqa: SLF001
+                raise CircuitOpenError(
+                    f"Circuit '{self.name}' is half-open and a probe is already in flight."
+                )
+            async with self._half_open_sem:
+                return await self._execute(coro)
+
+        return await self._execute(coro)
+
+    async def _execute(self, coro: Awaitable[Any] | Callable[[], Awaitable[Any]]) -> Any:
+        """Run the coroutine and track success/failure."""
         start = time.monotonic()
         try:
             awaitable = coro() if callable(coro) else coro
@@ -104,6 +129,10 @@ class CircuitBreaker:
             if self._failure_count >= self.config.failure_threshold and self._state != CircuitState.OPEN:
                 self._state = CircuitState.OPEN
                 event_name = "circuit_opened"
+            # If a HALF_OPEN probe failed, transition back to OPEN
+            if self._state == CircuitState.HALF_OPEN:
+                self._state = CircuitState.OPEN
+                event_name = "circuit_reopened"
         if event_name:
             await self._publish(event_name, reason=reason)
 
@@ -113,7 +142,7 @@ class CircuitBreaker:
                 EventType.INFO,
                 {
                     "circuit": self.name,
-                    "state": self.state.value,
+                    "state": self._state.value,
                     "event": event,
                     **extra,
                 },

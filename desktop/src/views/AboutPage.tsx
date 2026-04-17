@@ -1,4 +1,4 @@
-// NeuralClaw Desktop — About Page (v1.2.0)
+// NeuralClaw Desktop — About Page
 
 import { useState, useEffect } from 'react';
 import Header from '../components/layout/Header';
@@ -85,7 +85,7 @@ export default function AboutPage() {
               marginTop: 16, maxWidth: 360, width: '100%',
               background: updateStatus.includes('latest') ? 'var(--accent-green-muted)' : updateStatus.includes('Could not') ? 'var(--accent-red-muted)' : 'var(--accent-blue-muted, rgba(56,139,253,0.1))',
             }}>
-              <span className="info-icon">{updateStatus.includes('latest') ? '✓' : updateStatus.includes('Could not') ? '!' : '…'}</span>
+              <span className="info-icon">{updateStatus.includes('latest') ? 'OK' : updateStatus.includes('Could not') ? '!' : '...'}</span>
               <span>{updateStatus}</span>
             </div>
           )}

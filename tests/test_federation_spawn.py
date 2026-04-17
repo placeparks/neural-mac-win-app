@@ -8,6 +8,7 @@ import time
 import pytest
 
 from neuralclaw.bus.neural_bus import NeuralBus
+from neuralclaw.cortex.reasoning.deliberate import ToolDef
 from neuralclaw.swarm.mesh import AgentMesh, MeshMessage
 from neuralclaw.swarm.delegation import (
     DelegationChain,
@@ -22,6 +23,8 @@ from neuralclaw.swarm.federation import (
     NodeStatus,
 )
 from neuralclaw.swarm.spawn import AgentSpawner, SpawnedAgent
+from neuralclaw.swarm.agent_runtime import AgentRuntime
+from neuralclaw.swarm.agent_store import AgentDefinition
 from neuralclaw.config import FederationConfig
 
 
@@ -274,6 +277,61 @@ class TestAgentSpawner:
         )
         assert response is not None
         assert "echo: hello" in response.content
+
+    def test_agent_runtime_rebuilds_provider_on_context_update(self):
+        definition = AgentDefinition(
+            agent_id="agent-1",
+            name="writer",
+            provider="local",
+            model="qwen3.5:35b",
+            base_url="http://localhost:11434/v1",
+            metadata={},
+        )
+        runtime = AgentRuntime(definition=definition)
+
+        runtime.update_execution_context(
+            requested_model="qwen3.5:35b",
+            effective_model="qwen3.5:9b",
+            base_url="http://localhost:11434/v1",
+        )
+
+        assert runtime.definition.model == "qwen3.5:9b"
+        assert runtime.definition.base_url == "http://localhost:11434/v1"
+        assert getattr(runtime.provider, "_model", "") == "qwen3.5:9b"
+        assert getattr(runtime.provider, "_base_url", "") == "http://localhost:11434/v1"
+
+    @pytest.mark.asyncio
+    async def test_agent_runtime_tool_failures_keep_non_empty_error_detail(self):
+        class BlankError(Exception):
+            def __str__(self) -> str:
+                return ""
+
+        async def boom_tool(**_kwargs):
+            raise BlankError()
+
+        definition = AgentDefinition(
+            agent_id="agent-1",
+            name="writer",
+            provider="local",
+            model="qwen3.5:35b",
+            base_url="http://localhost:11434/v1",
+            metadata={},
+        )
+        runtime = AgentRuntime(definition=definition)
+
+        result = await runtime._execute_tool_call(
+            type("ToolCall", (), {"name": "forge_skill", "arguments": {}})(),
+            [
+                ToolDef(
+                    name="forge_skill",
+                    description="Forge a skill",
+                    parameters={"type": "object", "properties": {}},
+                    handler=boom_tool,
+                )
+            ],
+        )
+
+        assert result["error"] == "Tool 'forge_skill' failed: BlankError()"
 
 
 # ---------------------------------------------------------------------------

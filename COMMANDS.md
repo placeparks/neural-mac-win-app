@@ -1,57 +1,48 @@
 # NeuralClaw Commands
 
-Version target: `1.2.0`
+Version target: `current source tree`
+
+This file covers the primary Python-side commands that are still relevant alongside the desktop app.
 
 ## Install
 
 ```bash
-# Default install with all Python-side features
 pip install neuralclaw
-
-# Local editable install
 pip install -e .
-
-# Development extras
 pip install -e ".[dev]"
-
-# Compatibility aliases
-pip install -e ".[all-channels]"
-pip install -e ".[sessions]"
 pip install -e ".[all,dev]"
 python -m playwright install chromium
 ```
 
 Notes:
 
-- `pip install neuralclaw` includes the Python dependencies for built-in providers and channels.
-- WhatsApp still needs Node.js for the bridge.
-- Signal still needs `signal-cli` installed separately.
+- WhatsApp still needs Node.js for the bridge
+- Signal still needs `signal-cli`
+- Browser automation still needs Playwright browser install
 
-## Core
+## Core Runtime
 
 ```bash
 neuralclaw init
 neuralclaw chat
-neuralclaw --help
-neuralclaw chat --help
-neuralclaw chat -p openai
-neuralclaw chat -p anthropic
-neuralclaw chat -p openrouter
-neuralclaw chat -p proxy
-neuralclaw chat -p chatgpt_app
-neuralclaw chat -p claude_app
-neuralclaw chat -p local
 neuralclaw gateway
-neuralclaw local --help
-neuralclaw local setup
-neuralclaw local status
+neuralclaw daemon
 neuralclaw status
 neuralclaw doctor
 neuralclaw repair
+neuralclaw --help
 neuralclaw --version
 ```
 
-## Session Providers
+## Local Model Setup
+
+```bash
+neuralclaw local --help
+neuralclaw local setup
+neuralclaw local status
+```
+
+## Sessions
 
 ```bash
 neuralclaw session --help
@@ -66,6 +57,8 @@ neuralclaw session login chatgpt
 neuralclaw session login claude
 neuralclaw session repair chatgpt
 neuralclaw session repair claude
+neuralclaw session auth google
+neuralclaw session auth microsoft
 ```
 
 ## Proxy
@@ -92,8 +85,8 @@ neuralclaw channels connect whatsapp
 Trust behavior:
 
 - `open`: route is accepted immediately
-- `pair`: send `/pair` once
-- `bound`: only trusted routes may talk; `/pair` creates the binding
+- `pair`: requires pairing/binding first
+- `bound`: only trusted bindings may talk
 
 ## Gateway Options
 
@@ -105,7 +98,7 @@ neuralclaw gateway --web-port 8082
 neuralclaw gateway --seed http://localhost:8100
 ```
 
-## Swarm / Federation / Benchmark
+## Swarm and Federation
 
 ```bash
 neuralclaw swarm status
@@ -128,14 +121,9 @@ neuralclaw forge show <skill-name>
 neuralclaw forge remove <skill-name>
 ```
 
-Subcommands:
+Important runtime note:
 
-| Subcommand | Purpose |
-|---|---|
-| `forge create <source>` | Generate a new skill from a URL, API spec, library name, repo, MCP server, or description. Use `--use-case` to tailor the output. |
-| `forge list` | List all forged skills in `~/.neuralclaw/skills/` |
-| `forge show <name>` | Display the manifest and source of a forged skill |
-| `forge remove <name>` | Delete a forged skill from disk |
+- forge/scout capability may exist in the backend, but agent self-modification should still be treated as a user-permitted autonomy capability in the product UX
 
 ## SkillScout
 
@@ -145,17 +133,34 @@ neuralclaw scout find "verify patient insurance eligibility"
 neuralclaw scout search "send SMS reminders"
 ```
 
-Subcommands:
+## Desktop Workflow
 
-| Subcommand | Purpose |
-|---|---|
-| `scout find <query>` | Search PyPI, GitHub, npm, and MCP registries for the best match, then auto-forge it into a deployable skill. |
-| `scout search <query>` | Search only — display ranked candidates without forging. |
+These are not Python CLI commands, but they are the primary app workflow now.
 
-## Release Validation
+```bash
+cd desktop
+npm install
+npm run tauri dev
+```
+
+Production build:
+
+```bash
+cd desktop
+npm run tauri build
+```
+
+## Validation
 
 ```bash
 pytest -q
 python -m compileall neuralclaw
-python -m build --sdist --wheel
+python -m py_compile neuralclaw/dashboard.py neuralclaw/gateway.py
+cd desktop && npm run build
 ```
+
+## Product Guidance
+
+- Use the desktop app for connections, model roles, channels, tasks, and assistant controls
+- Use the desktop app to review approval-gated work and recent audited actions
+- Use the CLI for local runtime setup, debugging, services, and direct Python-side workflows

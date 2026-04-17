@@ -140,6 +140,32 @@ export default function KnowledgePage() {
             </div>
           )}
 
+          <div className="card knowledge-hero-card" style={{ marginBottom: 16 }}>
+            <div className="knowledge-hero-grid">
+              <div className="knowledge-hero-panel">
+                <div className="eyebrow">Knowledge Surface</div>
+                <h2 style={{ margin: '6px 0 8px' }}>Turn documents into reusable context</h2>
+                <p className="knowledge-hero-copy">
+                  Bring product docs, specs, CSVs, markdown, and visual references into one indexed layer so the runtime can retrieve grounded context instead of guessing.
+                </p>
+              </div>
+              <div className="knowledge-hero-stats">
+                <div className="knowledge-stat-card">
+                  <span className="knowledge-stat-label">Indexed docs</span>
+                  <strong>{documents.length}</strong>
+                </div>
+                <div className="knowledge-stat-card">
+                  <span className="knowledge-stat-label">Search hits</span>
+                  <strong>{searchResults.length}</strong>
+                </div>
+                <div className="knowledge-stat-card">
+                  <span className="knowledge-stat-label">Ingest state</span>
+                  <strong>{ingesting ? 'Writing' : 'Ready'}</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div className="card" style={{ marginBottom: 16 }}>
             <div className="card-header">
               <span className="card-title">Upload to Knowledge Base</span>
@@ -173,7 +199,7 @@ export default function KnowledgePage() {
             <div className="card-header">
               <span className="card-title">Search Knowledge Base</span>
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <input
                 className="input-field"
                 placeholder="Search across ingested knowledge..."
@@ -192,9 +218,9 @@ export default function KnowledgePage() {
             </div>
 
             {searchResults.length > 0 && (
-              <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
+              <div className="knowledge-search-grid" style={{ marginTop: 14 }}>
                 {searchResults.map((result, index) => (
-                  <div key={`${result.document}-${result.chunk_index}-${index}`} className="card" style={{ padding: 14 }}>
+                  <div key={`${result.document}-${result.chunk_index}-${index}`} className="card knowledge-result-card" style={{ padding: 14 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 8 }}>
                       <strong>{result.document}</strong>
                       <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{(result.score * 100).toFixed(1)}%</span>
@@ -227,19 +253,11 @@ export default function KnowledgePage() {
                 <p>Upload a document or image above to start building the desktop knowledge base.</p>
               </div>
             ) : (
-              <div style={{ display: 'grid', gap: 8 }}>
+              <div className="knowledge-document-grid">
                 {documents.map((doc) => (
                   <div
                     key={doc.id}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: 12,
-                      padding: '12px 14px',
-                      borderRadius: 'var(--radius-sm)',
-                      background: 'var(--bg-tertiary)',
-                    }}
+                    className="knowledge-document-card"
                   >
                     <div>
                       <div style={{ fontWeight: 600, marginBottom: 4 }}>{doc.filename}</div>

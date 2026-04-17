@@ -1,13 +1,11 @@
-// Step 6: Feature Toggles
-
 import { useWizardStore } from '../store/wizardStore';
 
 const FEATURES = [
-  { id: 'memory', name: 'Memory', icon: '🧠', desc: 'Remember conversations', default: true },
-  { id: 'knowledge_base', name: 'Knowledge Base', icon: '📚', desc: 'Search your documents', default: true },
-  { id: 'workflows', name: 'Workflows', icon: '⚡', desc: 'Multi-step task automation', default: false },
-  { id: 'dashboard', name: 'Dashboard', icon: '🌐', desc: 'Web monitoring panel', default: true },
-  { id: 'biometric_lock', name: 'Biometric Lock', icon: '🔒', desc: 'Require auth to access', default: true },
+  { id: 'memory', name: 'Memory', icon: 'MM', desc: 'Conversation and preference continuity' },
+  { id: 'knowledge_base', name: 'Knowledge Base', icon: 'KB', desc: 'Indexed docs and grounded retrieval' },
+  { id: 'workflows', name: 'Workflows', icon: 'WF', desc: 'Multi-step execution paths and routines' },
+  { id: 'dashboard', name: 'Dashboard', icon: 'OP', desc: 'Operator brief, audit, and trust rails' },
+  { id: 'biometric_lock', name: 'Biometric Lock', icon: 'ID', desc: 'Protect local access on shared machines' },
 ];
 
 export default function Step6Features() {
@@ -15,33 +13,38 @@ export default function Step6Features() {
 
   return (
     <>
-      <h2 className="wizard-title">Customize your experience</h2>
-      <p className="wizard-subtitle">Toggle features on or off. You can change these anytime.</p>
+      <h2 className="wizard-title">Enable the premium product slices</h2>
+      <p className="wizard-subtitle">
+        These switches decide how much NeuralClaw exposes on day one. They are safe to change later, but this is the cleanest time to shape the default experience.
+      </p>
 
       <div className="feature-list">
-        {FEATURES.map((feat) => (
-          <div key={feat.id} className="feature-row">
+        {FEATURES.map((feature) => (
+          <div key={feature.id} className="feature-row">
             <div className="feature-info">
-              <span className="feature-icon">{feat.icon}</span>
+              <span className="feature-icon">{feature.icon}</span>
               <div>
-                <div className="feature-name">{feat.name}</div>
-                <div className="feature-desc">{feat.desc}</div>
+                <div className="feature-name">{feature.name}</div>
+                <div className="feature-desc">{feature.desc}</div>
               </div>
             </div>
             <button
-              className={`toggle ${features[feat.id] ? 'on' : ''}`}
-              onClick={() => toggleFeature(feat.id)}
-              aria-label={`Toggle ${feat.name}`}
+              className={`toggle ${features[feature.id] ? 'on' : ''}`}
+              onClick={() => toggleFeature(feature.id)}
+              aria-label={`Toggle ${feature.name}`}
             />
           </div>
         ))}
       </div>
 
+      <div className="wizard-inline-summary">
+        <span>{Object.values(features).filter(Boolean).length} enabled</span>
+        <span>Dashboard, memory, and knowledge usually produce the best first impression.</span>
+      </div>
+
       <div className="wizard-footer">
-        <button className="btn btn-ghost" onClick={prevStep}>← Back</button>
-        <button className="btn btn-primary" onClick={nextStep}>
-          Continue →
-        </button>
+        <button className="btn btn-ghost" onClick={prevStep}>Back</button>
+        <button className="btn btn-primary" onClick={nextStep}>Continue</button>
       </div>
     </>
   );

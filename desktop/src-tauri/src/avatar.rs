@@ -25,6 +25,8 @@ pub struct AvatarWindowState {
     #[serde(rename = "modelPath")]
     pub model_path: String,
     pub scale: f64,
+    #[serde(rename = "renderMode")]
+    pub render_mode: String,
 }
 
 impl Default for AvatarWindowState {
@@ -37,6 +39,7 @@ impl Default for AvatarWindowState {
             is_speaking: false,
             model_path: String::new(),
             scale: 1.0,
+            render_mode: "auto".into(),
         }
     }
 }
@@ -243,6 +246,7 @@ pub fn update_avatar_settings(
     state: State<'_, Mutex<AvatarWindowState>>,
     scale: Option<f64>,
     model_path: Option<String>,
+    render_mode: Option<String>,
 ) -> Result<AvatarWindowState, String> {
     let next_state = {
         let mut current = state.lock().map_err(|err| err.to_string())?;
@@ -257,6 +261,13 @@ pub fn update_avatar_settings(
         }
         if let Some(model_path) = model_path {
             current.model_path = model_path;
+        }
+        if let Some(render_mode) = render_mode {
+            let normalized = render_mode.trim().to_lowercase();
+            current.render_mode = match normalized.as_str() {
+                "lite" | "full" => normalized,
+                _ => "auto".into(),
+            };
         }
         current.clone()
     };

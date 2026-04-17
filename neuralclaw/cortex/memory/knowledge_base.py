@@ -207,7 +207,11 @@ class KnowledgeBase:
             filename=p.name,
             source=source or str(p),
             doc_type=doc_type,
-            metadata={"path": str(p), "size_bytes": p.stat().st_size},
+            metadata={
+                "path": str(p),
+                "size_bytes": p.stat().st_size,
+                "mtime_ns": p.stat().st_mtime_ns,
+            },
         )
 
     async def ingest_text(

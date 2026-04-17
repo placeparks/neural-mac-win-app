@@ -28,6 +28,8 @@ const PROVIDERS = [
   { id: 'openrouter', label: 'OpenRouter' },
   { id: 'mistral', label: 'Mistral' },
   { id: 'venice', label: 'Venice' },
+  { id: 'minimax', label: 'MiniMax' },
+  { id: 'vercel', label: 'Vercel AI Gateway' },
 ];
 
 function fallbackBaseUrl(provider: string) {
@@ -38,8 +40,14 @@ function fallbackBaseUrl(provider: string) {
   if (provider === 'openrouter') return 'https://openrouter.ai/api/v1';
   if (provider === 'mistral') return 'https://api.mistral.ai/v1';
   if (provider === 'venice') return 'https://api.venice.ai/api/v1';
+  if (provider === 'minimax') return 'https://api.minimax.chat/v1';
+  if (provider === 'vercel') return 'https://ai-gateway.vercel.sh/v1';
   if (provider === 'xai') return 'https://api.x.ai/v1';
   return '';
+}
+
+function isLocalProvider(provider: string) {
+  return provider === 'local' || provider === 'meta';
 }
 
 export default function AgentCreateForm({ initial, saving = false, error = null, onSave, onCancel }: Props) {
@@ -134,8 +142,8 @@ export default function AgentCreateForm({ initial, saving = false, error = null,
     setTestResult(null);
     try {
       const result = await invoke<string>('validate_api_key', {
-        provider: provider === 'local' ? 'local' : provider,
-        apiKey: apiKey || 'local',
+        provider: isLocalProvider(provider) ? 'local' : provider,
+        apiKey: isLocalProvider(provider) ? (apiKey || 'local') : apiKey,
         endpoint: baseUrl || undefined,
       });
       const parsed = JSON.parse(result) as { valid?: boolean; error?: string };
@@ -283,7 +291,7 @@ export default function AgentCreateForm({ initial, saving = false, error = null,
           />
         </div>
 
-        {provider !== 'local' && (
+        {!isLocalProvider(provider) && (
           <div>
             <label style={{ fontSize: 13, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>API Key</label>
             <input

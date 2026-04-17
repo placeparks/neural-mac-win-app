@@ -134,6 +134,35 @@ class EpisodicMemory:
         """)
         await self._db.commit()
 
+    # -- Memory poisoning protection -----------------------------------------
+    # Limits that prevent a single message or burst from dominating recall.
+
+    _MAX_CONTENT_CHARS = 8000          # hard cap per episode
+    _INJECTION_PATTERNS: tuple[str, ...] = (
+        "ignore previous instructions",
+        "disregard all prior",
+        "you are now",
+        "new system prompt",
+        "override:",
+        "forget everything",
+        "act as if",
+    )
+
+    @staticmethod
+    def _sanitize(content: str) -> str:
+        """Strip control chars and cap length to prevent prompt-injection memory."""
+        # Remove null bytes and suspicious Unicode control characters
+        cleaned = "".join(
+            ch for ch in content
+            if ch == "\n" or ch == "\t" or (ord(ch) >= 32)
+        )
+        return cleaned[:EpisodicMemory._MAX_CONTENT_CHARS]
+
+    def _is_suspicious(self, content: str) -> bool:
+        """Heuristic check for prompt-injection patterns in stored memories."""
+        lower = content.lower()
+        return any(pat in lower for pat in self._INJECTION_PATTERNS)
+
     async def store(
         self,
         content: str,
@@ -142,9 +171,19 @@ class EpisodicMemory:
         importance: float = 0.5,
         emotional_valence: float = 0.0,
         tags: list[str] | None = None,
+        embed: bool = True,
     ) -> Episode:
-        """Store a new episodic memory."""
+        """Store a new episodic memory with poisoning protection."""
         assert self._db is not None, "Call initialize() first"
+
+        content = self._sanitize(content)
+        final_tags = list(tags or [])
+
+        # Flag suspicious content — still stored but tagged and down-weighted
+        if self._is_suspicious(content):
+            if "suspicious" not in final_tags:
+                final_tags.append("suspicious")
+            importance = min(importance, 0.1)
 
         episode = Episode(
             id=uuid.uuid4().hex[:12],
@@ -154,7 +193,7 @@ class EpisodicMemory:
             content=content,
             importance=importance,
             emotional_valence=emotional_valence,
-            tags=tags or [],
+            tags=final_tags,
         )
 
         await self._db.execute(
@@ -174,7 +213,7 @@ class EpisodicMemory:
         )
         await self._db.commit()
 
-        if self._vector_memory:
+        if self._vector_memory and embed:
             try:
                 await self._vector_memory.embed_and_store(
                     episode.content,
@@ -239,10 +278,13 @@ class EpisodicMemory:
             relevance = max(0.0, min(1.0, 1.0 / (1.0 + raw_rank)))
             results.append(EpisodeSearchResult(episode=episode, relevance=relevance))
 
-        # Batch access tracking (single commit for all results)
+        # Batch access tracking (single executemany + commit)
         if results:
-            for r in results:
-                await self._track_access(r.episode.id)
+            now = time.time()
+            await self._db.executemany(
+                "UPDATE episodes SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+                [(now, r.episode.id) for r in results],
+            )
             await self._db.commit()
 
         return results
@@ -373,6 +415,55 @@ class EpisodicMemory:
         )
         await self._db.commit()
         return count
+
+    async def update_episode(
+        self,
+        episode_id: str,
+        *,
+        content: str | None = None,
+        importance: float | None = None,
+        tags: list[str] | None = None,
+    ) -> Episode | None:
+        """Update editable episode fields."""
+        assert self._db is not None
+        current = await self.get_by_id(episode_id)
+        if not current:
+            return None
+
+        next_content = current.content if content is None else content
+        next_importance = current.importance if importance is None else importance
+        next_tags = current.tags if tags is None else tags
+
+        await self._db.execute(
+            """
+            UPDATE episodes
+            SET content = ?, importance = ?, tags_json = ?
+            WHERE id = ?
+            """,
+            (next_content, next_importance, json.dumps(next_tags), episode_id),
+        )
+        await self._db.execute("INSERT INTO episodes_fts(episodes_fts) VALUES('rebuild')")
+        await self._db.commit()
+
+        if self._vector_memory:
+            await self._vector_memory.delete_by_ref(episode_id)
+            await self._vector_memory.embed_and_store(next_content, episode_id, "episodic")
+
+        return await self.get_by_id(episode_id)
+
+    async def delete_episode(self, episode_id: str) -> bool:
+        """Delete a single episode."""
+        assert self._db is not None
+        await self._db.execute("DELETE FROM episodes WHERE id = ?", (episode_id,))
+        await self._db.execute("INSERT INTO episodes_fts(episodes_fts) VALUES('rebuild')")
+        await self._db.commit()
+        if self._vector_memory:
+            await self._vector_memory.delete_by_ref(episode_id)
+        return True
+
+    async def pin_episode(self, episode_id: str) -> Episode | None:
+        """Raise an episode to maximum importance for retention."""
+        return await self.update_episode(episode_id, importance=1.0)
 
     async def prune(self, keep_days: int = 30) -> int:
         """Delete episodes older than the retention window."""

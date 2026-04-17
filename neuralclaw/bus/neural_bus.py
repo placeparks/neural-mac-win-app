@@ -160,6 +160,7 @@ class NeuralBus:
         self._task: asyncio.Task[None] | None = None
         self._max_log_size = 2000
         self._event_log: deque[Event] = deque(maxlen=self._max_log_size)
+        self._events_dropped: int = 0
 
     # -- Subscription -------------------------------------------------------
 
@@ -222,7 +223,12 @@ class NeuralBus:
         try:
             self._queue.put_nowait(event)
         except Exception:
-            pass  # Queue full — drop non-critical sync event
+            self._events_dropped += 1
+            if self._events_dropped % 10 == 1:
+                import logging
+                logging.getLogger("neuralclaw.bus").warning(
+                    "Bus queue full — %d events dropped so far", self._events_dropped,
+                )
 
     async def publish_event(self, event: Event) -> None:
         """Publish a pre-built Event object."""

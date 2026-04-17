@@ -69,20 +69,22 @@ export default function AgentsPage() {
   };
 
   const handleTalkToAgent = async (definition: AgentDefinition) => {
+    let resolvedProvider = definition.provider || '';
     let baseUrl = definition.base_url || '';
-    if ((!baseUrl || baseUrl.startsWith('http://localhost:11434')) && ['local', 'meta'].includes(definition.provider || '')) {
+    if (!resolvedProvider || !baseUrl) {
       try {
-        const defaults = await getProviderDefaults('local');
-        baseUrl = defaults.baseUrl || baseUrl;
+        const defaults = await getProviderDefaults(resolvedProvider || 'primary');
+        resolvedProvider = resolvedProvider || defaults.provider || defaults.primary;
+        baseUrl = baseUrl || defaults.baseUrl || '';
       } catch {
-        // Keep the agent definition base URL if config lookup fails.
+        // Keep the persisted definition values if config lookup fails.
       }
     }
     await createDesktopChatSessionWithMetadata(`Agent: ${definition.name}`, {
       targetAgent: definition.name,
-      selectedProvider: definition.provider || 'local',
+      selectedProvider: resolvedProvider || null,
       selectedModel: definition.model || null,
-      baseUrl: baseUrl || 'http://localhost:11434/v1',
+      baseUrl: baseUrl || null,
     });
     window.dispatchEvent(new CustomEvent('neuralclaw:navigate', { detail: 'chat' }));
   };
@@ -92,12 +94,12 @@ export default function AgentsPage() {
       <Header title="Agents" />
       <div className="app-content">
         <div className="page-header">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div className="page-header-row">
             <div>
               <h1>Agents</h1>
               <p>Create and manage sub-agents with independent providers, models, and memory.</p>
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div className="page-actions">
               {running.length > 0 && (
                 <button
                   className="btn btn-secondary"
@@ -119,6 +121,28 @@ export default function AgentsPage() {
         </div>
 
         <div className="page-body">
+          <div className="info-box" style={{ marginBottom: 16 }}>
+            <span className="info-icon">i</span>
+            <span>
+              Use persistent agents for repeatable roles like reviewer, researcher, builder, or operator. Create the role first, spawn it when needed, then delegate work from here so the Tasks inbox can track execution, approvals, and follow-ups.
+            </span>
+          </div>
+
+          <div className="workspace-guide-grid" style={{ marginBottom: 16 }}>
+            <div className="workspace-guide-card">
+              <div className="workspace-guide-title">1. Define the role</div>
+              <p>Give each agent a narrow job, strong capability tags, and a model/provider that fits the work instead of making every worker a generic generalist.</p>
+            </div>
+            <div className="workspace-guide-card">
+              <div className="workspace-guide-title">2. Spawn when active</div>
+              <p>Saved definitions are durable blueprints. Running agents are the live workforce you can talk to directly or route through delegation modes.</p>
+            </div>
+            <div className="workspace-guide-card">
+              <div className="workspace-guide-title">3. Delegate through Tasks</div>
+              <p>Use manual mode for a known owner, pipeline for staged handoffs, consensus for risky decisions, and auto-route when the system should choose.</p>
+            </div>
+          </div>
+
           {/* Create/Edit Form */}
           {(showCreate || editingAgent) && (
             <div style={{ marginBottom: 20 }}>
@@ -172,6 +196,12 @@ export default function AgentsPage() {
           {/* Running Agents / Activity Feed */}
           {running.length > 0 && (
             <div style={{ marginTop: 8 }}>
+              <div className="info-box" style={{ marginBottom: 12 }}>
+                <span className="info-icon">i</span>
+                <span>
+                  Running agents are your live workforce. Talk to one directly for a focused thread, or use delegation when you want durable execution records and orchestration across multiple agents.
+                </span>
+              </div>
               <h3 style={{ fontSize: 16, fontWeight: 600, marginBottom: 12 }}>
                 Running Agents ({running.length})
               </h3>

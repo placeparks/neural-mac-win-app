@@ -158,6 +158,22 @@ SkillForge attempts one automatic fix when a sandbox test fails. If it still fai
 neuralclaw forge show <name>
 ```
 
+### `execute_python` or `forge_skill` says `Python was not found` on Windows
+
+This usually means the packaged sidecar resolved the Microsoft Store app-execution alias instead of a real interpreter.
+
+Checks:
+
+- restart the backend after installing or changing Python
+- verify a real interpreter exists, for example `C:\Python313\python.exe`
+- verify the dashboard Recent Actions or `~/.neuralclaw/logs/audit.jsonl` now shows the concrete tool error instead of a blank failure field
+
+If the runtime still reports the alias error after restart, disable the Windows Python app execution alias in:
+
+```text
+Settings > Apps > Advanced app settings > App execution aliases
+```
+
 Review the reported error and fix the generated file manually.
 
 ### Forged skill not loading

@@ -36,6 +36,17 @@ class VectorResult:
     content_preview: str
 
 
+@dataclass
+class VectorEntry:
+    """Stored vector row metadata."""
+
+    id: str
+    source: str
+    ref_id: str
+    content_preview: str
+    created_at: float
+
+
 class VectorMemory:
     """
     SQLite-backed vector memory.
@@ -143,20 +154,31 @@ class VectorMemory:
         query: str,
         top_k: int = 10,
         source_filter: str | None = None,
+        scan_limit: int = 5000,
     ) -> list[VectorResult]:
-        """Search for similar vectors using cosine similarity."""
+        """Search for similar vectors using cosine similarity.
+
+        Args:
+            scan_limit: Max rows to load for brute-force comparison.
+                        Rows are selected by most-recently-inserted first.
+        """
         if not self._db:
             await self._publish_error("similarity_search", RuntimeError("Vector memory is not initialized"))
             return []
 
         try:
             query_embedding = await self._generate_embedding(query)
+
+            # Build query with source filter + scan cap to prevent OOM
             sql = "SELECT ref_id, source, embedding_json, content_preview FROM vec_embeddings"
-            params: tuple[str, ...] = ()
+            params: list[str | int] = []
             if source_filter:
                 sql += " WHERE source = ?"
-                params = (source_filter,)
-            rows = await self._db.execute_fetchall(sql, params)
+                params.append(source_filter)
+            sql += " ORDER BY rowid DESC LIMIT ?"
+            params.append(scan_limit)
+
+            rows = await self._db.execute_fetchall(sql, tuple(params))
 
             results: list[VectorResult] = []
             for ref_id, source, embedding_json, preview in rows:
@@ -181,6 +203,8 @@ class VectorMemory:
                         "component": "vector_memory",
                         "query": query[:100],
                         "results": len(results[:top_k]),
+                        "scanned": len(rows),
+                        "scan_limit": scan_limit,
                         "source_filter": source_filter or "",
                     },
                     source="memory.vector",
@@ -202,6 +226,105 @@ class VectorMemory:
             await self._db.commit()
         except Exception as exc:
             await self._publish_error("delete_by_ref", exc)
+
+    async def delete(self, vector_id: str) -> None:
+        """Delete a vector by row ID."""
+        if not self._db:
+            await self._publish_error("delete", RuntimeError("Vector memory is not initialized"))
+            return
+
+        try:
+            await self._db.execute("DELETE FROM vec_embeddings WHERE id = ?", (vector_id,))
+            await self._db.commit()
+        except Exception as exc:
+            await self._publish_error("delete", exc)
+
+    async def list_entries(
+        self,
+        query: str = "",
+        limit: int = 50,
+        source_filter: str | None = None,
+    ) -> list[VectorEntry]:
+        """List stored vector rows for inspection."""
+        if not self._db:
+            await self._publish_error("list_entries", RuntimeError("Vector memory is not initialized"))
+            return []
+
+        try:
+            sql = (
+                "SELECT id, source, ref_id, content_preview, created_at "
+                "FROM vec_embeddings WHERE 1 = 1"
+            )
+            params: list[object] = []
+            if source_filter:
+                sql += " AND source = ?"
+                params.append(source_filter)
+            if query.strip():
+                sql += " AND (content_preview LIKE ? OR ref_id LIKE ?)"
+                like = f"%{query.strip()}%"
+                params.extend([like, like])
+            sql += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+            rows = await self._db.execute_fetchall(sql, tuple(params))
+            return [
+                VectorEntry(
+                    id=row[0],
+                    source=row[1],
+                    ref_id=row[2],
+                    content_preview=row[3] or "",
+                    created_at=float(row[4] or 0.0),
+                )
+                for row in rows
+            ]
+        except Exception as exc:
+            await self._publish_error("list_entries", exc)
+            return []
+
+    async def count(self) -> int:
+        """Return the total number of stored embeddings."""
+        if not self._db:
+            return 0
+        rows = await self._db.execute_fetchall("SELECT COUNT(*) FROM vec_embeddings")
+        return int(rows[0][0]) if rows else 0
+
+    async def clear(self) -> int:
+        """Delete all embeddings and return deleted count."""
+        if not self._db:
+            await self._publish_error("clear", RuntimeError("Vector memory is not initialized"))
+            return 0
+
+        try:
+            rows = await self._db.execute_fetchall("SELECT COUNT(*) FROM vec_embeddings")
+            count = int(rows[0][0]) if rows else 0
+            await self._db.execute("DELETE FROM vec_embeddings")
+            await self._db.commit()
+            return count
+        except Exception as exc:
+            await self._publish_error("clear", exc)
+            return 0
+
+    async def prune(self, keep_days: int = 90) -> int:
+        """Delete stale embeddings older than the retention window."""
+        if not self._db:
+            await self._publish_error("prune", RuntimeError("Vector memory is not initialized"))
+            return 0
+
+        try:
+            cutoff = time.time() - (keep_days * 86400)
+            rows = await self._db.execute_fetchall(
+                "SELECT COUNT(*) FROM vec_embeddings WHERE created_at < ?",
+                (cutoff,),
+            )
+            count = int(rows[0][0]) if rows else 0
+            await self._db.execute(
+                "DELETE FROM vec_embeddings WHERE created_at < ?",
+                (cutoff,),
+            )
+            await self._db.commit()
+            return count
+        except Exception as exc:
+            await self._publish_error("prune", exc)
+            return 0
 
     async def close(self) -> None:
         """Close the vector store connection."""
@@ -226,9 +349,28 @@ class VectorMemory:
                 return self._coerce_dimension(embedding)
 
         if provider == "local":
+            # If no model is configured or the configured model fails,
+            # auto-detect an embedding-capable model from the Ollama server.
+            if not self._embedding_model:
+                self._embedding_model = await self._discover_embed_model()
+
             embedding = await self._embed_ollama(text)
             if embedding:
                 return self._coerce_dimension(embedding)
+
+            # First attempt failed — model may not be loaded. Try auto-detection
+            # once to recover (e.g., config pointed at a deleted model).
+            discovered = await self._discover_embed_model()
+            if discovered and discovered != self._embedding_model:
+                log.info(
+                    "Embed model '%s' failed — retrying with discovered model '%s'",
+                    self._embedding_model,
+                    discovered,
+                )
+                self._embedding_model = discovered
+                embedding = await self._embed_ollama(text)
+                if embedding:
+                    return self._coerce_dimension(embedding)
 
         return self._deterministic_embedding(text)
 
@@ -259,6 +401,47 @@ class VectorMemory:
         except Exception:
             return None
         return None
+
+    async def _discover_embed_model(self) -> str:
+        """Query Ollama and return the best available embedding model name.
+
+        Preference order:
+        1. Models with "embed" in the name (purpose-built)
+        2. Models with "nomic" in the name (common embedding models)
+        3. First available model as a last resort
+        Returns empty string if the server is unreachable.
+        """
+        base_url = (
+            self._ollama_base_url
+            or os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        ).rstrip("/")
+        if base_url.endswith("/v1"):
+            base_url = base_url[:-3]
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{base_url}/api/tags",
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status >= 400:
+                        return ""
+                    payload = await resp.json()
+            models: list[dict] = payload.get("models", [])
+            if not models:
+                return ""
+            names = [m.get("name", "") for m in models if m.get("name")]
+            # Priority 1: dedicated embed model
+            embed_names = [n for n in names if "embed" in n.lower()]
+            if embed_names:
+                return embed_names[0]
+            # Priority 2: nomic (popular embedding model family)
+            nomic_names = [n for n in names if "nomic" in n.lower()]
+            if nomic_names:
+                return nomic_names[0]
+            # Fallback: first available
+            return names[0]
+        except Exception:
+            return ""
 
     async def _embed_ollama(self, text: str) -> list[float] | None:
         base_url = (

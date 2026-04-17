@@ -1,6 +1,7 @@
 import pytest
 from pathlib import Path
 
+import neuralclaw.cortex.action.sandbox as sandbox_mod
 from neuralclaw.config import PolicyConfig
 from neuralclaw.cortex.action.policy import resolve_and_validate_path, PolicyEngine, RequestContext
 from neuralclaw.cortex.action.sandbox import Sandbox, SandboxPathDenied
@@ -36,6 +37,97 @@ def test_sandbox_working_dir_validation(tmp_path):
     # Should fail due to being outside allowed dirs
     with pytest.raises(SandboxPathDenied):
         sandbox._validate_working_dir(str(tmp_path))
+
+def test_sandbox_command_validation_blocks_blocked_executable(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    sandbox = Sandbox(allowed_dirs=[str(root)])
+
+    with pytest.raises(SandboxPathDenied):
+        sandbox._validate_command(["powershell", "-NoProfile"])
+
+
+def test_sandbox_command_validation_blocks_blocked_pattern(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    sandbox = Sandbox(allowed_dirs=[str(root)])
+
+    with pytest.raises(SandboxPathDenied):
+        sandbox._validate_command(["python", "-c", "print('hi') | bash"])
+
+
+def test_sandbox_command_validation_enforces_allowlist(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+
+    sandbox = Sandbox(
+        allowed_dirs=[str(root)],
+        allowed_executables=["python"],
+    )
+
+    sandbox._validate_command(["python", "-c", "print('ok')"])
+
+    with pytest.raises(SandboxPathDenied):
+        sandbox._validate_command(["node", "-e", "console.log('nope')"])
+
+
+@pytest.mark.asyncio
+async def test_execute_command_validates_command_before_launch(tmp_path, monkeypatch):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    sandbox = Sandbox(allowed_dirs=[str(root)])
+
+    async def fake_exec(*args, **kwargs):
+        raise AssertionError("subprocess should not start for blocked commands")
+
+    monkeypatch.setattr(sandbox_mod.asyncio, "create_subprocess_exec", fake_exec)
+
+    result = await sandbox.execute_command(["powershell", "-NoProfile"], working_dir=str(root))
+
+    assert result.success is False
+    assert result.error_code == sandbox_mod.ErrorCode.SANDBOX_PATH_DENIED
+
+
+@pytest.mark.asyncio
+async def test_execute_python_no_longer_crashes_on_undefined_command(tmp_path, monkeypatch):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    sandbox = Sandbox(allowed_dirs=[str(root)])
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"ok\n", b""
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc()
+
+    monkeypatch.setattr(sandbox_mod.asyncio, "create_subprocess_exec", fake_exec)
+
+    result = await sandbox.execute_python("print('ok')", working_dir=str(root))
+
+    assert result.success is True
+    assert result.output == "ok"
+
+def test_find_python_interpreter_skips_windowsapps_alias(monkeypatch):
+    monkeypatch.setattr(sandbox_mod.sys, "platform", "win32")
+    monkeypatch.setattr(sandbox_mod.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sandbox_mod.sys, "executable", r"C:\Program Files\NeuralClaw\neuralclaw-sidecar.exe")
+    monkeypatch.setattr(
+        sandbox_mod.os.path,
+        "isfile",
+        lambda path: path == r"C:\Python313\python.exe",
+    )
+    monkeypatch.setattr(
+        sandbox_mod.shutil,
+        "which",
+        lambda name: r"C:\Users\Lenovo\AppData\Local\Microsoft\WindowsApps\python.exe",
+    )
+
+    assert sandbox_mod._find_python_interpreter() == r"C:\Python313\python.exe"
 
 def test_policy_engine_shell_execution():
     config = PolicyConfig(deny_shell_execution=True)

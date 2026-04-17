@@ -48,8 +48,16 @@ neuralclaw forge create "twilio" --use-case "send appointment reminders"
 - Boilerplate code with a valid `get_manifest()` entry point
 - Skill manifest generation (name, description, parameters)
 - Static analysis to catch security issues before registration
-- Sandbox testing to verify the skill runs without errors
+- Sandbox testing to verify the skill runs without errors when the packaged runtime can resolve a real Python interpreter
 - Registration with the gateway so the router can call it immediately
+
+### Windows packaged runtime note
+
+In packaged desktop builds, SkillForge and `execute_python` depend on the sidecar resolving a real `python.exe`. NeuralClaw now prefers common installed interpreters and skips Microsoft Store `WindowsApps` aliases, but if sandbox verification still reports `Python was not found`, restart the backend after installing Python and confirm a real interpreter exists, for example:
+
+```text
+C:\Python313\python.exe
+```
 
 ### Editing generated skills
 

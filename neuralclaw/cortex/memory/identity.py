@@ -404,6 +404,86 @@ class UserIdentityStore:
             await self._db.close()
         self._db = None
 
+    async def count(self) -> int:
+        """Return the total number of stored user models."""
+        if not self._db:
+            return 0
+        rows = await self._db.execute_fetchall("SELECT COUNT(*) FROM user_models")
+        return int(rows[0][0]) if rows else 0
+
+    async def list_models(
+        self,
+        query: str = "",
+        limit: int = 50,
+    ) -> list[UserModel]:
+        """List stored user models for inspection."""
+        if not self._db:
+            return []
+        sql = (
+            "SELECT user_id, display_name, platform_aliases_json, "
+            "communication_style_json, active_projects_json, expertise_domains_json, "
+            "language, timezone, preferences_json, last_seen, first_seen, "
+            "session_count, message_count, notes "
+            "FROM user_models"
+        )
+        params: list[object] = []
+        if query.strip():
+            sql += " WHERE display_name LIKE ? OR notes LIKE ?"
+            like = f"%{query.strip()}%"
+            params.extend([like, like])
+        sql += " ORDER BY last_seen DESC LIMIT ?"
+        params.append(limit)
+        rows = await self._db.execute_fetchall(sql, tuple(params))
+        return [self._row_to_model(row) for row in rows]
+
+    async def delete_user(self, user_id: str) -> bool:
+        """Delete a user model and all aliases."""
+        if not self._db:
+            await self._publish_error("delete_user", RuntimeError("Identity store is not initialized"))
+            return False
+        try:
+            await self._db.execute("DELETE FROM user_models WHERE user_id = ?", (user_id,))
+            await self._db.commit()
+            return True
+        except Exception as exc:
+            await self._publish_error("delete_user", exc)
+            return False
+
+    async def clear(self) -> int:
+        """Delete all user models and aliases."""
+        if not self._db:
+            await self._publish_error("clear", RuntimeError("Identity store is not initialized"))
+            return 0
+        try:
+            rows = await self._db.execute_fetchall("SELECT COUNT(*) FROM user_models")
+            count = int(rows[0][0]) if rows else 0
+            await self._db.execute("DELETE FROM user_aliases")
+            await self._db.execute("DELETE FROM user_models")
+            await self._db.commit()
+            return count
+        except Exception as exc:
+            await self._publish_error("clear", exc)
+            return 0
+
+    async def prune(self, keep_days: int = 365) -> int:
+        """Delete stale user models that have not been seen within the retention window."""
+        if not self._db:
+            await self._publish_error("prune", RuntimeError("Identity store is not initialized"))
+            return 0
+        try:
+            cutoff = time.time() - (keep_days * 86400)
+            rows = await self._db.execute_fetchall(
+                "SELECT COUNT(*) FROM user_models WHERE last_seen < ?",
+                (cutoff,),
+            )
+            count = int(rows[0][0]) if rows else 0
+            await self._db.execute("DELETE FROM user_models WHERE last_seen < ?", (cutoff,))
+            await self._db.commit()
+            return count
+        except Exception as exc:
+            await self._publish_error("prune", exc)
+            return 0
+
     async def _infer_expertise_domains(self, texts: list[str]) -> list[str]:
         if not self._semantic:
             return []

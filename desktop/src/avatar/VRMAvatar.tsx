@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { VRMLoaderPlugin } from '@pixiv/three-vrm';
 import { Box3, Color, Group, Mesh, MeshPhysicalMaterial, Object3D, Vector3 } from 'three';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { AvatarEmotion } from './useAvatarState';
@@ -11,6 +9,8 @@ interface Props {
   scale: number;
   emotion: AvatarEmotion;
   isSpeaking: boolean;
+  collaborationPulse: boolean;
+  activityLevel: number;
 }
 
 const EMOTION_COLORS: Record<AvatarEmotion, string> = {
@@ -18,20 +18,25 @@ const EMOTION_COLORS: Record<AvatarEmotion, string> = {
   thinking: '#ffd36f',
   happy: '#78f0a0',
   surprised: '#ff9e7a',
+  focused: '#a08bff',
+  collaborating: '#72f8ff',
 };
 
-export default function VRMAvatar({ modelPath, scale, emotion, isSpeaking }: Props) {
+export default function VRMAvatar({ modelPath, scale, emotion, isSpeaking, collaborationPulse, activityLevel }: Props) {
   const fallbackRef = useRef<Group>(null);
   const leftEyeRef = useRef<Mesh>(null);
   const rightEyeRef = useRef<Mesh>(null);
   const mouthRef = useRef<Mesh>(null);
   const haloRef = useRef<Mesh>(null);
+  const pulseRingRef = useRef<Mesh>(null);
+  const orbitRef = useRef<Group>(null);
   const [vrmRoot, setVrmRoot] = useState<Object3D | null>(null);
   const [vrmHandle, setVrmHandle] = useState<any>(null);
   const [vrmFitScale, setVrmFitScale] = useState(1);
   const [vrmYOffset, setVrmYOffset] = useState(-1.25);
   const [vrmXOffset, setVrmXOffset] = useState(0);
   const [vrmZOffset, setVrmZOffset] = useState(0);
+  const vrmRootRef = useRef<Object3D | null>(null);
   const presentationScale = 0.94 + Math.max(0.5, Math.min(scale, 2)) * 0.08;
 
   const shellMaterial = useMemo(
@@ -66,52 +71,70 @@ export default function VRMAvatar({ modelPath, scale, emotion, isSpeaking }: Pro
       return;
     }
 
-    const loader = new GLTFLoader();
-    loader.register((parser) => new VRMLoaderPlugin(parser));
-
     let disposed = false;
-    loader.load(
-      convertFileSrc(modelPath),
-      (gltf) => {
+    void (async () => {
+      try {
+        const [{ GLTFLoader }, { VRMLoaderPlugin }] = await Promise.all([
+          import('three/examples/jsm/loaders/GLTFLoader.js'),
+          import('@pixiv/three-vrm'),
+        ]);
         if (disposed) return;
-        const vrm = (gltf.userData as { vrm?: any }).vrm;
-        if (!vrm?.scene) {
-          setVrmRoot(null);
-          setVrmHandle(null);
-          return;
-        }
-        const bounds = new Box3().setFromObject(vrm.scene);
-        const size = bounds.getSize(new Vector3());
-        const center = bounds.getCenter(new Vector3());
-        vrm.scene.rotation.y = Math.PI;
-        if (size.y > 0.0001) {
-          const targetHeight = 2.35;
-          setVrmFitScale(targetHeight / size.y);
-          setVrmYOffset(-bounds.min.y - 1.35);
-          setVrmXOffset(-center.x);
-          setVrmZOffset(-center.z);
-        } else {
-          setVrmFitScale(1);
-          setVrmYOffset(-1.25);
-          setVrmXOffset(0);
-          setVrmZOffset(0);
-        }
-        setVrmRoot(vrm.scene);
-        setVrmHandle(vrm);
-      },
-      undefined,
-      () => {
+
+        const loader = new GLTFLoader();
+        loader.register((parser) => new VRMLoaderPlugin(parser));
+        loader.load(
+          convertFileSrc(modelPath),
+          (gltf) => {
+            if (disposed) return;
+            const vrm = (gltf.userData as { vrm?: any }).vrm;
+            if (!vrm?.scene) {
+              setVrmRoot(null);
+              setVrmHandle(null);
+              vrmRootRef.current = null;
+              return;
+            }
+            const bounds = new Box3().setFromObject(vrm.scene);
+            const size = bounds.getSize(new Vector3());
+            const center = bounds.getCenter(new Vector3());
+            vrm.scene.rotation.y = Math.PI;
+            if (size.y > 0.0001) {
+              const targetHeight = 2.35;
+              setVrmFitScale(targetHeight / size.y);
+              setVrmYOffset(-bounds.min.y - 1.35);
+              setVrmXOffset(-center.x);
+              setVrmZOffset(-center.z);
+            } else {
+              setVrmFitScale(1);
+              setVrmYOffset(-1.25);
+              setVrmXOffset(0);
+              setVrmZOffset(0);
+            }
+            vrmRootRef.current = vrm.scene;
+            setVrmRoot(vrm.scene);
+            setVrmHandle(vrm);
+          },
+          undefined,
+          () => {
+            if (!disposed) {
+              vrmRootRef.current = null;
+              setVrmRoot(null);
+              setVrmHandle(null);
+            }
+          },
+        );
+      } catch {
         if (!disposed) {
+          vrmRootRef.current = null;
           setVrmRoot(null);
           setVrmHandle(null);
         }
-      },
-    );
+      }
+    })();
 
     return () => {
       disposed = true;
-      if (vrmRoot) {
-        vrmRoot.traverse((node) => {
+      if (vrmRootRef.current) {
+        vrmRootRef.current.traverse((node) => {
           const mesh = node as Mesh & { geometry?: { dispose: () => void }; material?: { dispose: () => void } | { dispose: () => void }[] };
           mesh.geometry?.dispose?.();
           if (Array.isArray(mesh.material)) {
@@ -120,6 +143,7 @@ export default function VRMAvatar({ modelPath, scale, emotion, isSpeaking }: Pro
             mesh.material?.dispose?.();
           }
         });
+        vrmRootRef.current = null;
       }
     };
   }, [modelPath]);
@@ -144,6 +168,14 @@ export default function VRMAvatar({ modelPath, scale, emotion, isSpeaking }: Pro
     if (haloRef.current) {
       haloRef.current.rotation.z += 0.006;
       haloRef.current.scale.setScalar(1 + Math.sin(t * 1.4) * 0.03);
+    }
+    if (pulseRingRef.current) {
+      const pulse = collaborationPulse ? 1 + Math.sin(t * 4.5) * 0.08 : 1 + Math.sin(t * 1.8) * 0.03;
+      pulseRingRef.current.scale.setScalar(pulse);
+    }
+    if (orbitRef.current) {
+      orbitRef.current.rotation.y += 0.01 + activityLevel * 0.0015;
+      orbitRef.current.rotation.x = Math.sin(t * 0.4) * 0.08;
     }
 
     if (vrmHandle?.scene) {
@@ -173,6 +205,30 @@ export default function VRMAvatar({ modelPath, scale, emotion, isSpeaking }: Pro
         <torusGeometry args={[0.46, 0.03, 24, 64]} />
         <meshStandardMaterial color="#72f8ff" emissive="#72f8ff" emissiveIntensity={0.35} transparent opacity={0.6} />
       </mesh>
+      <mesh ref={pulseRingRef} position={[0, 1.26, -0.1]} rotation={[Math.PI / 2, 0, 0]}>
+        <torusGeometry args={[0.56, 0.012, 18, 64]} />
+        <meshStandardMaterial
+          color={collaborationPulse ? '#a08bff' : '#72f8ff'}
+          emissive={collaborationPulse ? '#a08bff' : '#72f8ff'}
+          emissiveIntensity={collaborationPulse ? 0.8 : 0.35}
+          transparent
+          opacity={0.5}
+        />
+      </mesh>
+      <group ref={orbitRef} position={[0, 1.04, 0]}>
+        <mesh position={[0.68, 0.16, -0.1]}>
+          <sphereGeometry args={[0.04, 16, 16]} />
+          <meshStandardMaterial color="#72f8ff" emissive="#72f8ff" emissiveIntensity={0.95} />
+        </mesh>
+        <mesh position={[-0.7, -0.08, 0.08]}>
+          <sphereGeometry args={[0.028, 16, 16]} />
+          <meshStandardMaterial color="#ffcf8c" emissive="#ffcf8c" emissiveIntensity={0.85} />
+        </mesh>
+        <mesh position={[0.04, -0.62, -0.18]}>
+          <sphereGeometry args={[0.024 + Math.min(activityLevel, 8) * 0.003, 14, 14]} />
+          <meshStandardMaterial color="#a08bff" emissive="#a08bff" emissiveIntensity={0.75} />
+        </mesh>
+      </group>
       <mesh position={[0, 1.04, 0]} material={shellMaterial}>
         <sphereGeometry args={[0.44, 32, 32]} />
       </mesh>

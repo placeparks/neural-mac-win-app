@@ -2,64 +2,185 @@
 
 Native desktop client for NeuralClaw, built with Tauri 2, React 19, and TypeScript.
 
-## Desktop v1.4.0
+## What The Desktop App Does
 
-This release turns the desktop app into a local control room for NeuralClaw:
+The desktop app is the primary product surface for NeuralClaw. It is not just a chat shell.
 
-- Persistent chat sessions with model-aware metadata
-- Dedicated `Tasks` inbox for delegated and background work
-- Agent creation, editing, direct talk, delegation, and runtime telemetry
-- Local Ollama model discovery, health badges, and automatic failover
-- Memory controls for episodic, semantic, and procedural memory
-- Knowledge-base document and image upload flows
-- Channel configuration for Telegram, Discord, Slack, WhatsApp, and Signal
-- Avatar window with agent desk, minimize/hide support, and desktop companion mode
+Current product responsibilities:
+
+- first-run setup wizard
+- provider and model-role configuration
+- persistent local chat sessions
+- agent definition and delegation workflows
+- task inbox and orchestration tracking
+- integrations and channels control plane
+- knowledge-base ingestion and memory maintenance
+- floating avatar / assistant window
+- local computer + voice assistant controls
+
+## Current Desktop Surfaces
+
+- `Chat`
+  - persistent sessions
+  - attachments
+  - selected model metadata
+  - requested/effective model tracking
+- `Connections`
+  - connect/test/disconnect supported integrations
+  - surface operational readiness
+- `Tasks`
+  - manual, auto-route, consensus, and pipeline task tracking
+  - orchestration metadata and task detail
+  - approval-gated execution and review actions
+- `Agents`
+  - persistent definitions
+  - runtime state
+  - direct talk
+  - delegation
+- `Memory`
+  - counts
+  - retention
+  - export/import
+- `Knowledge`
+  - upload
+  - ingest
+  - search
+  - delete
+- `Database`
+  - DB/BI workflows
+  - connection visibility
+- `Workspace`
+  - projects and agent workspace visibility
+- `Settings`
+  - provider config
+  - model roles
+  - embedding model
+  - channels
+  - search providers
+  - feature flags
+  - autonomy and self-configuration permissions
+  - backend runtime
+  - `Computer + Voice Assistant`
+
+## Avatar / Assistant
+
+The avatar is now part of the real product experience rather than a cosmetic extra.
+
+Current assistant behaviors:
+
+- floating avatar window
+- agent deck for delegation
+- live activity pulse
+- inline mic input from the avatar overlay
+- optional auto-speak replies
+- live desktop screen preview
+- assistant-centric settings in the `Computer + Voice Assistant` tab
+
+Windows-specific intent:
+
+- avoid stale speaking/emotion state
+- avoid duplicate spoken replies
+- keep mic, bubble, and response state coordinated
+- make the avatar feel like an assistant presence, not a novelty widget
+
+## Operator View
+
+The desktop dashboard is now an operator surface, not only a health screen.
+
+Current operator pieces:
+
+- provider and backend health
+- operator brief
+- recommended actions
+- traces and event bus
+- recent audited actions
+
+This matters because the product should show what the agent actually did, not only what it said.
 
 ## Architecture
 
 ```text
-+----------------------- NeuralClaw Desktop ------------------------+
-| React frontend | Zustand stores | Tauri shell | Avatar window     |
-+---------------------------+--------------------------------------+
-                            |
-                            v
-+--------------------------- Local sidecar ------------------------+
-| Dashboard API (:8080) | Web chat / traces | task + agent APIs    |
++---------------------- NeuralClaw Desktop -----------------------+
+| React frontend | Zustand stores | Tauri shell | Avatar window   |
 +---------------------------+-------------------------------------+
                             |
                             v
-+------------------------- NeuralClaw core ------------------------+
-| Gateway | Swarm agents | Memory | Channels | Local model routing |
-+-----------------------------------------------------------------+
++-------------------------- Local sidecar ------------------------+
+| Dashboard API :8080 | web chat/traces | tasks | integrations    |
++---------------------------+-------------------------------------+
+                            |
+                            v
++------------------------ NeuralClaw core ------------------------+
+| gateway | swarm | memory | channels | local routing | skills    |
++----------------------------------------------------------------+
 ```
 
-## Main Surfaces
+## Model Routing
 
-- `Chat`: persistent sessions, attachments, per-chat model selection, requested/effective model display
-- `Tasks`: queued/running/completed/failed delegated work with detail view and follow-up routing
-- `Agents`: definitions, live runtime state, logs, latency/token metrics, direct talk/delegate flows
-- `Memory`: live counts, refresh, and clear controls
-- `Knowledge Base`: upload and manage documents/images for retrieval
-- `Settings`: provider, channels, models, memory, avatar, features, and advanced computer-use controls
+The desktop app treats the configured local endpoint as the live source of truth.
 
-## Local Model Routing
+- available Ollama models are discovered from the configured endpoint
+- model roles are configured from the UI
+- chat-capable and embedding-only model usage is separated
+- requested and effective models are tracked independently
+- fallback behavior is surfaced to users
 
-NeuralClaw Desktop treats the configured Ollama endpoint as the single source of truth.
+Important rule:
 
-- The app fetches exact live model tags from the configured local host
-- New chats and agents use the real discovered model names
-- Requested and effective model names are tracked separately
-- If `qwen3.5:35b` is unavailable, execution can fall back to `qwen3.5:9b`, then `qwen3.5:4b`
-- Health state and fallback behavior are visible in the desktop UI
+- embedding-only models belong in the embedding path only
+- they are blocked from chat and delegation roles
 
-## Delegation and Tasks
+## Integrations and Channels
 
-Delegated work is persisted as task records and survives app restart.
+Desktop is the user-facing control plane for both.
 
-- Single-agent delegation produces a tracked task with result or error state
-- Multi-agent delegation creates parent and child task records
-- Completion, failure, and model downgrade events surface as toasts
-- Task detail includes target agent(s), result preview, runtime data, and chat follow-up actions
+Current integrations surfaced from the app:
+
+- GitHub
+- Google Workspace
+- Slack
+- Jira
+- Notion
+- Supabase
+- database connections
+
+Current channel management surfaced from the app:
+
+- Telegram
+- Discord
+- Slack
+- WhatsApp
+- Signal
+
+Important Slack note:
+
+- workspace connect is not the same as full Socket Mode readiness
+- deeper inbound Slack behavior still requires the app token path
+
+## Feature and Autonomy Controls
+
+Settings now needs to be treated as a real control layer.
+
+Current intent:
+
+- expose meaningful backend feature toggles
+- group them clearly instead of showing a flat dump
+- make self-configuration and skill-forging capability an explicit user permission
+- avoid hidden runtime powers that are not obvious from the UI
+
+## Local Assistant Controls
+
+The `Computer + Voice Assistant` tab currently manages:
+
+- avatar visibility and VRM model
+- assistant voice presence
+- auto-speak replies
+- desktop control enablement
+- browser automation enablement
+- screen peek test flow
+- action delay and related runtime controls
+
+This tab is the current home for local assistant configuration and should stay the canonical assistant control surface.
 
 ## Development
 
@@ -77,35 +198,33 @@ npm install
 npm run tauri dev
 ```
 
-The Tauri release build packages the Python sidecar automatically.
-
-## Production Build
+### Build for production
 
 ```bash
 cd desktop
 npm run tauri build
 ```
 
-Windows outputs:
+The Tauri release build packages the Python sidecar automatically.
 
-- `src-tauri/target/release/bundle/nsis/NeuralClaw_1.4.0_x64-setup.exe`
-- `src-tauri/target/release/bundle/msi/NeuralClaw_1.4.0_x64_en-US.msi`
+## Validation
 
-The GitHub workflow at `.github/workflows/desktop-release.yml` builds tagged desktop releases for:
-
-- Windows (`x86_64-pc-windows-msvc`)
-- macOS Apple Silicon (`aarch64-apple-darwin`)
-- Linux (`x86_64-unknown-linux-gnu`)
-
-Release trigger:
+Useful checks:
 
 ```bash
-git tag desktop-v1.4.0
-git push origin desktop-v1.4.0
+cd desktop
+npm run build
 ```
 
-## Notes
+From repo root:
 
-- Desktop app versioning is independent from the Python package version at the repo root
-- Local chat and task data persists across reinstalls unless explicitly cleared
-- The Tauri bundle still carries a large lazy avatar vendor chunk; packaging succeeds, but that remains the main optimization item
+```bash
+python -m py_compile neuralclaw/dashboard.py neuralclaw/gateway.py
+```
+
+## Known Notes
+
+- the avatar vendor bundle remains large; packaging succeeds, but chunk optimization is still open
+- packaged logging has occasionally been inconsistent even when the backend is healthy
+- sidecar/process ownership handling has been improved significantly, but installer validation is still important after runtime changes
+- backend STT and stronger voice-entry reliability are still future work for a more premium assistant experience

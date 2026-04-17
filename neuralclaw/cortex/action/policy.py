@@ -18,6 +18,7 @@ from typing import Any
 
 from neuralclaw.config import PolicyConfig
 from neuralclaw.cortex.action.network import validate_url, validate_url_with_dns
+from neuralclaw.errors import ErrorCode
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +32,7 @@ class PolicyResult:
     tool_name: str
     reason: str = ""
     details: dict[str, Any] = field(default_factory=dict)
+    error_code: ErrorCode | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +72,51 @@ class RequestContext:
         self.llm_calls += 1
         self.tokens_in += tokens_in
         self.tokens_out += tokens_out
+
+
+# ---------------------------------------------------------------------------
+# Denial context (guardrail feedback loop)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DenialContext:
+    """Accumulated denial state for a request, used to steer the LLM away
+    from retrying denied tools."""
+    denied_tools: list[str] = field(default_factory=list)
+    denied_reasons: list[str] = field(default_factory=list)
+    suggested_alternatives: list[str] = field(default_factory=list)
+
+    def record(self, tool_name: str, reason: str) -> None:
+        """Record a denied tool call."""
+        if tool_name not in self.denied_tools:
+            self.denied_tools.append(tool_name)
+            self.denied_reasons.append(reason)
+
+    def set_alternatives(self, alternatives: list[str]) -> None:
+        """Set suggested alternative tools (e.g. tools sharing same capability)."""
+        self.suggested_alternatives = [
+            a for a in alternatives if a not in self.denied_tools
+        ]
+
+    @property
+    def has_denials(self) -> bool:
+        return len(self.denied_tools) > 0
+
+    def to_system_guidance(self) -> str:
+        """Generate a system message telling the LLM what to avoid."""
+        if not self.denied_tools:
+            return ""
+        lines = ["The following tools were denied by security policy and must NOT be retried:"]
+        for tool, reason in zip(self.denied_tools, self.denied_reasons):
+            lines.append(f"  - {tool}: {reason}")
+        lines.append(
+            "Do NOT call these tools again. Answer using your knowledge or suggest alternatives to the user."
+        )
+        if self.suggested_alternatives:
+            lines.append(
+                f"Available alternative tools you can try: {', '.join(self.suggested_alternatives)}"
+            )
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +232,7 @@ class PolicyEngine:
                 tool_name=tool_name,
                 reason="tool_not_allowlisted",
                 details={"allowed_tools": self._config.allowed_tools},
+                error_code=ErrorCode.POLICY_TOOL_NOT_ALLOWED,
             )
 
         # Budget checks
@@ -195,6 +243,7 @@ class PolicyEngine:
                     allowed=False,
                     tool_name=tool_name,
                     reason=f"tool_call_limit_exceeded:{request_ctx.tool_calls}/{self._config.max_tool_calls_per_request}",
+                    error_code=ErrorCode.POLICY_BUDGET_EXCEEDED,
                 )
 
             # Wall time limit
@@ -203,6 +252,7 @@ class PolicyEngine:
                     allowed=False,
                     tool_name=tool_name,
                     reason=f"request_timeout:{request_ctx.elapsed_seconds:.1f}s/{self._config.max_request_wall_seconds}s",
+                    error_code=ErrorCode.POLICY_BUDGET_EXCEEDED,
                 )
 
         # Shell execution check (includes repo execution tools)
@@ -211,6 +261,7 @@ class PolicyEngine:
                 allowed=False,
                 tool_name=tool_name,
                 reason="shell_execution_denied_by_policy",
+                error_code=ErrorCode.POLICY_SHELL_DENIED,
             )
 
         # Path-based tools: validate filesystem access
@@ -223,6 +274,7 @@ class PolicyEngine:
                     tool_name=tool_name,
                     reason=path_result.reason,
                     details=path_result.details,
+                    error_code=ErrorCode.POLICY_PATH_DENIED,
                 )
 
         # Network tools: validate URL (static check here; DNS check should be done by caller via check_url_async)
@@ -237,6 +289,7 @@ class PolicyEngine:
                         allowed=False,
                         tool_name=tool_name,
                         reason=static.reason,
+                        error_code=ErrorCode.POLICY_NETWORK_DENIED,
                     )
 
         # Track the call
@@ -276,11 +329,13 @@ class PolicyEngine:
                 allowed=False,
                 tool_name="budget_check",
                 reason=f"tool_call_limit:{request_ctx.tool_calls}",
+                error_code=ErrorCode.POLICY_BUDGET_EXCEEDED,
             )
         if request_ctx.elapsed_seconds >= self._config.max_request_wall_seconds:
             return PolicyResult(
                 allowed=False,
                 tool_name="budget_check",
                 reason=f"wall_time_limit:{request_ctx.elapsed_seconds:.1f}s",
+                error_code=ErrorCode.POLICY_BUDGET_EXCEEDED,
             )
         return PolicyResult(allowed=True, tool_name="budget_check")

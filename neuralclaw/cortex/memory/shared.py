@@ -128,6 +128,9 @@ class SharedMemoryBridge:
             for r in rows
         ]
 
+    MAX_ENTRIES_PER_TASK = 100
+    MAX_CONTENT_CHARS = 8000
+
     async def share_memory(
         self,
         task_id: str,
@@ -137,6 +140,21 @@ class SharedMemoryBridge:
     ) -> SharedMemoryEntry:
         """Write a memory to the shared task namespace."""
         assert self._db is not None
+
+        # Enforce content size limit
+        if len(content) > self.MAX_CONTENT_CHARS:
+            content = content[: self.MAX_CONTENT_CHARS]
+
+        # Enforce per-task entry limit
+        count_rows = await self._db.execute_fetchall(
+            "SELECT COUNT(*) FROM shared_memories WHERE task_id = ?", (task_id,),
+        )
+        if count_rows and count_rows[0][0] >= self.MAX_ENTRIES_PER_TASK:
+            raise RuntimeError(
+                f"Shared memory limit reached: task {task_id} already has "
+                f"{count_rows[0][0]} entries (max {self.MAX_ENTRIES_PER_TASK})"
+            )
+
         entry = SharedMemoryEntry(
             id=uuid.uuid4().hex[:12],
             task_id=task_id,

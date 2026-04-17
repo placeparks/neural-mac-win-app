@@ -1,30 +1,30 @@
-# NeuralClaw Desktop — Build Python Sidecar (Windows)
+# NeuralClaw Desktop - Build Python Sidecar (Windows)
 # Run from: desktop/ directory
 
+$ErrorActionPreference = "Stop"
 $suffix = "x86_64-pc-windows-msvc"
+$specPath = "neuralclaw-sidecar-$suffix.spec"
+$sidecarDir = "desktop/src-tauri/sidecar"
+$builtSidecar = "dist/neuralclaw-sidecar-$suffix.exe"
+$bundledSidecar = Join-Path $sidecarDir "neuralclaw-sidecar-$suffix.exe"
 
 Write-Host "Building NeuralClaw sidecar for: $suffix" -ForegroundColor Cyan
 
 Push-Location ..
 
 python -m PyInstaller `
-    --name "neuralclaw-sidecar-$suffix" `
-    --onefile `
     --noconfirm `
     --clean `
-    --hidden-import=neuralclaw `
-    --hidden-import=aiohttp `
-    --hidden-import=aiosqlite `
-    --collect-all neuralclaw `
-    neuralclaw/__main__.py
+    $specPath
 
-# Create sidecar directory if needed
-New-Item -ItemType Directory -Force -Path "desktop/src-tauri/sidecar/" | Out-Null
+New-Item -ItemType Directory -Force -Path $sidecarDir | Out-Null
 
-# Copy to Tauri sidecar directory
-Copy-Item "dist/neuralclaw-sidecar-$suffix.exe" `
-    -Destination "desktop/src-tauri/sidecar/"
+if (Test-Path $bundledSidecar) {
+    Remove-Item -LiteralPath $bundledSidecar -Force
+}
+
+Copy-Item -LiteralPath $builtSidecar -Destination $bundledSidecar -Force
 
 Pop-Location
 
-Write-Host "✅ Sidecar built: neuralclaw-sidecar-$suffix.exe" -ForegroundColor Green
+Write-Host "Built sidecar: neuralclaw-sidecar-$suffix.exe" -ForegroundColor Green

@@ -29,6 +29,32 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class MemoryEvidence:
+    """Serializable retrieval evidence used for desktop provenance."""
+
+    memory_type: str
+    item_id: str
+    title: str
+    excerpt: str
+    reason: str
+    scope: str = "global"
+    score: float | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "memory_type": self.memory_type,
+            "item_id": self.item_id,
+            "title": self.title,
+            "excerpt": self.excerpt,
+            "reason": self.reason,
+            "scope": self.scope,
+            "score": self.score,
+            "metadata": self.metadata,
+        }
+
+
 # ---------------------------------------------------------------------------
 # Memory context (output to reasoning cortex)
 # ---------------------------------------------------------------------------
@@ -55,6 +81,8 @@ class MemoryContext:
     # Budget tracking
     budget_chars: int = 0
     budget_hit: bool = False
+    provenance: list[dict[str, Any]] = field(default_factory=list)
+    scopes: list[str] = field(default_factory=list)
 
     def is_empty(self) -> bool:
         return not self.episodes and not self.entities and not self.facts and not self.kb_results
@@ -111,6 +139,9 @@ class MemoryContext:
             result += "\n\n[Memory truncated due to budget limit]"
 
         return result
+
+    def provenance_summary(self, limit: int = 6) -> list[dict[str, Any]]:
+        return self.provenance[:limit]
 
 
 def _ts(timestamp: float) -> str:
@@ -179,6 +210,16 @@ class MemoryRetriever:
             recent_count: How many recent episodes to include.
         """
         ctx = MemoryContext()
+        evidence_seen: set[tuple[str, str, str]] = set()
+
+        def add_evidence(evidence: MemoryEvidence) -> None:
+            key = (evidence.memory_type, evidence.item_id, evidence.reason)
+            if key in evidence_seen:
+                return
+            evidence_seen.add(key)
+            ctx.provenance.append(evidence.to_dict())
+            if evidence.scope and evidence.scope not in ctx.scopes:
+                ctx.scopes.append(evidence.scope)
 
         # 1. Episodic FTS search
         try:
@@ -186,6 +227,23 @@ class MemoryRetriever:
                 query, limit=self._max_episodes
             )
             ctx.episodes = [r.episode for r in search_results]
+            for result in search_results:
+                add_evidence(
+                    MemoryEvidence(
+                        memory_type="episodic",
+                        item_id=result.episode.id,
+                        title=result.episode.author or result.episode.source or "Episode",
+                        excerpt=result.episode.content[:220],
+                        reason="Matched the current request by text relevance.",
+                        scope=_scope_from_tags(result.episode.tags),
+                        score=result.relevance,
+                        metadata={
+                            "source": result.episode.source,
+                            "author": result.episode.author,
+                            "tags": result.episode.tags,
+                        },
+                    )
+                )
         except Exception:
             pass  # FTS may fail on very short queries
 
@@ -205,6 +263,21 @@ class MemoryRetriever:
                     if episode:
                         ctx.episodes.append(episode)
                         existing_ids.add(episode.id)
+                        add_evidence(
+                            MemoryEvidence(
+                                memory_type="vector",
+                                item_id=result.ref_id,
+                                title=episode.author or episode.source or "Episode",
+                                excerpt=result.content_preview[:220],
+                                reason="Retrieved by semantic similarity.",
+                                scope=_scope_from_tags(episode.tags),
+                                score=result.score,
+                                metadata={
+                                    "source": result.source,
+                                    "ref_id": result.ref_id,
+                                },
+                            )
+                        )
             except Exception:
                 pass
 
@@ -213,6 +286,25 @@ class MemoryRetriever:
             try:
                 kb_results = await self._knowledge_base.search(query, top_k=self._kb_top_k)
                 ctx.kb_results = kb_results
+                for index, result in enumerate(kb_results[: self._kb_top_k]):
+                    chunk = getattr(result, "chunk", None)
+                    if not chunk:
+                        continue
+                    add_evidence(
+                        MemoryEvidence(
+                            memory_type="knowledge_base",
+                            item_id=str(getattr(chunk, "id", f"kb-{index}")),
+                            title=str(getattr(chunk, "document", None) or getattr(chunk, "source", "Knowledge Base")),
+                            excerpt=str(getattr(chunk, "content", ""))[:220],
+                            reason="Matched the request in indexed documents.",
+                            scope=f"workspace:{getattr(chunk, 'source', 'knowledge')}",
+                            score=float(getattr(result, "score", 0.0) or 0.0),
+                            metadata={
+                                "document": getattr(chunk, "document", ""),
+                                "chunk_index": getattr(chunk, "chunk_index", None),
+                            },
+                        )
+                    )
             except Exception:
                 pass
 
@@ -226,8 +318,29 @@ class MemoryRetriever:
                     if ep.id not in existing_ids:
                         ctx.episodes.append(ep)
                         existing_ids.add(ep.id)
+                        add_evidence(
+                            MemoryEvidence(
+                                memory_type="episodic",
+                                item_id=ep.id,
+                                title=ep.author or ep.source or "Episode",
+                                excerpt=ep.content[:220],
+                                reason="Included for recent conversational continuity.",
+                                scope=_scope_from_tags(ep.tags),
+                                metadata={
+                                    "source": ep.source,
+                                    "author": ep.author,
+                                    "tags": ep.tags,
+                                },
+                            )
+                        )
             except Exception:
                 pass
+
+        # Filter out poisoned/suspicious episodes before formatting
+        ctx.episodes = [
+            ep for ep in ctx.episodes
+            if "suspicious" not in ep.tags
+        ]
 
         # Sort episodes by timestamp (most recent last for conversation flow)
         ctx.episodes.sort(key=lambda e: e.timestamp)
@@ -242,10 +355,24 @@ class MemoryRetriever:
                     if ent.id not in seen_entities:
                         ctx.entities.append(ent)
                         seen_entities.add(ent.id)
+                        add_evidence(
+                            MemoryEvidence(
+                                memory_type="semantic",
+                                item_id=ent.id,
+                                title=ent.name,
+                                excerpt=str(ent.attributes)[:220] if ent.attributes else ent.entity_type,
+                                reason="Entity matched the request and expanded related facts.",
+                                scope=f"namespace:{self._semantic._namespace}",
+                                metadata={
+                                    "entity_type": ent.entity_type,
+                                    "attributes": ent.attributes,
+                                },
+                            )
+                        )
 
                         # Get relationships for this entity
                         triples = await self._semantic.get_relationships(
-                            ent.name, min_confidence=0.3
+                            ent.name, min_confidence=0.5
                         )
                         ctx.facts.extend(triples[:self._max_facts])
             except Exception:
@@ -282,6 +409,8 @@ class MemoryRetriever:
                 "entities_found": [e.name for e in ctx.entities[:5]],
                 "formatted_chars": len(ctx.formatted),
                 "budget_hit": ctx.budget_hit,
+                "provenance_count": len(ctx.provenance),
+                "scopes": ctx.scopes[:8],
             },
             source="memory.retrieval",
         )
@@ -335,3 +464,10 @@ class MemoryRetriever:
                 seen.add(key)
                 unique.append(c)
         return unique[:12]
+
+
+def _scope_from_tags(tags: list[str]) -> str:
+    for tag in tags:
+        if tag.startswith("scope:"):
+            return tag[len("scope:") :]
+    return "global"

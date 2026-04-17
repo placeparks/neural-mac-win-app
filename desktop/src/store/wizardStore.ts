@@ -22,6 +22,12 @@ interface WizardState {
   // Step 4: Model
   selectedModel: string;
   setSelectedModel: (model: string) => void;
+  modelRoles: {
+    primary: string;
+    fast: string;
+    micro: string;
+  };
+  setModelRole: (role: 'primary' | 'fast' | 'micro', model: string) => void;
 
   // Step 5: Channels
   selectedChannels: string[];
@@ -66,7 +72,28 @@ export const useWizardStore = create<WizardState>((set) => ({
   setCurrentKeyProvider: (idx) => set({ currentKeyProvider: idx }),
 
   selectedModel: '',
-  setSelectedModel: (model) => set({ selectedModel: model }),
+  setSelectedModel: (model) =>
+    set((state) => ({
+      selectedModel: model,
+      modelRoles: {
+        primary: model,
+        fast: state.modelRoles.fast || model,
+        micro: state.modelRoles.micro || model,
+      },
+    })),
+  modelRoles: {
+    primary: '',
+    fast: '',
+    micro: '',
+  },
+  setModelRole: (role, model) =>
+    set((state) => ({
+      selectedModel: role === 'primary' ? model : state.selectedModel,
+      modelRoles: {
+        ...state.modelRoles,
+        [role]: model,
+      },
+    })),
 
   selectedChannels: [],
   toggleChannel: (channel) =>
@@ -113,6 +140,11 @@ export const useWizardStore = create<WizardState>((set) => ({
       apiEndpoints: {},
       currentKeyProvider: 0,
       selectedModel: '',
+      modelRoles: {
+        primary: '',
+        fast: '',
+        micro: '',
+      },
       selectedChannels: [],
       channelTokens: {},
       features: {

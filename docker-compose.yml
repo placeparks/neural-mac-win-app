@@ -8,15 +8,15 @@ services:
     container_name: neuralclaw
     restart: unless-stopped
     ports:
-      - "8080:8080"
-      - "8081:8081"
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
       - "8100:8100"
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
     volumes:
-      - neuralclaw-data:/root/.neuralclaw
+      - neuralclaw-data:/home/neuralclaw/.neuralclaw
     command: ["neuralclaw", "gateway", "--watchdog"]
 
 volumes:

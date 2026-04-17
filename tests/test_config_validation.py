@@ -5,6 +5,7 @@ from pathlib import Path
 import toml
 
 from neuralclaw.config import (
+    CONFIG_DIR,
     NeuralClawConfig,
     ProviderConfig,
     SecurityConfig,
@@ -13,6 +14,7 @@ from neuralclaw.config import (
     ConfigValidationResult,
     load_config,
 )
+from neuralclaw.skills.paths import resolve_user_skills_dir
 
 
 class TestConfigValidation:
@@ -193,6 +195,7 @@ class TestConfigValidation:
                         "enabled": True,
                         "screenshot_on_action": False,
                         "action_delay_ms": 25,
+                        "autonomous_execution": True,
                     },
                     "tts": {
                         "enabled": True,
@@ -275,6 +278,7 @@ class TestConfigValidation:
         assert config.desktop.enabled
         assert not config.desktop.screenshot_on_action
         assert config.desktop.action_delay_ms == 25
+        assert config.desktop.autonomous_execution
         assert config.tts.enabled
         assert config.tts.provider == "piper"
         assert config.tts.voice == "en_US-lessac-medium"
@@ -311,6 +315,8 @@ class TestConfigValidation:
         assert not config.security.canary_tokens
         assert config.security.pii_patterns == ["employee-[0-9]+"]
         assert str(Path(config.workspace.apps_dir).expanduser()) in config.policy.allowed_filesystem_roots
+        assert str(resolve_user_skills_dir(config.forge.user_skills_dir)) in config.policy.allowed_filesystem_roots
+        assert str(CONFIG_DIR.expanduser()) in config.policy.allowed_filesystem_roots
         assert "build_app" in config.policy.allowed_tools
         assert "build_app" in config.policy.mutating_tools
         assert "speak" in config.policy.allowed_tools

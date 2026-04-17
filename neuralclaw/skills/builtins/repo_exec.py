@@ -30,6 +30,9 @@ from neuralclaw.skills.manifest import SkillManifest, ToolDefinition, ToolParame
 
 REPOS_DIR = Path.home() / ".neuralclaw" / "workspace" / "repos"
 
+# Desktop sidecar: running as frozen binary means the user owns the machine.
+_IS_DESKTOP = getattr(sys, "frozen", False)
+
 # Commands that are allowed as the first token in run_repo_command
 ALLOWED_COMMANDS: set[str] = {
     "python", "python3", "node", "npm", "npx",
@@ -240,6 +243,22 @@ def _validate_command(raw_command: str) -> tuple[list[str] | None, str]:
     return tokens, ""
 
 
+def _sandbox_allowed_dirs() -> list[str]:
+    """Return sandbox allowed directories, expanded for desktop mode."""
+    dirs = [str(REPOS_DIR)]
+    if _IS_DESKTOP:
+        home = str(Path.home())
+        dirs.extend([
+            home,
+            str(Path.home() / "Desktop"),
+            str(Path.home() / "Documents"),
+            str(Path.home() / "Downloads"),
+            str(Path.home() / "Projects"),
+            str(Path.home() / ".neuralclaw"),
+        ])
+    return dirs
+
+
 # ---------------------------------------------------------------------------
 # Tool handlers
 # ---------------------------------------------------------------------------
@@ -277,7 +296,8 @@ async def run_repo_script(
     timeout = min(max(timeout_seconds, 5), _max_exec_timeout)
     sandbox = Sandbox(
         timeout_seconds=timeout,
-        allowed_dirs=[str(REPOS_DIR)],
+        allowed_dirs=_sandbox_allowed_dirs(),
+        allowed_executables=sorted(ALLOWED_COMMANDS),
     )
 
     result = await sandbox.execute_command(
@@ -343,7 +363,8 @@ async def run_repo_command(
     timeout = min(max(timeout_seconds, 5), _max_exec_timeout)
     sandbox = Sandbox(
         timeout_seconds=timeout,
-        allowed_dirs=[str(REPOS_DIR)],
+        allowed_dirs=_sandbox_allowed_dirs(),
+        allowed_executables=sorted(ALLOWED_COMMANDS),
     )
 
     result = await sandbox.execute_command(

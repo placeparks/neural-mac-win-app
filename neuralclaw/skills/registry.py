@@ -3,6 +3,10 @@ Skill Registry — Plugin discovery, loading, and registration.
 
 Discovers skills from built-in and user directories, loads their manifests,
 and registers their tools for the reasoning cortex.
+
+Built-in skills are loaded lazily: tool stubs are registered from the static
+_registry.py metadata file at startup (zero heavy imports), and the actual
+skill module is only imported when one of its tools is first invoked.
 """
 
 from __future__ import annotations
@@ -27,7 +31,7 @@ class SkillRegistry:
     Central registry for all skills (built-in and user-installed).
 
     Handles:
-    - Discovery of built-in skills
+    - Discovery of built-in skills (lazily — only imported on first tool call)
     - Dynamic loading of skill modules
     - Registration of tool definitions
     - Lookup by name
@@ -38,6 +42,10 @@ class SkillRegistry:
         self._skill_sources: dict[str, str] = {}
         self._user_skills: set[str] = set()
         self._tool_defs: list[ToolDef] = []
+        # Lazy-loading state for built-in skills
+        self._lazy_entries: dict[str, str] = {}      # skill_name -> module_path
+        self._loaded_skills: set[str] = set()        # skill_names fully imported
+        self._tool_to_skill: dict[str, str] = {}     # tool_name -> skill_name
 
     def _set_skill_source(self, name: str, source: str) -> None:
         self._skill_sources[name] = source
@@ -83,6 +91,7 @@ class SkillRegistry:
             "properties": {k: v for k, v in (parameters or {}).items()},
             "required": list((parameters or {}).keys()),
         }
+        self._tool_defs = [td for td in self._tool_defs if td.name != name]
         self._tool_defs.append(ToolDef(
             name=name,
             description=description,
@@ -90,11 +99,108 @@ class SkillRegistry:
             handler=function,
         ))
 
-    def load_builtins(self) -> None:
-        """Discover and load all built-in skills."""
-        import neuralclaw.skills.builtins as builtins_pkg
+    # ------------------------------------------------------------------
+    # Lazy loading helpers (used by load_builtins)
+    # ------------------------------------------------------------------
 
+    def _build_schema(self, parameters: dict[str, Any]) -> dict[str, Any]:
+        """Convert flat parameter dict from _registry.py into JSON Schema."""
+        return {
+            "type": "object",
+            "properties": {k: v for k, v in parameters.items()},
+            "required": [],  # required is tracked separately; stub uses [] for safety
+        }
+
+    def _make_lazy_handler(self, skill_name: str, tool_name: str):
+        """
+        Return an async handler that loads the real skill module on first call
+        then delegates to the real handler.
+        """
+        async def _lazy(**kwargs):
+            await self._ensure_loaded(skill_name)
+            real_handler = self._get_real_handler(tool_name)
+            if real_handler is None:
+                return {"error": f"Tool '{tool_name}' handler not found after loading skill '{skill_name}'"}
+            return await real_handler(**kwargs)
+        _lazy.__name__ = tool_name
+        return _lazy
+
+    async def _ensure_loaded(self, skill_name: str) -> None:
+        """Import the actual skill module and patch all its tool handlers."""
+        if skill_name in self._loaded_skills:
+            return
+        module_path = self._lazy_entries.get(skill_name)
+        if module_path is None:
+            self._loaded_skills.add(skill_name)
+            return
+        try:
+            module = importlib.import_module(module_path)
+            if hasattr(module, "get_manifest"):
+                manifest = module.get_manifest()
+                real_handlers = {t.name: t.handler for t in manifest.tools}
+                # Patch the live ToolDef handler references in place
+                for td in self._tool_defs:
+                    if td.name in real_handlers:
+                        td.handler = real_handlers[td.name]
+                # Store the full manifest
+                self._skills[manifest.name] = manifest
+        except Exception as e:
+            print(f"[SkillRegistry] Failed to lazy-load skill '{skill_name}': {e}")
+        self._loaded_skills.add(skill_name)
+
+    def _get_real_handler(self, tool_name: str):
+        """Look up the (now-patched) handler for *tool_name*."""
+        for td in self._tool_defs:
+            if td.name == tool_name:
+                return td.handler
+        return None
+
+    # ------------------------------------------------------------------
+    # Discovery
+    # ------------------------------------------------------------------
+
+    def load_builtins(self) -> None:
+        """
+        Register all built-in skills as lazy stubs.
+
+        Tool names and descriptions are read from the static _registry.py
+        metadata file (zero heavy imports). The actual skill module is only
+        imported the first time one of its tools is called.
+        """
+        try:
+            from neuralclaw.skills.builtins._registry import BUILTIN_SKILL_METADATA
+        except ImportError:
+            # Fallback: eager import (old behaviour) if _registry.py is absent
+            self._load_builtins_eager()
+            return
+
+        for meta in BUILTIN_SKILL_METADATA:
+            skill_name = meta["name"]
+            module_path = meta["module"]
+            self._lazy_entries[skill_name] = module_path
+
+            for tool_meta in meta.get("tools", []):
+                tname = tool_meta["name"]
+                self._tool_to_skill[tname] = skill_name
+                schema = {
+                    "type": "object",
+                    "properties": tool_meta.get("parameters", {}),
+                    "required": tool_meta.get("required", []),
+                }
+                stub_handler = self._make_lazy_handler(skill_name, tname)
+                self._tool_defs.append(ToolDef(
+                    name=tname,
+                    description=tool_meta["description"],
+                    parameters=schema,
+                    handler=stub_handler,
+                ))
+
+    def _load_builtins_eager(self) -> None:
+        """Original eager fallback — imports all skill modules immediately."""
+        import neuralclaw.skills.builtins as builtins_pkg
         for importer, modname, ispkg in pkgutil.iter_modules(builtins_pkg.__path__):
+            if modname.startswith("_"):
+                continue
             try:
                 module = importlib.import_module(f"neuralclaw.skills.builtins.{modname}")
                 if hasattr(module, "get_manifest"):
@@ -102,7 +208,6 @@ class SkillRegistry:
                     if isinstance(manifest, SkillManifest):
                         self.register(manifest)
             except Exception as e:
-                # Log but don't crash on individual skill failures
                 print(f"[SkillRegistry] Failed to load builtin skill '{modname}': {e}")
 
     def hot_register(self, manifest: SkillManifest, source: str | None = None) -> None:

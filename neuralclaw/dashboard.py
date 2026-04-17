@@ -16,8 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import time
 from typing import Any
+from urllib.parse import urlparse
+
+from neuralclaw.config import load_config, update_config
 
 try:
     from aiohttp import web
@@ -27,16 +31,94 @@ except ImportError:
 
 if web is not None:
     @web.middleware
-    async def _cors_middleware(request: Any, handler: Any) -> Any:
+    async def _dashboard_security_middleware(request: Any, handler: Any) -> Any:
+        dashboard = request.app.get("dashboard_instance")
+        if dashboard is None:
+            return web.json_response({"error": "Dashboard unavailable"}, status=503)
+        if not dashboard._request_is_authorized(request):
+            status = 401 if dashboard._auth_token else 403
+            error = (
+                "Dashboard access denied for non-local request."
+                if dashboard._auth_token
+                else "Dashboard is restricted to localhost unless a dashboard auth token is configured."
+            )
+            response = web.json_response({"error": error}, status=status)
+            dashboard._apply_cors_headers(request, response)
+            return response
         if request.method == "OPTIONS":
             response = web.Response(status=204)
         else:
             response = await handler(request)
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-        response.headers["Access-Control-Max-Age"] = "86400"
+        dashboard._apply_cors_headers(request, response)
         return response
+
+
+def _infer_model_capabilities(provider_name: str, model_id: str, raw: dict[str, Any]) -> dict[str, bool]:
+    provider = (provider_name or "").strip().lower()
+    model = (model_id or "").strip().lower()
+    descriptor = " ".join(
+        str(raw.get(key, "") or "").lower()
+        for key in ("name", "family", "owned_by", "description")
+    )
+    haystack = f"{model} {descriptor}"
+
+    supports_vision = False
+    if provider in {"openai", "google", "xai"}:
+        supports_vision = True
+    elif provider == "anthropic":
+        supports_vision = "claude" in haystack
+    elif provider in {"openrouter", "venice", "mistral", "minimax", "proxy"}:
+        supports_vision = any(token in haystack for token in (
+            "vision", "vl", "gpt-4o", "gpt-4.1", "gpt-5", "gemini", "claude",
+            "pixtral", "llava", "qwen-vl", "qwen2.5-vl", "minicpm-v", "gemma3",
+        ))
+    elif provider in {"local", "meta", "ollama"}:
+        supports_vision = any(token in haystack for token in (
+            "llava", "bakllava", "vision", "vl", "minicpm-v", "moondream",
+            "qwen-vl", "qwen2.5-vl", "gemma3",
+        ))
+
+    return {
+        "supports_tools": True,
+        "supports_documents": True,
+        "supports_vision": supports_vision,
+    }
+
+
+def _normalize_provider_model_catalog(provider_name: str, models: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for raw in models:
+        if not isinstance(raw, dict):
+            continue
+        model_id = str(raw.get("id", "") or raw.get("name", "") or "").strip()
+        if not model_id:
+            continue
+        key = model_id.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        capabilities = _infer_model_capabilities(provider_name, model_id, raw)
+        description = (
+            str(raw.get("description", "") or "").strip()
+            or str(raw.get("parameter_size", "") or "").strip()
+            or str(raw.get("family", "") or "").strip()
+            or str(raw.get("owned_by", "") or "").strip()
+        )
+        normalized.append({
+            **raw,
+            "id": model_id,
+            "name": str(raw.get("name", "") or model_id).strip(),
+            "description": description,
+            "capabilities": capabilities,
+            "supports_vision": capabilities["supports_vision"],
+            "supports_documents": capabilities["supports_documents"],
+            "supports_tools": capabilities["supports_tools"],
+        })
+
+    normalized.sort(key=lambda item: (str(item.get("name", "")).lower(), str(item.get("id", "")).lower()))
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -634,11 +716,13 @@ class Dashboard:
 
     def __init__(
         self,
-        host: str = "0.0.0.0",
+        host: str = "127.0.0.1",
         port: int = 8080,
+        auth_token: str = "",
     ) -> None:
         self._host = host
         self._port = port
+        self._auth_token = str(auth_token or "").strip()
         self._app: Any = None
         self._runner: Any = None
         self._ws_clients: list[Any] = []
@@ -651,6 +735,7 @@ class Dashboard:
         self._agents_provider: Any = None
         self._federation_provider: Any = None
         self._memory_provider: Any = None
+        self._memory_items_provider: Any = None
         self._bus_provider: Any = None
         self._health_provider: Any = None
         self._ready_provider: Any = None
@@ -663,7 +748,17 @@ class Dashboard:
         self._swarm_provider: Any = None
         self._tasks_provider: Any = None
         self._task_detail_provider: Any = None
+        self._task_approve_action: Any = None
+        self._task_reject_action: Any = None
+        self._operator_brief_provider: Any = None
+        self._audit_provider: Any = None
         self._local_models_provider: Any = None
+        self._integrations_provider: Any = None
+        self._integration_test_action: Any = None
+        self._integration_connect_action: Any = None
+        self._integration_disconnect_action: Any = None
+        self._integration_callback_action: Any = None
+        self._assistant_screen_action: Any = None
 
         # Action callables
         self._spawn_action: Any = None
@@ -671,6 +766,9 @@ class Dashboard:
         self._send_message_action: Any = None
         self._join_federation_action: Any = None
         self._clear_memory_action: Any = None
+        self._memory_update_item_action: Any = None
+        self._memory_delete_item_action: Any = None
+        self._memory_pin_item_action: Any = None
         self._get_features_action: Any = None
         self._set_feature_action: Any = None
         self._message_peer_action: Any = None
@@ -680,6 +778,7 @@ class Dashboard:
         self._channel_update_action: Any = None
         self._channel_test_action: Any = None
         self._channel_pair_action: Any = None
+        self._channel_reset_action: Any = None
         self._kb_list_action: Any = None
         self._kb_ingest_action: Any = None
         self._kb_ingest_text_action: Any = None
@@ -699,6 +798,112 @@ class Dashboard:
         self._shared_task_get: Any = None
         self._agent_memories: Any = None
         self._agent_activity: Any = None
+        self._agent_auto_route: Any = None
+        self._agent_consensus: Any = None
+        self._agent_pipeline: Any = None
+        self._workflow_list_action: Any = None
+        self._workflow_create_action: Any = None
+        self._workflow_run_action: Any = None
+        self._workflow_pause_action: Any = None
+        self._workflow_delete_action: Any = None
+        self._memory_export_action: Any = None
+        self._memory_import_action: Any = None
+        self._memory_retention_action: Any = None
+
+        # Adaptive control plane actions
+        self._snapshot_create_action: Any = None
+        self._rollback_execute_action: Any = None
+        self._snapshot_list_action: Any = None
+        self._rollback_status_action: Any = None
+        self._routine_create_action: Any = None
+        self._routine_list_action: Any = None
+        self._routine_update_action: Any = None
+        self._routine_outcome_action: Any = None
+        self._learning_review_action: Any = None
+        self._pending_reviews_action: Any = None
+        self._project_activate_action: Any = None
+        self._project_suspend_action: Any = None
+        self._project_active_action: Any = None
+        self._project_sessions_action: Any = None
+        self._teaching_capture_action: Any = None
+        self._teaching_promote_template_action: Any = None
+        self._teaching_promote_skill_action: Any = None
+        self._teaching_list_action: Any = None
+        self._skill_graph_action: Any = None
+        self._skill_resolve_action: Any = None
+        self._skill_composition_action: Any = None
+        self._sharing_distill_action: Any = None
+        self._sharing_export_action: Any = None
+        self._sharing_import_action: Any = None
+        self._sharing_review_action: Any = None
+        self._sharing_list_action: Any = None
+        self._multimodal_voice_action: Any = None
+        self._multimodal_screenshot_action: Any = None
+        self._multimodal_recording_action: Any = None
+        self._multimodal_diagram_action: Any = None
+        self._multimodal_list_action: Any = None
+
+        # Adaptive wave-2 actions
+        self._intent_predictions_action: Any = None
+        self._intent_stats_action: Any = None
+        self._intent_observe_action: Any = None
+        self._style_profile_action: Any = None
+        self._style_rule_action: Any = None
+        self._compensating_history_action: Any = None
+        self._compensating_list_action: Any = None
+        self._compensating_plan_action: Any = None
+        self._compensating_execute_action: Any = None
+        self._federation_skills_action: Any = None
+        self._federation_stats_action: Any = None
+        self._federation_publish_action: Any = None
+        self._federation_import_action: Any = None
+        self._scheduler_status_action: Any = None
+        self._scheduler_force_action: Any = None
+
+    @staticmethod
+    def _is_loopback_host(value: str | None) -> bool:
+        host = str(value or "").strip().lower()
+        if not host:
+            return False
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        return host in {"127.0.0.1", "::1", "localhost"}
+
+    def _request_is_local(self, request: Any) -> bool:
+        remote = str(getattr(request, "remote", "") or "").strip()
+        if remote and self._is_loopback_host(remote):
+            return True
+        transport = getattr(request, "transport", None)
+        if transport is None:
+            return False
+        peername = transport.get_extra_info("peername")
+        host = peername[0] if isinstance(peername, tuple) and peername else ""
+        return self._is_loopback_host(str(host))
+
+    def _request_is_authorized(self, request: Any) -> bool:
+        if self._request_is_local(request):
+            return True
+        if not self._auth_token:
+            return False
+        header = str(request.headers.get("Authorization", "") or "").strip()
+        token = ""
+        if header.lower().startswith("bearer "):
+            token = header[7:].strip()
+        if not token:
+            token = str(request.headers.get("X-NeuralClaw-Token", "") or "").strip()
+        return bool(token) and secrets.compare_digest(token, self._auth_token)
+
+    def _apply_cors_headers(self, request: Any, response: Any) -> None:
+        origin = str(request.headers.get("Origin", "") or "").strip()
+        origin_host = urlparse(origin).hostname if origin else ""
+        if origin and (self._request_is_local(request) or self._is_loopback_host(origin_host)):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = (
+            "Content-Type, Authorization, X-NeuralClaw-Token"
+        )
+        response.headers["Access-Control-Max-Age"] = "86400"
 
     # -- Data provider setters --
 
@@ -713,6 +918,18 @@ class Dashboard:
 
     def set_memory_provider(self, provider: Any) -> None:
         self._memory_provider = provider
+
+    def set_memory_management_actions(
+        self,
+        list_action: Any = None,
+        update_item_action: Any = None,
+        delete_item_action: Any = None,
+        pin_item_action: Any = None,
+    ) -> None:
+        self._memory_items_provider = list_action
+        self._memory_update_item_action = update_item_action
+        self._memory_delete_item_action = delete_item_action
+        self._memory_pin_item_action = pin_item_action
 
     def set_bus_provider(self, provider: Any) -> None:
         self._bus_provider = provider
@@ -747,10 +964,12 @@ class Dashboard:
         update_action: Any = None,
         test_action: Any = None,
         pair_action: Any = None,
+        reset_action: Any = None,
     ) -> None:
         self._channel_update_action = update_action
         self._channel_test_action = test_action
         self._channel_pair_action = pair_action
+        self._channel_reset_action = reset_action
 
     def set_skills_provider(self, provider: Any) -> None:
         self._skills_provider = provider
@@ -758,12 +977,41 @@ class Dashboard:
     def set_swarm_provider(self, provider: Any) -> None:
         self._swarm_provider = provider
 
-    def set_task_providers(self, list_provider: Any = None, detail_provider: Any = None) -> None:
+    def set_task_providers(
+        self,
+        list_provider: Any = None,
+        detail_provider: Any = None,
+        approve_action: Any = None,
+        reject_action: Any = None,
+    ) -> None:
         self._tasks_provider = list_provider
         self._task_detail_provider = detail_provider
+        self._task_approve_action = approve_action
+        self._task_reject_action = reject_action
 
     def set_local_models_provider(self, provider: Any) -> None:
         self._local_models_provider = provider
+
+    def set_operator_brief_provider(self, provider: Any) -> None:
+        self._operator_brief_provider = provider
+
+    def set_audit_provider(self, provider: Any) -> None:
+        self._audit_provider = provider
+
+    def set_integrations_provider(self, provider: Any) -> None:
+        self._integrations_provider = provider
+
+    def set_integration_actions(
+        self,
+        test_action: Any = None,
+        connect_action: Any = None,
+        disconnect_action: Any = None,
+        callback_action: Any = None,
+    ) -> None:
+        self._integration_test_action = test_action
+        self._integration_connect_action = connect_action
+        self._integration_disconnect_action = disconnect_action
+        self._integration_callback_action = callback_action
 
     def set_knowledge_base_actions(
         self,
@@ -778,6 +1026,9 @@ class Dashboard:
         self._kb_ingest_text_action = ingest_text_action
         self._kb_search_action = search_action
         self._kb_delete_action = delete_action
+
+    def set_assistant_actions(self, screen_action: Any = None) -> None:
+        self._assistant_screen_action = screen_action
 
     # -- Action setters --
 
@@ -795,6 +1046,16 @@ class Dashboard:
 
     def set_clear_memory_action(self, action: Any) -> None:
         self._clear_memory_action = action
+
+    def set_memory_backup_actions(
+        self,
+        export_action: Any = None,
+        import_action: Any = None,
+        retention_action: Any = None,
+    ) -> None:
+        self._memory_export_action = export_action
+        self._memory_import_action = import_action
+        self._memory_retention_action = retention_action
 
     def set_features_provider(self, getter: Any, setter: Any) -> None:
         self._get_features_action = getter
@@ -820,6 +1081,9 @@ class Dashboard:
         shared_task_get_fn: Any = None,
         memories_fn: Any = None,
         activity_fn: Any = None,
+        auto_route_fn: Any = None,
+        consensus_fn: Any = None,
+        pipeline_fn: Any = None,
     ) -> None:
         self._agent_def_list = list_fn
         self._agent_def_create = create_fn
@@ -833,6 +1097,119 @@ class Dashboard:
         self._shared_task_get = shared_task_get_fn
         self._agent_memories = memories_fn
         self._agent_activity = activity_fn
+        self._agent_auto_route = auto_route_fn
+        self._agent_consensus = consensus_fn
+        self._agent_pipeline = pipeline_fn
+
+    def set_workflow_actions(
+        self,
+        list_action: Any = None,
+        create_action: Any = None,
+        run_action: Any = None,
+        pause_action: Any = None,
+        delete_action: Any = None,
+    ) -> None:
+        self._workflow_list_action = list_action
+        self._workflow_create_action = create_action
+        self._workflow_run_action = run_action
+        self._workflow_pause_action = pause_action
+        self._workflow_delete_action = delete_action
+
+    def set_adaptive_actions(
+        self,
+        snapshot_create: Any = None,
+        rollback_execute: Any = None,
+        snapshot_list: Any = None,
+        rollback_status: Any = None,
+        routine_create: Any = None,
+        routine_list: Any = None,
+        routine_update: Any = None,
+        routine_outcome: Any = None,
+        learning_review: Any = None,
+        pending_reviews: Any = None,
+        project_activate: Any = None,
+        project_suspend: Any = None,
+        project_active: Any = None,
+        project_sessions: Any = None,
+        teaching_capture: Any = None,
+        teaching_promote_template: Any = None,
+        teaching_promote_skill: Any = None,
+        teaching_list: Any = None,
+        skill_graph: Any = None,
+        skill_resolve: Any = None,
+        skill_composition: Any = None,
+        sharing_distill: Any = None,
+        sharing_export: Any = None,
+        sharing_import: Any = None,
+        sharing_review: Any = None,
+        sharing_list: Any = None,
+        multimodal_voice: Any = None,
+        multimodal_screenshot: Any = None,
+        multimodal_recording: Any = None,
+        multimodal_diagram: Any = None,
+        multimodal_list: Any = None,
+        intent_predictions: Any = None,
+        intent_stats: Any = None,
+        intent_observe: Any = None,
+        style_profile: Any = None,
+        style_rule: Any = None,
+        compensating_history: Any = None,
+        compensating_list: Any = None,
+        compensating_plan: Any = None,
+        compensating_execute: Any = None,
+        federation_skills: Any = None,
+        federation_stats: Any = None,
+        federation_publish: Any = None,
+        federation_import: Any = None,
+        scheduler_status: Any = None,
+        scheduler_force: Any = None,
+    ) -> None:
+        self._snapshot_create_action = snapshot_create
+        self._rollback_execute_action = rollback_execute
+        self._snapshot_list_action = snapshot_list
+        self._rollback_status_action = rollback_status
+        self._routine_create_action = routine_create
+        self._routine_list_action = routine_list
+        self._routine_update_action = routine_update
+        self._routine_outcome_action = routine_outcome
+        self._learning_review_action = learning_review
+        self._pending_reviews_action = pending_reviews
+        self._project_activate_action = project_activate
+        self._project_suspend_action = project_suspend
+        self._project_active_action = project_active
+        self._project_sessions_action = project_sessions
+        self._teaching_capture_action = teaching_capture
+        self._teaching_promote_template_action = teaching_promote_template
+        self._teaching_promote_skill_action = teaching_promote_skill
+        self._teaching_list_action = teaching_list
+        self._skill_graph_action = skill_graph
+        self._skill_resolve_action = skill_resolve
+        self._skill_composition_action = skill_composition
+        self._sharing_distill_action = sharing_distill
+        self._sharing_export_action = sharing_export
+        self._sharing_import_action = sharing_import
+        self._sharing_review_action = sharing_review
+        self._sharing_list_action = sharing_list
+        self._multimodal_voice_action = multimodal_voice
+        self._multimodal_screenshot_action = multimodal_screenshot
+        self._multimodal_recording_action = multimodal_recording
+        self._multimodal_diagram_action = multimodal_diagram
+        self._multimodal_list_action = multimodal_list
+        self._intent_predictions_action = intent_predictions
+        self._intent_stats_action = intent_stats
+        self._intent_observe_action = intent_observe
+        self._style_profile_action = style_profile
+        self._style_rule_action = style_rule
+        self._compensating_history_action = compensating_history
+        self._compensating_list_action = compensating_list
+        self._compensating_plan_action = compensating_plan
+        self._compensating_execute_action = compensating_execute
+        self._federation_skills_action = federation_skills
+        self._federation_stats_action = federation_stats
+        self._federation_publish_action = federation_publish
+        self._federation_import_action = federation_import
+        self._scheduler_status_action = scheduler_status
+        self._scheduler_force_action = scheduler_force
 
     # -- Trace push --
 
@@ -856,7 +1233,8 @@ class Dashboard:
             print("[Dashboard] aiohttp not installed — dashboard unavailable")
             return
 
-        self._app = web.Application(middlewares=[_cors_middleware])
+        self._app = web.Application(middlewares=[_dashboard_security_middleware])
+        self._app["dashboard_instance"] = self
         # GET routes
         self._app.router.add_get("/", self._handle_index)
         self._app.router.add_get("/api/stats", self._handle_stats)
@@ -864,6 +1242,7 @@ class Dashboard:
         self._app.router.add_get("/api/agents", self._handle_agents)
         self._app.router.add_get("/api/federation", self._handle_federation)
         self._app.router.add_get("/api/memory", self._handle_memory)
+        self._app.router.add_get("/api/memory/items", self._handle_memory_items)
         self._app.router.add_get("/api/bus", self._handle_bus)
         self._app.router.add_get("/api/features", self._handle_get_features)
         self._app.router.add_get("/traces", self._handle_trace_list)
@@ -875,7 +1254,23 @@ class Dashboard:
         self._app.router.add_get("/api/channels", self._handle_channels)
         self._app.router.add_get("/api/tasks", self._handle_tasks)
         self._app.router.add_get("/api/tasks/{task_id}", self._handle_task_detail)
+        self._app.router.add_get("/api/operator/brief", self._handle_operator_brief)
+        self._app.router.add_get("/api/audit", self._handle_audit)
+        self._app.router.add_get("/api/adaptive/routines", self._handle_adaptive_routines)
+        self._app.router.add_get("/api/adaptive/reviews", self._handle_adaptive_reviews)
+        self._app.router.add_get("/api/adaptive/projects", self._handle_adaptive_projects)
+        self._app.router.add_get("/api/adaptive/project/active", self._handle_adaptive_active_project)
+        self._app.router.add_get("/api/adaptive/snapshots", self._handle_adaptive_snapshots)
+        self._app.router.add_get("/api/adaptive/skills/graph", self._handle_adaptive_skill_graph)
+        self._app.router.add_get("/api/adaptive/teaching", self._handle_adaptive_teaching)
+        self._app.router.add_post("/api/tasks/{task_id}/approve", self._handle_task_approve)
+        self._app.router.add_post("/api/tasks/{task_id}/reject", self._handle_task_reject)
         self._app.router.add_get("/api/models/local-health", self._handle_local_models)
+        self._app.router.add_get("/api/integrations", self._handle_integrations)
+        self._app.router.add_post("/api/integrations/{integration_id}/connect", self._handle_integration_connect)
+        self._app.router.add_post("/api/integrations/{integration_id}/test", self._handle_integration_test)
+        self._app.router.add_post("/api/integrations/{integration_id}/disconnect", self._handle_integration_disconnect)
+        self._app.router.add_get("/api/integrations/oauth/{provider}/callback", self._handle_integration_callback)
         self._app.router.add_get("/skills", self._handle_skills)
         self._app.router.add_get("/swarm", self._handle_swarm)
         self._app.router.add_get("/ws/traces", self._handle_ws)
@@ -886,18 +1281,52 @@ class Dashboard:
         self._app.router.add_post("/api/message", self._handle_message)
         self._app.router.add_post("/api/federation/join", self._handle_federation_join)
         self._app.router.add_post("/api/memory/clear", self._handle_memory_clear)
+        self._app.router.add_post("/api/memory/export", self._handle_memory_export)
+        self._app.router.add_post("/api/memory/import", self._handle_memory_import)
+        self._app.router.add_post("/api/memory/retention", self._handle_memory_retention)
+        self._app.router.add_post("/api/memory/items/{store}/{item_id}/pin", self._handle_memory_item_pin)
         self._app.router.add_post("/api/features", self._handle_set_feature)
         self._app.router.add_post("/api/config", self._handle_config_update)
         self._app.router.add_post("/api/channels/{channel_name}", self._handle_channel_update)
         self._app.router.add_post("/api/channels/{channel_name}/test", self._handle_channel_test)
         self._app.router.add_post("/api/channels/{channel_name}/pair", self._handle_channel_pair)
+        self._app.router.add_post("/api/channels/{channel_name}/reset", self._handle_channel_reset)
+        self._app.router.add_post("/api/assistant/screen", self._handle_assistant_screen)
         self._app.router.add_get("/api/kb/documents", self._handle_kb_documents)
         self._app.router.add_post("/api/kb/ingest", self._handle_kb_ingest)
         self._app.router.add_post("/api/kb/ingest-text", self._handle_kb_ingest_text)
         self._app.router.add_post("/api/kb/search", self._handle_kb_search)
         self._app.router.add_delete("/api/kb/documents/{document_id}", self._handle_kb_delete)
+        self._app.router.add_put("/api/memory/items/{store}/{item_id}", self._handle_memory_item_update)
+        self._app.router.add_delete("/api/memory/items/{store}/{item_id}", self._handle_memory_item_delete)
         self._app.router.add_post("/api/federation/message", self._handle_message_peer)
         self._app.router.add_post("/api/provider/reset-circuit", self._handle_provider_reset)
+        self._app.router.add_post("/api/adaptive/reviews/{cycle_id}", self._handle_adaptive_review_action)
+        self._app.router.add_post("/api/adaptive/routines/{routine_id}", self._handle_adaptive_routine_action)
+        self._app.router.add_post("/api/adaptive/projects/activate", self._handle_adaptive_project_activate)
+        self._app.router.add_post("/api/adaptive/projects/suspend", self._handle_adaptive_project_suspend)
+        self._app.router.add_post("/api/adaptive/snapshots", self._handle_adaptive_snapshot_create)
+        self._app.router.add_post("/api/adaptive/rollback", self._handle_adaptive_rollback)
+        self._app.router.add_post("/api/adaptive/teaching/capture", self._handle_adaptive_teaching_capture)
+        self._app.router.add_post("/api/adaptive/sharing/export", self._handle_adaptive_sharing_export)
+        self._app.router.add_post("/api/adaptive/sharing/import", self._handle_adaptive_sharing_import)
+        self._app.router.add_post("/api/adaptive/multimodal/{kind}", self._handle_adaptive_multimodal)
+        # Adaptive wave-2 routes
+        self._app.router.add_get("/api/adaptive/intent/predictions", self._handle_adaptive_intent_predictions)
+        self._app.router.add_get("/api/adaptive/intent/stats", self._handle_adaptive_intent_stats)
+        self._app.router.add_get("/api/adaptive/style/profile", self._handle_adaptive_style_profile)
+        self._app.router.add_get("/api/adaptive/compensating/history", self._handle_adaptive_compensating_history)
+        self._app.router.add_get("/api/adaptive/compensating/compensators", self._handle_adaptive_compensating_list)
+        self._app.router.add_get("/api/adaptive/federation/skills", self._handle_adaptive_federation_skills)
+        self._app.router.add_get("/api/adaptive/federation/stats", self._handle_adaptive_federation_stats)
+        self._app.router.add_get("/api/adaptive/scheduler/status", self._handle_adaptive_scheduler_status)
+        self._app.router.add_post("/api/adaptive/intent/observe", self._handle_adaptive_intent_observe)
+        self._app.router.add_post("/api/adaptive/style/rule", self._handle_adaptive_style_rule)
+        self._app.router.add_post("/api/adaptive/compensating/plan", self._handle_adaptive_compensating_plan)
+        self._app.router.add_post("/api/adaptive/compensating/execute", self._handle_adaptive_compensating_execute)
+        self._app.router.add_post("/api/adaptive/federation/publish", self._handle_adaptive_federation_publish)
+        self._app.router.add_post("/api/adaptive/federation/import", self._handle_adaptive_federation_import)
+        self._app.router.add_post("/api/adaptive/scheduler/force", self._handle_adaptive_scheduler_force)
         # Agent definition CRUD routes
         self._app.router.add_get("/api/agents/definitions", self._handle_agent_def_list)
         self._app.router.add_post("/api/agents/definitions", self._handle_agent_def_create)
@@ -911,13 +1340,46 @@ class Dashboard:
         self._app.router.add_post("/api/agents/delegate", self._handle_agent_delegate)
         self._app.router.add_post("/api/agents/shared-task", self._handle_shared_task_create)
         self._app.router.add_get("/api/agents/shared-task/{task_id}", self._handle_shared_task_get)
+        self._app.router.add_post("/api/agents/auto-route", self._handle_agent_auto_route)
+        self._app.router.add_post("/api/agents/consensus", self._handle_agent_consensus)
+        self._app.router.add_post("/api/agents/pipeline", self._handle_agent_pipeline)
+        # Workflow routes
+        self._app.router.add_get("/api/workflows", self._handle_workflow_list)
+        self._app.router.add_post("/api/workflows", self._handle_workflow_create)
+        self._app.router.add_post("/api/workflows/{workflow_id}/run", self._handle_workflow_run)
+        self._app.router.add_post("/api/workflows/{workflow_id}/pause", self._handle_workflow_pause)
+        self._app.router.add_delete("/api/workflows/{workflow_id}", self._handle_workflow_delete)
+        # Database BI routes
+        self._app.router.add_get("/api/db/connections", self._handle_db_connections)
+        self._app.router.add_post("/api/db/connect", self._handle_db_connect)
+        self._app.router.add_post("/api/db/disconnect", self._handle_db_disconnect)
+        self._app.router.add_get("/api/db/tables", self._handle_db_tables)
+        self._app.router.add_post("/api/db/query", self._handle_db_query)
+        self._app.router.add_post("/api/db/natural-query", self._handle_db_natural_query)
+        self._app.router.add_post("/api/db/chart", self._handle_db_chart)
+        self._app.router.add_post("/api/db/explain", self._handle_db_explain)
+        self._app.router.add_get("/api/db/describe/{connection}/{table}", self._handle_db_describe)
+        # Provider models route
+        self._app.router.add_get("/api/providers/{provider_name}/models", self._handle_provider_models)
+        self._app.router.add_get("/api/providers/status", self._handle_provider_status)
+        # Workspace + Skills routes
+        self._app.router.add_get("/api/workspace/structure", self._handle_workspace_structure)
+        self._app.router.add_get("/api/workspace/projects", self._handle_workspace_projects)
+        self._app.router.add_post("/api/workspace/projects", self._handle_workspace_scaffold)
+        self._app.router.add_get("/api/workspace/projects/{name}", self._handle_workspace_project_detail)
+        self._app.router.add_post("/api/workspace/projects/{name}/component", self._handle_workspace_project_add)
+        self._app.router.add_get("/api/workspace/claims", self._handle_workspace_claims)
+        self._app.router.add_post("/api/workspace/claim", self._handle_workspace_claim)
+        self._app.router.add_delete("/api/workspace/claim", self._handle_workspace_release)
+        self._app.router.add_get("/api/skills/available", self._handle_skills_available)
+        self._app.router.add_get("/api/skills/template", self._handle_skills_template)
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._host, self._port)
         await site.start()
         self._push_task = asyncio.create_task(self._periodic_push())
-        print(f"[Dashboard] Running at http://localhost:{self._port}")
+        print(f"[Dashboard] Running at http://{self._host}:{self._port}")
 
     async def stop(self) -> None:
         if self._push_task:
@@ -938,12 +1400,17 @@ class Dashboard:
 
     async def _handle_stats(self, request: Any) -> Any:
         stats = self._stats_provider() if self._stats_provider else {}
+        if asyncio.iscoroutine(stats):
+            stats = await stats
         stats["uptime"] = self._format_uptime()
         return web.json_response(stats)
 
     async def _handle_traces(self, request: Any) -> Any:
         limit = int(request.query.get("limit", "50"))
-        return web.json_response(self._traces[-limit:])
+        data = self._trace_list_provider(limit) if self._trace_list_provider else self._traces[-limit:]
+        if asyncio.iscoroutine(data):
+            data = await data
+        return web.json_response(data)
 
     async def _handle_agents(self, request: Any) -> Any:
         agents = self._agents_provider() if self._agents_provider else []
@@ -962,8 +1429,21 @@ class Dashboard:
             data = result
         return web.json_response(data)
 
+    async def _handle_memory_items(self, request: Any) -> Any:
+        if not self._memory_items_provider:
+            return web.json_response({"items": []})
+        store = str(request.query.get("store", "episodic")).strip()
+        query = str(request.query.get("query", "")).strip()
+        limit = int(request.query.get("limit", "50"))
+        result = self._memory_items_provider(store, query, limit)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return web.json_response(result)
+
     async def _handle_bus(self, request: Any) -> Any:
         data = self._bus_provider() if self._bus_provider else []
+        if asyncio.iscoroutine(data):
+            data = await data
         return web.json_response(data)
 
     async def _handle_tasks(self, request: Any) -> Any:
@@ -984,11 +1464,293 @@ class Dashboard:
             return web.json_response({"error": "Task not found"}, status=404)
         return web.json_response(data)
 
+    async def _handle_task_approve(self, request: Any) -> Any:
+        if not self._task_approve_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            task_id = str(request.match_info.get("task_id", "")).strip()
+            body = await request.json() if request.can_read_body else {}
+            payload = body if isinstance(body, dict) else {}
+            result = self._task_approve_action(task_id, payload)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_task_reject(self, request: Any) -> Any:
+        if not self._task_reject_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            task_id = str(request.match_info.get("task_id", "")).strip()
+            body = await request.json() if request.can_read_body else {}
+            payload = body if isinstance(body, dict) else {}
+            result = self._task_reject_action(task_id, payload)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
     async def _handle_local_models(self, request: Any) -> Any:
         data = self._local_models_provider() if self._local_models_provider else {"models": [], "badges": []}
         if asyncio.iscoroutine(data):
             data = await data
         return web.json_response(data)
+
+    async def _handle_operator_brief(self, request: Any) -> Any:
+        data = self._operator_brief_provider() if self._operator_brief_provider else {"ok": True, "highlights": [], "recommended_actions": []}
+        if asyncio.iscoroutine(data):
+            data = await data
+        return web.json_response(data)
+
+    async def _invoke_dashboard_action(self, action: Any, *args: Any, default: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not action:
+            return default or {"ok": False, "error": "Not available"}
+        result = action(*args)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return result if isinstance(result, dict) else {"ok": True, "result": result}
+
+    async def _handle_adaptive_routines(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._routine_list_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_reviews(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._pending_reviews_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_projects(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._project_sessions_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_active_project(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._project_active_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_snapshots(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._snapshot_list_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_skill_graph(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._skill_graph_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_teaching(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._teaching_list_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_review_action(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._learning_review_action, str(request.match_info.get("cycle_id", "")).strip(), body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_routine_action(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._routine_update_action, str(request.match_info.get("routine_id", "")).strip(), body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_project_activate(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._project_activate_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_project_suspend(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._project_suspend_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_snapshot_create(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._snapshot_create_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_rollback(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._rollback_execute_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_teaching_capture(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._teaching_capture_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_sharing_export(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._sharing_export_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_sharing_import(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._sharing_import_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_multimodal(self, request: Any) -> Any:
+        kind = str(request.match_info.get("kind", "")).strip().lower()
+        body = await request.json() if request.can_read_body else {}
+        action = {
+            "voice": self._multimodal_voice_action,
+            "screenshot": self._multimodal_screenshot_action,
+            "recording": self._multimodal_recording_action,
+            "diagram": self._multimodal_diagram_action,
+        }.get(kind)
+        result = await self._invoke_dashboard_action(action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    # -- Adaptive wave-2 handlers --
+
+    async def _handle_adaptive_intent_predictions(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._intent_predictions_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_intent_stats(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._intent_stats_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_style_profile(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._style_profile_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_compensating_history(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._compensating_history_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_compensating_list(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._compensating_list_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_federation_skills(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._federation_skills_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_federation_stats(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._federation_stats_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_scheduler_status(self, request: Any) -> Any:
+        result = await self._invoke_dashboard_action(self._scheduler_status_action, dict(request.query))
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_intent_observe(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._intent_observe_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_style_rule(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._style_rule_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_compensating_plan(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._compensating_plan_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_compensating_execute(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._compensating_execute_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_federation_publish(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._federation_publish_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_federation_import(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._federation_import_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_adaptive_scheduler_force(self, request: Any) -> Any:
+        body = await request.json() if request.can_read_body else {}
+        result = await self._invoke_dashboard_action(self._scheduler_force_action, body if isinstance(body, dict) else {})
+        return web.json_response(result, status=200 if result.get("ok", False) else 400)
+
+    async def _handle_audit(self, request: Any) -> Any:
+        query = {
+            "limit": request.query.get("limit", "20"),
+            "tool": request.query.get("tool", ""),
+            "user_id": request.query.get("user_id", ""),
+            "denied_only": request.query.get("denied_only", "false"),
+        }
+        data = self._audit_provider(query) if self._audit_provider else {"ok": True, "events": [], "stats": {}}
+        if asyncio.iscoroutine(data):
+            data = await data
+        return web.json_response(data)
+
+    async def _handle_integrations(self, request: Any) -> Any:
+        data = self._integrations_provider() if self._integrations_provider else {"integrations": []}
+        if asyncio.iscoroutine(data):
+            data = await data
+        return web.json_response(data)
+
+    async def _handle_integration_test(self, request: Any) -> Any:
+        if not self._integration_test_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            integration_id = str(request.match_info.get("integration_id", "")).strip()
+            body = await request.json() if request.can_read_body else {}
+            result = self._integration_test_action(integration_id, body if isinstance(body, dict) else {})
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_integration_connect(self, request: Any) -> Any:
+        if not self._integration_connect_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            integration_id = str(request.match_info.get("integration_id", "")).strip()
+            body = await request.json() if request.can_read_body else {}
+            result = self._integration_connect_action(integration_id, body if isinstance(body, dict) else {})
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_integration_disconnect(self, request: Any) -> Any:
+        if not self._integration_disconnect_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            integration_id = str(request.match_info.get("integration_id", "")).strip()
+            result = self._integration_disconnect_action(integration_id)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_integration_callback(self, request: Any) -> Any:
+        if not self._integration_callback_action:
+            return web.Response(text="Not available", status=503)
+        try:
+            provider = str(request.match_info.get("provider", "")).strip()
+            params = dict(request.query)
+            result = self._integration_callback_action(provider, params)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            title = "Connection complete" if result.get("ok", False) else "Connection failed"
+            message = result.get("message") or result.get("error") or "You can close this window and return to NeuralClaw."
+            html = f"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+body{{font-family:Segoe UI,system-ui,sans-serif;background:#0d1117;color:#e6edf3;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px}}
+.card{{max-width:560px;width:100%;background:#161b22;border:1px solid #30363d;border-radius:16px;padding:28px;box-shadow:0 18px 50px rgba(0,0,0,.35)}}
+h1{{margin:0 0 12px;font-size:24px}} p{{margin:0;color:#9da7b3;line-height:1.6}} .ok{{color:#3fb950}} .err{{color:#f85149}}
+</style></head>
+<body><div class="card"><h1 class="{'ok' if result.get('ok', False) else 'err'}">{title}</h1><p>{message}</p></div></body></html>"""
+            return web.Response(text=html, status=status, content_type="text/html")
+        except Exception as e:
+            return web.Response(text=f"Callback error: {e}", status=500)
 
     async def _handle_get_features(self, request: Any) -> Any:
         features = self._get_features_action() if self._get_features_action else {}
@@ -1048,6 +1810,21 @@ class Dashboard:
         if asyncio.iscoroutine(payload):
             payload = await payload
         return web.json_response(payload)
+
+    async def _handle_assistant_screen(self, request: Any) -> Any:
+        if not self._assistant_screen_action:
+            return web.json_response({"ok": False, "error": "Assistant screen preview not available"}, status=503)
+        try:
+            body = await request.json() if request.can_read_body else {}
+            if not isinstance(body, dict):
+                body = {}
+            result = self._assistant_screen_action(body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
 
     async def _handle_skills(self, request: Any) -> Any:
         payload = self._skills_provider() if self._skills_provider else []
@@ -1133,10 +1910,96 @@ class Dashboard:
         if not self._clear_memory_action:
             return web.json_response({"ok": False, "error": "Not available"}, status=503)
         try:
-            result = self._clear_memory_action()
+            try:
+                body = await request.json() if request.can_read_body else {}
+            except Exception:
+                body = {}
+            result = self._clear_memory_action(body or {})
             if asyncio.iscoroutine(result):
                 result = await result
             return web.json_response({"ok": True, **result})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_memory_export(self, request: Any) -> Any:
+        if not self._memory_export_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            body = await request.json() if request.can_read_body else {}
+            result = self._memory_export_action(body or {})
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_memory_import(self, request: Any) -> Any:
+        if not self._memory_import_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            body = await request.json()
+            result = self._memory_import_action(body or {})
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_memory_retention(self, request: Any) -> Any:
+        if not self._memory_retention_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            body = await request.json() if request.can_read_body else {}
+            result = self._memory_retention_action(body or {})
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_memory_item_update(self, request: Any) -> Any:
+        if not self._memory_update_item_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            store = str(request.match_info.get("store", "")).strip()
+            item_id = str(request.match_info.get("item_id", "")).strip()
+            body = await request.json()
+            result = self._memory_update_item_action(store, item_id, body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_memory_item_delete(self, request: Any) -> Any:
+        if not self._memory_delete_item_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            store = str(request.match_info.get("store", "")).strip()
+            item_id = str(request.match_info.get("item_id", "")).strip()
+            result = self._memory_delete_item_action(store, item_id)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_memory_item_pin(self, request: Any) -> Any:
+        if not self._memory_pin_item_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            store = str(request.match_info.get("store", "")).strip()
+            item_id = str(request.match_info.get("item_id", "")).strip()
+            result = self._memory_pin_item_action(store, item_id)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
 
@@ -1207,6 +2070,19 @@ class Dashboard:
             channel_name = str(request.match_info.get("channel_name", "")).strip()
             body = await request.json()
             result = self._channel_pair_action(channel_name, body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_channel_reset(self, request: Any) -> Any:
+        if not self._channel_reset_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            channel_name = str(request.match_info.get("channel_name", "")).strip()
+            result = self._channel_reset_action(channel_name)
             if asyncio.iscoroutine(result):
                 result = await result
             status = 200 if result.get("ok", False) else 400
@@ -1483,6 +2359,522 @@ class Dashboard:
             return web.json_response(result)
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_agent_auto_route(self, request: Any) -> Any:
+        if not self._agent_auto_route:
+            return web.json_response({"ok": False, "error": "Auto-routing not available"}, status=503)
+        try:
+            body = await request.json()
+            result = self._agent_auto_route(body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_agent_consensus(self, request: Any) -> Any:
+        if not self._agent_consensus:
+            return web.json_response({"ok": False, "error": "Consensus not available"}, status=503)
+        try:
+            body = await request.json()
+            result = self._agent_consensus(body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_agent_pipeline(self, request: Any) -> Any:
+        if not self._agent_pipeline:
+            return web.json_response({"ok": False, "error": "Pipeline delegation not available"}, status=503)
+        try:
+            body = await request.json()
+            result = self._agent_pipeline(body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    # -- Workflow handlers --
+
+    async def _handle_workflow_list(self, request: Any) -> Any:
+        if not self._workflow_list_action:
+            return web.json_response([])
+        result = self._workflow_list_action()
+        if asyncio.iscoroutine(result):
+            result = await result
+        return web.json_response(result)
+
+    async def _handle_workflow_create(self, request: Any) -> Any:
+        if not self._workflow_create_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            body = await request.json()
+            result = self._workflow_create_action(body)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_workflow_run(self, request: Any) -> Any:
+        if not self._workflow_run_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            workflow_id = str(request.match_info.get("workflow_id", "")).strip()
+            result = self._workflow_run_action(workflow_id)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_workflow_pause(self, request: Any) -> Any:
+        if not self._workflow_pause_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            workflow_id = str(request.match_info.get("workflow_id", "")).strip()
+            result = self._workflow_pause_action(workflow_id)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 400
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_workflow_delete(self, request: Any) -> Any:
+        if not self._workflow_delete_action:
+            return web.json_response({"ok": False, "error": "Not available"}, status=503)
+        try:
+            workflow_id = str(request.match_info.get("workflow_id", "")).strip()
+            result = self._workflow_delete_action(workflow_id)
+            if asyncio.iscoroutine(result):
+                result = await result
+            status = 200 if result.get("ok", False) else 404
+            return web.json_response(result, status=status)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    # -- Database BI handlers --
+
+    async def _handle_db_connections(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import database_bi as _dbi
+            config = load_config()
+            saved = config.database_bi.saved_connections if getattr(config, "database_bi", None) else {}
+            conns = []
+            for name, conn in _dbi._connections.items():
+                tables = conn._meta_cache.get("tables", [])
+                dsn_display = str(conn.dsn)
+                if "@" in dsn_display:
+                    dsn_display = dsn_display.split("@", 1)[1]
+                conns.append({
+                    "name": name,
+                    "driver": conn.driver,
+                    "schema": conn.schema,
+                    "read_only": conn.read_only,
+                    "table_count": len(tables),
+                    "connected": conn._conn is not None,
+                    "persisted": name in saved,
+                    "dsn_display": dsn_display,
+                })
+            return web.json_response(conns)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_db_connect(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import database_bi as _dbi
+            body = await request.json()
+            result = await _dbi.db_connect(
+                name=body.get("name", ""),
+                driver=body.get("driver", ""),
+                dsn=body.get("dsn", ""),
+                schema=body.get("schema", ""),
+                read_only=body.get("read_only", True),
+            )
+            ok = "Connected" in result
+            if ok:
+                config = load_config()
+                saved = dict(getattr(config.database_bi, "saved_connections", {}) or {})
+                saved[body.get("name", "")] = {
+                    "driver": body.get("driver", ""),
+                    "dsn": body.get("dsn", ""),
+                    "schema": body.get("schema", ""),
+                    "read_only": body.get("read_only", True),
+                }
+                update_config({
+                    "database_bi": {
+                        "saved_connections": saved,
+                    },
+                })
+            return web.json_response({"ok": ok, "message": result, "persisted": ok})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_db_disconnect(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import database_bi as _dbi
+            body = await request.json()
+            result = await _dbi.db_disconnect(name=body.get("name", ""))
+            name = str(body.get("name", "") or "").strip()
+            if name:
+                config = load_config()
+                saved = dict(getattr(config.database_bi, "saved_connections", {}) or {})
+                if name in saved:
+                    saved.pop(name, None)
+                    update_config({"database_bi": {"saved_connections": saved}})
+            return web.json_response({"ok": True, "message": result})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_db_tables(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import database_bi as _dbi
+            conn_name = request.query.get("connection", "")
+            result = await _dbi.db_list_tables(connection=conn_name)
+            return web.json_response({"ok": True, "result": result})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_db_describe(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import database_bi as _dbi
+            conn_name = request.match_info.get("connection", "")
+            table = request.match_info.get("table", "")
+            result = await _dbi.db_describe_table(connection=conn_name, table=table)
+            return web.json_response({"ok": True, "result": result})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_db_query(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import database_bi as _dbi
+            body = await request.json()
+            result = await _dbi.db_query(
+                connection=body.get("connection", ""),
+                query=body.get("query", ""),
+            )
+            return web.json_response({"ok": True, "result": result})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_db_natural_query(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import database_bi as _dbi
+            body = await request.json()
+            result = await _dbi.db_natural_query(
+                connection=body.get("connection", ""),
+                question=body.get("question", ""),
+                provider=body.get("provider", ""),
+                model=body.get("model", ""),
+                base_url=body.get("base_url", ""),
+                allow_fallback=body.get("allow_fallback"),
+            )
+            return web.json_response({"ok": True, "result": result})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_db_chart(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import database_bi as _dbi
+            body = await request.json()
+            result = await _dbi.db_chart(
+                connection=body.get("connection", ""),
+                query=body.get("query", ""),
+                chart_type=body.get("chart_type", "bar"),
+                title=body.get("title", ""),
+                x_column=body.get("x_column", ""),
+                y_column=body.get("y_column", ""),
+                group_column=body.get("group_column", ""),
+                provider=body.get("provider", ""),
+                model=body.get("model", ""),
+                base_url=body.get("base_url", ""),
+                allow_fallback=body.get("allow_fallback"),
+            )
+            return web.json_response({"ok": True, "result": result})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_db_explain(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import database_bi as _dbi
+            body = await request.json()
+            result = await _dbi.db_explain_data(
+                connection=body.get("connection", ""),
+                question=body.get("question", ""),
+                provider=body.get("provider", ""),
+                model=body.get("model", ""),
+                base_url=body.get("base_url", ""),
+                allow_fallback=body.get("allow_fallback"),
+            )
+            return web.json_response({"ok": True, "result": result})
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_provider_models(self, request: Any) -> Any:
+        """List available models from a specific provider."""
+        provider_name = request.match_info.get("provider_name", "")
+        endpoint = request.query.get("endpoint", "")
+        api_key = request.query.get("api_key", "")
+
+        # If no explicit API key in query, try config secrets
+        if not api_key:
+            try:
+                cfg = self._config_provider() if self._config_provider else {}
+                secrets = cfg.get("provider_secrets", {})
+                if isinstance(secrets, dict):
+                    api_key = str(secrets.get(provider_name, ""))
+            except Exception:
+                pass
+
+        try:
+            from neuralclaw.providers.local import LocalProvider
+            from neuralclaw.providers.openai import OpenAIProvider
+            from neuralclaw.providers.anthropic import AnthropicProvider
+            from neuralclaw.providers.openrouter import OpenRouterProvider
+            from neuralclaw.providers.proxy import ProxyProvider
+
+            # Default endpoints per provider
+            PROVIDER_ENDPOINTS: dict[str, str] = {
+                "local": "http://localhost:11434/v1",
+                "ollama": "http://localhost:11434/v1",
+                "openai": "https://api.openai.com/v1",
+                "anthropic": "https://api.anthropic.com",
+                "openrouter": "https://openrouter.ai/api/v1",
+                "google": "https://generativelanguage.googleapis.com/v1beta/openai",
+                "xai": "https://api.x.ai/v1",
+                "venice": "https://api.venice.ai/api/v1",
+                "mistral": "https://api.mistral.ai/v1",
+                "minimax": "https://api.minimax.chat/v1",
+                "vercel": "https://ai-gateway.vercel.sh/v1",
+                "meta": "http://localhost:11434/v1",  # Llama via local Ollama
+            }
+
+            provider = None
+            resolved_endpoint = endpoint or PROVIDER_ENDPOINTS.get(provider_name, "")
+
+            if provider_name in ("local", "ollama", "meta"):
+                provider = LocalProvider(base_url=resolved_endpoint)
+            elif provider_name == "openai":
+                provider = OpenAIProvider(
+                    api_key=api_key or "none",
+                    base_url=resolved_endpoint,
+                )
+            elif provider_name == "anthropic":
+                provider = AnthropicProvider(
+                    api_key=api_key or "none",
+                    base_url=resolved_endpoint,
+                )
+            elif provider_name == "openrouter":
+                provider = OpenRouterProvider(
+                    api_key=api_key or "none",
+                    base_url=resolved_endpoint,
+                )
+            elif provider_name in ("google", "xai", "venice", "mistral", "minimax", "vercel"):
+                # These all expose OpenAI-compatible /models endpoints
+                provider = ProxyProvider(
+                    base_url=resolved_endpoint,
+                    api_key=api_key or "none",
+                )
+            elif provider_name == "proxy":
+                if not endpoint:
+                    return web.json_response({"models": [], "error": "endpoint required"})
+                provider = ProxyProvider(base_url=endpoint, api_key=api_key)
+            else:
+                return web.json_response({"models": [], "error": f"Unknown provider: {provider_name}"})
+
+            models = _normalize_provider_model_catalog(provider_name, await provider.list_models())
+            return web.json_response({
+                "models": models,
+                "count": len(models),
+                "provider": provider_name,
+                "endpoint": resolved_endpoint,
+            })
+        except Exception as e:
+            return web.json_response({"models": [], "error": str(e)}, status=500)
+
+    async def _handle_provider_status(self, request: Any) -> Any:
+        """Return connectivity status for all known providers."""
+        import aiohttp
+
+        cfg = self._config_provider() if self._config_provider else {}
+        providers_cfg = cfg.get("providers", {}) if isinstance(cfg, dict) else {}
+        primary = str(providers_cfg.get("primary", "local")) if isinstance(providers_cfg, dict) else "local"
+        secrets = cfg.get("provider_secrets", {}) if isinstance(cfg, dict) else {}
+
+        PROVIDER_ENDPOINTS: dict[str, str] = {
+            "local": "http://localhost:11434/v1",
+            "openai": "https://api.openai.com/v1",
+            "anthropic": "https://api.anthropic.com",
+            "openrouter": "https://openrouter.ai/api/v1",
+            "google": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "xai": "https://api.x.ai/v1",
+            "venice": "https://api.venice.ai/api/v1",
+            "mistral": "https://api.mistral.ai/v1",
+            "minimax": "https://api.minimax.chat/v1",
+            "vercel": "https://ai-gateway.vercel.sh/v1",
+            "meta": "http://localhost:11434/v1",
+        }
+
+        results = []
+        for name, default_endpoint in PROVIDER_ENDPOINTS.items():
+            prov_cfg = providers_cfg.get(name, {}) if isinstance(providers_cfg, dict) else {}
+            endpoint = str(prov_cfg.get("base_url", "")) if isinstance(prov_cfg, dict) else ""
+            endpoint = endpoint or default_endpoint
+            has_key = bool(secrets.get(name)) if isinstance(secrets, dict) else False
+            is_primary = (name == primary)
+
+            # Quick connectivity check
+            available = False
+            try:
+                test_url = f"{endpoint.rstrip('/')}/models"
+                headers: dict[str, str] = {}
+                key = str(secrets.get(name, "")) if isinstance(secrets, dict) else ""
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        test_url, headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=5),
+                    ) as resp:
+                        available = resp.status in (200, 401, 403)
+            except Exception:
+                available = False
+
+            results.append({
+                "name": name,
+                "endpoint": endpoint,
+                "available": available,
+                "has_key": has_key or name in ("local", "meta"),
+                "is_primary": is_primary,
+                "configured": bool(endpoint) and (has_key or name in ("local", "meta")),
+            })
+
+        return web.json_response({"providers": results, "primary": primary})
+
+    # -- Workspace handlers --
+
+    async def _handle_workspace_structure(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import framework_intel as _fi
+            include_hidden = request.query.get("include_hidden", "false").lower() == "true"
+            result = await _fi.list_workspace_structure(include_hidden=include_hidden)
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_workspace_projects(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import project_scaffold as _ps
+            result = await _ps.list_projects()
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_workspace_scaffold(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import project_scaffold as _ps
+            body = await request.json()
+            result = await _ps.scaffold_project(
+                project_name=body.get("project_name", ""),
+                template=body.get("template", "generic"),
+                description=body.get("description", ""),
+                author=body.get("author", ""),
+                claim_directory=body.get("claim_directory", True),
+            )
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_workspace_project_detail(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import project_scaffold as _ps
+            name = request.match_info["name"]
+            result = await _ps.get_project_info(project_name=name)
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_workspace_project_add(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import project_scaffold as _ps
+            name = request.match_info["name"]
+            body = await request.json()
+            result = await _ps.add_to_project(
+                project_name=name,
+                component=body.get("component", ""),
+            )
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_workspace_claims(self, request: Any) -> Any:
+        try:
+            from neuralclaw.swarm.workspace_coordinator import WorkspaceCoordinator as _WC
+            # Find the gateway's coordinator via the framework_intel module
+            from neuralclaw.skills.builtins import framework_intel as _fi
+            coord = _fi._workspace_coordinator
+            if coord is None:
+                return web.json_response([])
+            claims = await coord.list_all_claims()
+            return web.json_response([
+                {
+                    "claim_id": c.claim_id,
+                    "agent_name": c.agent_name,
+                    "path": c.path,
+                    "purpose": c.purpose,
+                    "claimed_at": c.claimed_at,
+                    "expires_at": c.expires_at,
+                }
+                for c in claims
+            ])
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_workspace_claim(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import framework_intel as _fi
+            body = await request.json()
+            result = await _fi.claim_workspace_dir(
+                path=body.get("path", ""),
+                purpose=body.get("purpose", ""),
+            )
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _handle_workspace_release(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import framework_intel as _fi
+            body = await request.json()
+            result = await _fi.release_workspace_dir(path=body.get("path", ""))
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    # -- Skills handlers --
+
+    async def _handle_skills_available(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import framework_intel as _fi
+            source_filter = request.query.get("source_filter", "all")
+            result = await _fi.list_available_skills(source_filter=source_filter)
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_skills_template(self, request: Any) -> Any:
+        try:
+            from neuralclaw.skills.builtins import framework_intel as _fi
+            skill_type = request.query.get("skill_type", "basic")
+            result = await _fi.get_skill_template(skill_type=skill_type)
+            return web.json_response(result)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
 
     async def _periodic_push(self) -> None:
         while True:

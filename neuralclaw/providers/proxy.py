@@ -13,6 +13,8 @@ Supports:
 
 from __future__ import annotations
 
+from typing import Any
+
 import aiohttp
 
 from neuralclaw.providers.openai import OpenAIProvider
@@ -40,6 +42,34 @@ class ProxyProvider(OpenAIProvider):
             base_url=base_url,
             request_timeout_seconds=request_timeout_seconds,
         )
+
+    async def list_models(self) -> list[dict[str, Any]]:
+        """Fetch models from the proxy endpoint."""
+        try:
+            headers: dict[str, str] = {"Content-Type": "application/json"}
+            if self._api_key and self._api_key != "proxy":
+                headers["Authorization"] = f"Bearer {self._api_key}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self._base_url}/models",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        return []
+                    data = await resp.json()
+            raw = data.get("data") or data.get("models") or []
+            return [
+                {
+                    "id": m.get("id") or m.get("name", ""),
+                    "name": m.get("name", m.get("id", "")),
+                    "owned_by": m.get("owned_by", "proxy"),
+                    "object": m.get("object", "model"),
+                }
+                for m in raw if m.get("id") or m.get("name")
+            ]
+        except Exception:
+            return []
 
     async def is_available(self) -> bool:
         """Check if the proxy endpoint is reachable."""

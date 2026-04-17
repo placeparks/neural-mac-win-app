@@ -36,8 +36,10 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
-    disable_windowed_traceback=False,
+    # The desktop app launches the sidecar in the background, so this must
+    # stay windowless on Windows.
+    console=False,
+    disable_windowed_traceback=True,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,

@@ -197,6 +197,45 @@ class ProceduralMemory:
         )
         return [self._row_to_procedure(r) for r in rows]
 
+    async def get_by_id(self, proc_id: str) -> Procedure | None:
+        """Fetch a single procedure by ID."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT * FROM procedures WHERE id = ? AND namespace = ?",
+            (proc_id, self._namespace),
+        )
+        return self._row_to_procedure(rows[0]) if rows else None
+
+    async def update_procedure(
+        self,
+        proc_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        trigger_patterns: list[str] | None = None,
+    ) -> Procedure | None:
+        """Update editable procedure fields."""
+        assert self._db is not None
+        current = await self.get_by_id(proc_id)
+        if not current:
+            return None
+        await self._db.execute(
+            """
+            UPDATE procedures
+            SET name = ?, description = ?, trigger_patterns_json = ?
+            WHERE id = ? AND namespace = ?
+            """,
+            (
+                name or current.name,
+                description if description is not None else current.description,
+                json.dumps(trigger_patterns if trigger_patterns is not None else current.trigger_patterns),
+                proc_id,
+                self._namespace,
+            ),
+        )
+        await self._db.commit()
+        return await self.get_by_id(proc_id)
+
     async def delete(self, proc_id: str) -> None:
         """Delete a procedure."""
         assert self._db is not None
@@ -226,6 +265,30 @@ class ProceduralMemory:
         await self._db.execute(
             "DELETE FROM procedures WHERE namespace = ?",
             (self._namespace,),
+        )
+        await self._db.commit()
+        return count
+
+    async def prune(self, keep_days: int = 365) -> int:
+        """Delete stale procedures that have not been used within the retention window."""
+        assert self._db is not None
+        cutoff = time.time() - (keep_days * 86400)
+        row = await self._db.execute_fetchall(
+            """
+            SELECT COUNT(*) FROM procedures
+            WHERE namespace = ?
+              AND COALESCE(NULLIF(last_used, 0), created_at) < ?
+            """,
+            (self._namespace, cutoff),
+        )
+        count = row[0][0] if row else 0
+        await self._db.execute(
+            """
+            DELETE FROM procedures
+            WHERE namespace = ?
+              AND COALESCE(NULLIF(last_used, 0), created_at) < ?
+            """,
+            (self._namespace, cutoff),
         )
         await self._db.commit()
         return count

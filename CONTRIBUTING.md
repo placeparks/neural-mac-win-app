@@ -1,6 +1,8 @@
 # Contributing to NeuralClaw
 
-Thanks for your interest in contributing to NeuralClaw! Here's how to get started.
+Thanks for contributing to NeuralClaw.
+
+The current repository is a mixed Python + Tauri desktop product. Contributions should treat the Python gateway, desktop UI, and assistant experience as one connected system.
 
 ## Development Setup
 
@@ -8,72 +10,137 @@ Thanks for your interest in contributing to NeuralClaw! Here's how to get starte
 git clone https://github.com/placeparks/neuralclaw.git
 cd neuralclaw
 pip install -e ".[dev]"
+cd desktop
+npm install
 ```
 
-## Running Tests
+## Core Development Loops
+
+### Python
 
 ```bash
-# Full test suite
-pytest tests/ -v
-
-# Specific module
-pytest tests/test_perception.py -v
-
-# With coverage
-pytest tests/ --cov=neuralclaw --cov-report=term-missing
+pytest -q
+python -m compileall neuralclaw
+python -m py_compile neuralclaw/dashboard.py neuralclaw/gateway.py
 ```
+
+### Desktop
+
+```bash
+cd desktop
+npm run build
+```
+
+For local desktop iteration:
+
+```bash
+cd desktop
+npm run tauri dev
+```
+
+## What Needs Extra Care
+
+### Desktop Runtime Changes
+
+Changes to any of these areas should be validated end-to-end:
+
+- sidecar lifecycle
+- installer/runtime process ownership
+- desktop settings persistence
+- avatar/assistant state flow
+- model routing in installed builds
+
+Do not assume a clean `npm run build` means the installed runtime behaves correctly.
+
+### Integrations
+
+If you change integrations:
+
+- update the desktop `Connections` UX if the user-facing behavior changes
+- keep connect/test/disconnect behavior aligned between backend and UI
+- document any extra provider requirements clearly
+- be precise about what is actually operational versus merely configured
+
+### Agentic Runtime
+
+If you change agent orchestration or autonomy:
+
+- keep task lifecycle, approvals, and desktop task visibility aligned
+- do not add hidden self-modification powers without an explicit user-facing permission
+- preserve the distinction between chat-capable models and embedding-only models
+- make sure the operator dashboard still explains what the system actually did
+
+### Observability
+
+If you change tool use, integration actions, or runtime control paths:
+
+- wire the behavior into audit visibility when appropriate
+- keep recent-action surfaces readable from the dashboard
+- do not rely only on logs that may be inconsistent in packaged runs
+- prefer product-visible traces for user trust
+
+### Avatar / Assistant
+
+The avatar should not feel like a toy.
+
+When changing avatar or assistant behavior:
+
+- avoid duplicated state ownership
+- avoid stale timers overriding newer states
+- avoid speech overlap
+- avoid hidden capability toggles spread across unrelated tabs
+- prioritize stable Windows behavior over flashy but brittle interactions
 
 ## Code Style
 
-We use [Ruff](https://docs.astral.sh/ruff/) for linting:
+### Python
 
-```bash
-ruff check neuralclaw/
-ruff format neuralclaw/
-```
+- use type hints on public functions
+- keep public behavior explicit and testable
+- prefer small, named helpers over long inline logic
 
-- **Python 3.12+** required
-- Type hints on all public functions
-- Docstrings on all modules, classes, and public methods
-- Max line length: 100 characters
+### Desktop / TypeScript
 
-## Architecture Overview
+- treat the UI as a product surface, not only a control panel
+- keep state transitions coherent
+- avoid stacking multiple disconnected sources of truth for the same behavior
+- when adding user-facing flows, wire verification actions into the UI whenever possible
 
-NeuralClaw uses a **5-cortex cognitive architecture**:
+## Architecture Guidance
 
-```
-Perception → Memory → Reasoning → Action → Evolution
-```
+NeuralClaw currently spans:
 
-All cortices communicate through the **Neural Bus** (async pub/sub). When adding features:
+- gateway/runtime
+- skills and providers
+- channels and integrations
+- desktop app
+- avatar/assistant UX
 
-1. **New cortex capabilities** → Add to the appropriate cortex directory
-2. **New event types** → Add to `bus/neural_bus.py::EventType`
-3. **New skills** → Add to `skills/builtins/` or publish via the marketplace
-4. **New channels** → Implement the `ChannelAdapter` protocol in `channels/protocol.py`
+Make changes with these boundaries in mind:
 
-## Pull Request Process
+1. Backend capability
+2. Dashboard/API surface
+3. Desktop UX/control surface
+4. Runtime verification
+5. Documentation
+6. Observability / audit visibility
 
-1. Fork the repo and create a feature branch from `main`
-2. Add tests for any new functionality
-3. Ensure all tests pass: `pytest tests/ -v`
-4. Ensure code passes linting: `ruff check neuralclaw/`
-5. Update the README if adding user-facing features
-6. Open a PR with a clear description
+If one layer changes and the others are left behind, the product feels broken even if the code compiles.
+
+## Pull Request Expectations
+
+Before opening a PR:
+
+1. run Python validation for touched backend paths
+2. run desktop build if anything under `desktop/` changed
+3. update docs for user-facing changes
+4. update `agent.md` when the project state or priorities materially changed
+5. call out remaining operational caveats honestly
 
 ## Security
 
-If you discover a security vulnerability, please report it privately — do **not** open a public issue. Email: mirac@cardify.dev
-
-## Skill Contributions
-
-When contributing skills to the marketplace:
-
-- Skills must declare all required capabilities in their manifest
-- No shell execution or network access without explicit declaration
-- All skills are statically analyzed before acceptance
-- Sign your skills with Ed25519 for verified author status
+If you discover a security vulnerability, report it privately rather than opening a public issue.
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+By contributing, you agree that your contributions are licensed under the MIT License.

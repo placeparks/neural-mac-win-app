@@ -44,6 +44,16 @@ and output filtering.
 - managed workspace tools: app scaffolding via `build_app`, repo lifecycle via
   `clone_repo` / `run_repo_*`
 
+### Adaptive Control Plane
+
+- `control_plane.py`: state persistence and synthesis
+- `intent.py`: proactive pattern-based next action prediction
+- `scheduler.py`: triggers proactive routines via `task_sender`
+- `style.py`: tone and format profile synthesis from interaction
+- `compensating.py`: transaction rollback history management
+- `teaching.py` / `sharing.py`: playbook distillation and distribution
+- `multimodal.py`: rich media intake validation routing
+
 ### Evolution and Observability
 
 - `calibrator.py`: preference learning
@@ -61,7 +71,8 @@ and output filtering.
 - configures managed workspace roots for app creation and repo execution
 - injects memory, identity, and prompt-armor context into reasoning
 - manages streaming, response filtering, audit, and post-processing
-- starts federation, dashboard, and bridge loops when enabled
+- binds and subscribes active learning watchers (`IntentPredictor`, `StyleAdapter`) to the system event bus
+- starts federation, dashboard, scheduler polling, and bridge loops when enabled
 
 ## Message Lifecycle
 

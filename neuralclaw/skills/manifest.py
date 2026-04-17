@@ -83,3 +83,7 @@ class SkillManifest:
     capabilities: list[Capability] = field(default_factory=list)
     tools: list[ToolDefinition] = field(default_factory=list)
     enabled: bool = True
+    dependencies: list[str] = field(default_factory=list)
+    composition_metadata: dict[str, Any] = field(default_factory=dict)
+    risk_level: str = "low"
+    multimodal_capabilities: list[str] = field(default_factory=list)

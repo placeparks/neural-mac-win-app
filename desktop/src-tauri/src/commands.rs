@@ -6,19 +6,34 @@
 
 use crate::sidecar;
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::State;
 
 const DASHBOARD_URL: &str = "http://127.0.0.1:8080";
+const REQUEST_TIMEOUT_SECS: u64 = 30;
+const HEALTH_TIMEOUT_SECS: u64 = 5;
 
 fn client() -> reqwest::Client {
-    reqwest::Client::new()
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+fn fast_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(HEALTH_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(2))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 // ── Health & Status ──────────────────────────────────────────────────
 
 #[tauri::command]
 pub async fn get_health() -> Result<String, String> {
-    let resp = reqwest::get(format!("{}/health", DASHBOARD_URL))
+    let resp = fast_client().get(format!("{}/health", DASHBOARD_URL)).send()
         .await
         .map_err(|e| e.to_string())?;
     let body = resp.text().await.map_err(|e| e.to_string())?;
@@ -27,18 +42,26 @@ pub async fn get_health() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_backend_status(
+    app: tauri::AppHandle,
     state: State<'_, Mutex<sidecar::SidecarState>>,
 ) -> Result<serde_json::Value, String> {
-    let (running, port) = {
+    let snapshot = {
         let s = state.lock().map_err(|e| e.to_string())?;
-        (s.running, s.port)
+        sidecar::SidecarState {
+            running: s.running,
+            port: s.port,
+            child: None,
+            attached_to_existing: s.attached_to_existing,
+            restart_count: s.restart_count,
+            watchdog_started: s.watchdog_started,
+            user_stopped: s.user_stopped,
+            start_in_progress: s.start_in_progress,
+            startup_deadline: s.startup_deadline,
+            last_error: s.last_error.clone(),
+        }
     };
-    let health = sidecar::check_health().await;
-    Ok(serde_json::json!({
-        "running": running,
-        "port": port,
-        "healthy": health,
-    }))
+    let runtime = sidecar::runtime_status(&app, &snapshot).await;
+    serde_json::to_value(runtime).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -55,7 +78,7 @@ pub async fn stop_backend(app: tauri::AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn get_dashboard_stats() -> Result<String, String> {
-    let resp = reqwest::get(format!("{}/api/stats", DASHBOARD_URL))
+    let resp = client().get(format!("{}/api/stats", DASHBOARD_URL)).send()
         .await
         .map_err(|e| e.to_string())?;
     resp.text().await.map_err(|e| e.to_string())
@@ -63,7 +86,7 @@ pub async fn get_dashboard_stats() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_memory_episodes() -> Result<String, String> {
-    let resp = reqwest::get(format!("{}/api/memory", DASHBOARD_URL))
+    let resp = client().get(format!("{}/api/memory", DASHBOARD_URL)).send()
         .await
         .map_err(|e| e.to_string())?;
     resp.text().await.map_err(|e| e.to_string())
@@ -71,7 +94,7 @@ pub async fn get_memory_episodes() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_config() -> Result<String, String> {
-    let resp = reqwest::get(format!("{}/config", DASHBOARD_URL))
+    let resp = client().get(format!("{}/config", DASHBOARD_URL)).send()
         .await
         .map_err(|e| e.to_string())?;
     resp.text().await.map_err(|e| e.to_string())
@@ -102,7 +125,7 @@ pub async fn clear_chat() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_chat_history() -> Result<String, String> {
-    let resp = reqwest::get(format!("{}/api/memory", DASHBOARD_URL))
+    let resp = client().get(format!("{}/api/memory", DASHBOARD_URL)).send()
         .await
         .map_err(|e| e.to_string())?;
     resp.text().await.map_err(|e| e.to_string())
@@ -119,6 +142,131 @@ pub async fn update_config(config: serde_json::Value) -> Result<String, String> 
         .await
         .map_err(|e| e.to_string())?;
     resp.text().await.map_err(|e| e.to_string())
+}
+
+/// Write wizard config directly to ~/.neuralclaw/config.toml and secrets.
+/// This does NOT require the backend to be running — used by the setup wizard
+/// so first-launch works even before the sidecar is healthy.
+#[tauri::command]
+pub async fn save_wizard_config(config: serde_json::Value) -> Result<String, String> {
+    let home = dirs::home_dir().ok_or("Cannot resolve home directory")?;
+    let nc_dir = home.join(".neuralclaw");
+    let data_dir = nc_dir.join("data");
+    let log_dir = nc_dir.join("logs");
+    let sessions_dir = nc_dir.join("sessions");
+
+    // Ensure directories
+    for d in &[&nc_dir, &data_dir, &log_dir, &sessions_dir] {
+        std::fs::create_dir_all(d).map_err(|e| format!("mkdir: {}", e))?;
+    }
+
+    let config_file = nc_dir.join("config.toml");
+    let secrets_file = nc_dir.join(".secrets.toml");
+
+    // Read existing config.toml (may not exist on fresh install)
+    let mut existing: toml::Table = if config_file.exists() {
+        let raw = std::fs::read_to_string(&config_file).unwrap_or_default();
+        raw.parse().unwrap_or_default()
+    } else {
+        toml::Table::new()
+    };
+
+    // Extract secrets from the payload before writing to config
+    let mut secrets: toml::Table = if secrets_file.exists() {
+        let raw = std::fs::read_to_string(&secrets_file).unwrap_or_default();
+        raw.parse().unwrap_or_default()
+    } else {
+        toml::Table::new()
+    };
+
+    if let Some(obj) = config.as_object() {
+        // Save provider secrets to .secrets.toml (never in config.toml)
+        if let Some(ps) = obj.get("provider_secrets").and_then(|v| v.as_object()) {
+            for (provider, key_val) in ps {
+                if let Some(key) = key_val.as_str() {
+                    if !key.is_empty() {
+                        secrets.insert(
+                            format!("{}_api_key", provider),
+                            toml::Value::String(key.to_string()),
+                        );
+                    }
+                }
+            }
+        }
+
+        // Merge providers into config
+        if let Some(providers) = obj.get("providers").and_then(|v| v.as_object()) {
+            let providers_table = existing
+                .entry("providers")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            if let Some(tbl) = providers_table.as_table_mut() {
+                if let Some(primary) = providers.get("primary").and_then(|v| v.as_str()) {
+                    tbl.insert("primary".to_string(), toml::Value::String(primary.to_string()));
+                }
+                // Write per-provider sections (base_url etc.)
+                for (pid, pcfg) in providers {
+                    if pid == "primary" { continue; }
+                    if let Some(pcfg_obj) = pcfg.as_object() {
+                        let section = tbl
+                            .entry(pid)
+                            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+                        if let Some(section_tbl) = section.as_table_mut() {
+                            for (k, v) in pcfg_obj {
+                                if let Some(s) = v.as_str() {
+                                    section_tbl.insert(k.clone(), toml::Value::String(s.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Merge model_roles
+        if let Some(roles) = obj.get("model_roles").and_then(|v| v.as_object()) {
+            let roles_table = existing
+                .entry("model_roles")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            if let Some(tbl) = roles_table.as_table_mut() {
+                tbl.insert("enabled".to_string(), toml::Value::Boolean(true));
+                for (k, v) in roles {
+                    if let Some(s) = v.as_str() {
+                        tbl.insert(k.clone(), toml::Value::String(s.to_string()));
+                    }
+                }
+            }
+        }
+
+        // Merge features
+        if let Some(features) = obj.get("features").and_then(|v| v.as_object()) {
+            let feat_table = existing
+                .entry("features")
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            if let Some(tbl) = feat_table.as_table_mut() {
+                for (k, v) in features {
+                    if let Some(b) = v.as_bool() {
+                        tbl.insert(k.clone(), toml::Value::Boolean(b));
+                    }
+                }
+            }
+        }
+    }
+
+    // Write config.toml
+    let config_str = toml::to_string_pretty(&existing)
+        .map_err(|e| format!("toml serialize: {}", e))?;
+    std::fs::write(&config_file, config_str)
+        .map_err(|e| format!("write config.toml: {}", e))?;
+
+    // Write .secrets.toml
+    if !secrets.is_empty() {
+        let secrets_str = toml::to_string_pretty(&secrets)
+            .map_err(|e| format!("toml serialize secrets: {}", e))?;
+        std::fs::write(&secrets_file, secrets_str)
+            .map_err(|e| format!("write .secrets.toml: {}", e))?;
+    }
+
+    Ok(serde_json::json!({ "ok": true }).to_string())
 }
 
 // ── Memory / Search ──────────────────────────────────────────────────
@@ -138,7 +286,7 @@ pub async fn search_memory(query: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_kb_documents() -> Result<String, String> {
-    let resp = reqwest::get(format!("{}/api/kb/documents", DASHBOARD_URL))
+    let resp = client().get(format!("{}/api/kb/documents", DASHBOARD_URL)).send()
         .await
         .map_err(|e| e.to_string())?;
     resp.text().await.map_err(|e| e.to_string())
@@ -203,7 +351,7 @@ pub async fn ingest_kb_text(
 
 #[tauri::command]
 pub async fn get_workflows() -> Result<String, String> {
-    let resp = reqwest::get(format!("{}/api/workflows", DASHBOARD_URL))
+    let resp = client().get(format!("{}/api/workflows", DASHBOARD_URL)).send()
         .await
         .map_err(|e| e.to_string())?;
     resp.text().await.map_err(|e| e.to_string())
@@ -254,7 +402,7 @@ pub async fn delete_workflow(workflow_id: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_features() -> Result<String, String> {
-    let resp = reqwest::get(format!("{}/api/features", DASHBOARD_URL))
+    let resp = client().get(format!("{}/api/features", DASHBOARD_URL)).send()
         .await
         .map_err(|e| e.to_string())?;
     resp.text().await.map_err(|e| e.to_string())

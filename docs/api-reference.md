@@ -177,8 +177,40 @@ await synth.synthesize_skill(task_description, failure_context)
 
 ---
 
-## Swarm
+## Adaptive Control Plane
 
+```python
+from neuralclaw.cortex.adaptive import AdaptiveControlPlane, TeachingProcessor
+from neuralclaw.cortex.adaptive.intent import IntentPredictor
+from neuralclaw.cortex.adaptive.style import StyleAdapter
+from neuralclaw.cortex.adaptive.compensating import CompensatingRollbackRegistry
+from neuralclaw.cortex.adaptive.scheduler import RoutineScheduler
+
+# Control Plane
+adaptive = AdaptiveControlPlane(db_path)
+await adaptive.initialize()
+await adaptive.list_suggestions()
+
+# Predictor
+intent = IntentPredictor(db_path)
+await intent.initialize()
+await intent.observe("tool_use", "run_script")
+predictions = await intent.predict(recent_actions=["read_file"])
+
+# Style Adapter
+style = StyleAdapter(db_path)
+await style.initialize()
+await style.observe_message(scope="user", scope_id="U123", message="Let's do this ASAP!")
+modifier = await style.get_prompt_modifier("user", "U123")
+
+# Scheduler
+scheduler = RoutineScheduler(control_plane=adaptive, task_sender=run_task_fn, bus=bus)
+await scheduler.start()
+```
+
+---
+
+## Swarm
 ```python
 from neuralclaw.swarm.delegation import DelegationChain, DelegationContext, DelegationPolicy
 from neuralclaw.swarm.consensus import ConsensusProtocol, ConsensusStrategy

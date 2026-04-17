@@ -75,6 +75,15 @@ class LLMProvider(ABC):
         """Check if the provider is configured and reachable."""
         ...
 
+    async def list_models(self) -> list[dict[str, Any]]:
+        """Return models available from this provider.
+
+        Each entry: {"id": str, "name": str, "owned_by": str, ...}
+        Default implementation returns an empty list; providers override
+        with live API queries where supported.
+        """
+        return []
+
     async def stream_complete(
         self,
         messages: list[dict[str, Any]],
@@ -128,7 +137,9 @@ def is_retryable_error(error: Exception) -> bool:
 
 class ProviderRouter:
     """
-    Smart model routing with fallback chain, circuit breaker, and retry logic.
+    Smart model routing with fallback chain, circuit breaker, retry logic,
+    and **offline mode** — automatically falls back to a local provider
+    when the network is unreachable.
     """
 
     def __init__(
@@ -139,11 +150,14 @@ class ProviderRouter:
         circuit_breaker: CircuitBreaker | None = None,
         breaker_config: CircuitBreakerConfig | None = None,
         bus: NeuralBus | None = None,
+        offline_fallback: bool = True,
     ) -> None:
         self._primary = primary
         self._fallbacks = fallbacks or []
         self._max_retries = max_retries
         self._bus = bus
+        self._offline_fallback = offline_fallback
+        self._offline_mode = False
         self._breaker_config = breaker_config or CircuitBreakerConfig()
         self._breakers: dict[str, CircuitBreaker] = {
             primary.name: circuit_breaker
@@ -186,6 +200,33 @@ class ProviderRouter:
         breaker.reset()
         return True
 
+    @property
+    def is_offline(self) -> bool:
+        """Check if the router is currently in offline mode."""
+        return self._offline_mode
+
+    async def _check_network(self) -> bool:
+        """Quick connectivity check — try to reach a reliable endpoint."""
+        import aiohttp
+        for url in ("https://1.1.1.1", "https://8.8.8.8"):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.head(
+                        url, timeout=aiohttp.ClientTimeout(total=3),
+                        allow_redirects=False,
+                    ) as resp:
+                        return True
+            except Exception:
+                continue
+        return False
+
+    def _find_local_fallback(self) -> LLMProvider | None:
+        """Find a local provider in the fallback chain."""
+        for fb in self._fallbacks:
+            if getattr(fb, "name", "") == "local":
+                return fb
+        return None
+
     async def complete(
         self,
         messages: list[dict[str, Any]],
@@ -193,18 +234,39 @@ class ProviderRouter:
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ) -> LLMResponse:
-        """Route completion request with circuit breaker and fallback logic."""
+        """Route completion request with circuit breaker, fallback, and offline mode."""
         last_error: Exception | None = None
+
+        # If previously offline, proactively check network before attempting cloud
+        if self._offline_mode:
+            try:
+                has_network = await self._check_network()
+            except Exception:
+                has_network = False
+            if not has_network:
+                # Skip cloud providers entirely, go straight to local fallback
+                return await self._offline_complete(
+                    messages=messages, tools=tools,
+                    temperature=temperature, max_tokens=max_tokens,
+                )
 
         for provider in [self._primary, *self._fallbacks]:
             try:
-                return await self._call_provider(
+                result = await self._call_provider(
                     provider=provider,
                     messages=messages,
                     tools=tools,
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
+                # Recovered from offline
+                if self._offline_mode:
+                    self._offline_mode = False
+                    await self._publish_info(
+                        provider.name, "offline_recovered",
+                        message="Network restored, back to normal routing.",
+                    )
+                return result
             except CircuitOpenError as exc:
                 last_error = exc
                 await self._publish_info(
@@ -217,10 +279,52 @@ class ProviderRouter:
                 last_error = exc
                 continue
 
+        # All providers failed — try offline fallback to local model
+        if self._offline_fallback:
+            return await self._offline_complete(
+                messages=messages, tools=tools,
+                temperature=temperature, max_tokens=max_tokens,
+            )
+
         raise ProviderError(
             f"All providers failed. Primary: {self._primary.name}. "
             f"Circuit states: {self.get_circuit_states()}. "
             f"Last error: {last_error}"
+        )
+
+    async def _offline_complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        temperature: float,
+        max_tokens: int,
+    ) -> LLMResponse:
+        """Attempt completing via a local provider when cloud is unreachable."""
+        local = self._find_local_fallback()
+        tried_in_main_chain = local is not None and local in [self._primary, *self._fallbacks]
+
+        if not tried_in_main_chain and local is None:
+            # Try to create an ad-hoc local provider
+            try:
+                from neuralclaw.providers.local import LocalProvider
+                local = LocalProvider()
+            except Exception:
+                local = None
+
+        if local and await local.is_available():
+            self._offline_mode = True
+            await self._publish_info(
+                "local", "offline_mode_activated",
+                message="All cloud providers failed. Falling back to local model.",
+            )
+            return await local.complete(
+                messages=messages, tools=tools,
+                temperature=temperature, max_tokens=max_tokens,
+            )
+
+        raise ProviderError(
+            f"All providers failed and no local fallback available. "
+            f"Circuit states: {self.get_circuit_states()}"
         )
 
     async def _call_provider(
@@ -238,17 +342,19 @@ class ProviderRouter:
         if provider is not self._primary and not await provider.is_available():
             raise ProviderError(f"Fallback provider '{provider.name}' is unavailable.")
 
+        import functools
         last_error: Exception | None = None
         for attempt in range(self._max_retries + 1):
             try:
-                return await breaker.call(
-                    lambda: provider.complete(
-                        messages=messages,
-                        tools=tools,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    )
+                # Use functools.partial to capture values (not references)
+                call_fn = functools.partial(
+                    provider.complete,
+                    messages=messages,
+                    tools=tools,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
                 )
+                return await breaker.call(call_fn)
             except CircuitOpenError:
                 raise
             except Exception as exc:
@@ -285,6 +391,10 @@ class ProviderRouter:
         )
         for chunk in _chunk_text(response.content or ""):
             yield chunk
+
+    async def list_models(self) -> list[dict[str, Any]]:
+        """List models from the primary provider."""
+        return await self._primary.list_models()
 
     async def is_available(self) -> bool:
         """Check if any provider is available."""

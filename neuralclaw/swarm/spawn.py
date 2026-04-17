@@ -210,6 +210,7 @@ class AgentSpawner:
         semantic: Any | None = None,
         procedural: Any | None = None,
         shared_bridge: Any | None = None,
+        skill_registry: Any | None = None,
     ) -> SpawnedAgent:
         """
         Spawn a local agent from a persistent AgentDefinition.
@@ -250,6 +251,7 @@ class AgentSpawner:
             semantic=namespaced_semantic,
             procedural=namespaced_procedural,
             shared_bridge=shared_bridge,
+            skill_registry=skill_registry,
         )
         self._runtimes[defn.name] = runtime
 

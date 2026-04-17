@@ -102,7 +102,7 @@ class ConsensusProtocol:
             min_agents: Minimum agents required for consensus.
             timeout: Max time for the entire consensus process.
         """
-        start = time.time()
+        start = time.monotonic()
         available = agent_names or self._delegation.get_available_agents()
 
         if len(available) < min_agents:
@@ -117,32 +117,33 @@ class ConsensusProtocol:
         # Collect votes from all agents in parallel
         votes = await self._collect_votes(available, task, timeout)
 
-        if not votes:
+        # Quorum check: enough agents must actually respond
+        if len(votes) < min_agents:
             return ConsensusResult(
                 strategy=strategy,
-                final_response="No agents responded",
+                final_response=f"Quorum not met: {len(votes)} responded out of {len(available)} consulted, need {min_agents}",
                 final_confidence=0.0,
-                votes=[],
+                votes=votes,
                 consensus_reached=False,
             )
 
         # Apply strategy
         if strategy == ConsensusStrategy.DELIBERATION:
-            result = await self._deliberate(votes, task, timeout - (time.time() - start))
+            result = await self._deliberate(votes, task, timeout - (time.monotonic() - start))
         else:
             result = self._apply_strategy(strategy, votes)
 
-        result.elapsed_seconds = time.time() - start
+        result.elapsed_seconds = time.monotonic() - start
 
-        # Emit event
+        # Publish event (await to guarantee delivery)
         if self._bus:
-            self._bus.emit(EventType.REASONING_COMPLETE, {
+            await self._bus.publish(EventType.REASONING_COMPLETE, {
                 "consensus": True,
                 "strategy": strategy.name,
                 "agents": len(votes),
                 "consensus_reached": result.consensus_reached,
                 "confidence": result.final_confidence,
-            })
+            }, source="consensus.protocol")
 
         return result
 
@@ -203,16 +204,67 @@ class ConsensusProtocol:
             dissenting_agents=dissenters,
         )
 
+    # -- Response similarity helpers -----------------------------------------
+
+    @staticmethod
+    def _normalize_response(text: str) -> str:
+        """Normalize a response for grouping: lowercase, collapse whitespace, strip filler."""
+        import re
+        text = text.lower().strip()
+        # Strip common conversational filler that doesn't affect meaning
+        for filler in ("based on my analysis, ", "based on the information, ",
+                       "here is my response: ", "i believe that ", "in my opinion, "):
+            if text.startswith(filler):
+                text = text[len(filler):]
+        text = re.sub(r'\s+', ' ', text)
+        return text
+
+    @staticmethod
+    def _ngrams(text: str, n: int = 4) -> set[str]:
+        """Extract character n-grams from text."""
+        return {text[i:i + n] for i in range(max(0, len(text) - n + 1))}
+
+    @classmethod
+    def _response_similarity(cls, a: str, b: str) -> float:
+        """Jaccard similarity on character 4-grams after normalization."""
+        na, nb = cls._normalize_response(a), cls._normalize_response(b)
+        if na == nb:
+            return 1.0
+        ga, gb = cls._ngrams(na), cls._ngrams(nb)
+        if not ga and not gb:
+            return 1.0
+        if not ga or not gb:
+            return 0.0
+        return len(ga & gb) / len(ga | gb)
+
+    @classmethod
+    def _group_votes(cls, votes: list[ConsensusVote], threshold: float = 0.45) -> list[list[ConsensusVote]]:
+        """
+        Group votes by semantic similarity using 4-gram Jaccard.
+
+        Assigns each vote to the first existing group whose centroid
+        (highest-confidence member) exceeds the similarity threshold.
+        """
+        groups: list[list[ConsensusVote]] = []
+        for v in votes:
+            placed = False
+            for group in groups:
+                centroid = max(group, key=lambda g: g.confidence)
+                if cls._response_similarity(v.response, centroid.response) >= threshold:
+                    group.append(v)
+                    placed = True
+                    break
+            if not placed:
+                groups.append([v])
+        return groups
+
+    # -- Voting strategies ---------------------------------------------------
+
     def _majority_vote(self, votes: list[ConsensusVote]) -> ConsensusResult:
         """Group similar responses and pick the majority cluster."""
-        # Simple approach: group by normalized response prefix (first 100 chars)
-        groups: dict[str, list[ConsensusVote]] = {}
-        for v in votes:
-            key = v.response[:100].strip().lower()
-            groups.setdefault(key, []).append(v)
+        groups = self._group_votes(votes)
 
-        # Pick largest group
-        largest = max(groups.values(), key=len)
+        largest = max(groups, key=len)
         winner = max(largest, key=lambda v: v.confidence)
         dissenters = [v.agent_name for v in votes if v not in largest]
 
@@ -227,14 +279,9 @@ class ConsensusProtocol:
 
     def _weighted_confidence(self, votes: list[ConsensusVote]) -> ConsensusResult:
         """Weight responses by confidence, pick highest total."""
-        groups: dict[str, list[ConsensusVote]] = {}
-        for v in votes:
-            key = v.response[:100].strip().lower()
-            groups.setdefault(key, []).append(v)
+        groups = self._group_votes(votes)
 
-        # Pick group with highest total confidence
-        best_key = max(groups, key=lambda k: sum(v.confidence for v in groups[k]))
-        best_group = groups[best_key]
+        best_group = max(groups, key=lambda g: sum(v.confidence for v in g))
         winner = max(best_group, key=lambda v: v.confidence)
         dissenters = [v.agent_name for v in votes if v not in best_group]
 
@@ -252,10 +299,7 @@ class ConsensusProtocol:
 
     def _unanimous(self, votes: list[ConsensusVote]) -> ConsensusResult:
         """All agents must agree."""
-        groups: dict[str, list[ConsensusVote]] = {}
-        for v in votes:
-            key = v.response[:100].strip().lower()
-            groups.setdefault(key, []).append(v)
+        groups = self._group_votes(votes)
 
         unanimous = len(groups) == 1
         best = max(votes, key=lambda v: v.confidence)
@@ -267,8 +311,8 @@ class ConsensusProtocol:
             votes=votes,
             consensus_reached=unanimous,
             dissenting_agents=[] if unanimous else [
-                v.agent_name for v in votes if v.response[:100].strip().lower() != best.response[:100].strip().lower()
-            ],
+                v.agent_name for v in votes if v not in groups[0]
+            ] if groups else [],
         )
 
     async def _deliberate(
