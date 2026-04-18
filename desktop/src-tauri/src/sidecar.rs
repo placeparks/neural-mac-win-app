@@ -12,6 +12,8 @@ use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::Manager;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 #[derive(Clone, Default, serde::Serialize)]
 pub struct PortOwnerInfo {
@@ -103,6 +105,8 @@ const HEALTH_TIMEOUT_MS: u64 = 2_500;
 const STARTUP_TIMEOUT_SECS: u64 = 60;
 const WATCHDOG_INTERVAL_SECS: u64 = 5;
 const MAX_RESTARTS_PER_WINDOW: u32 = 5;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn process_appears_app_owned(name: Option<&str>, path: Option<&str>) -> bool {
     let combined = format!(
@@ -113,6 +117,11 @@ fn process_appears_app_owned(name: Option<&str>, path: Option<&str>) -> bool {
     combined.contains("neuralclaw-sidecar")
         || combined.contains("neuralclaw")
         || combined.contains("cardify.neuralclaw")
+}
+
+#[cfg(target_os = "windows")]
+fn configure_windows_utility_command(command: &mut Command) -> &mut Command {
+    command.creation_flags(CREATE_NO_WINDOW)
 }
 
 #[cfg(target_os = "macos")]
@@ -154,10 +163,10 @@ fn inspect_port_owner(port: u16) -> Option<PortOwnerInfo> {
                Write-Output \"path=$($proc.ExecutablePath)\"; \
              }}"
         );
-        let output = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .output()
-            .ok()?;
+        let mut command = Command::new("powershell");
+        command.args(["-NoProfile", "-Command", &script]);
+        configure_windows_utility_command(&mut command);
+        let output = command.output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -255,8 +264,10 @@ fn terminate_port_owner(owner: &PortOwnerInfo) -> bool {
 
     #[cfg(target_os = "windows")]
     {
-        return Command::new("taskkill.exe")
-            .args(["/PID", &pid.to_string(), "/F", "/T"])
+        let mut command = Command::new("taskkill.exe");
+        command.args(["/PID", &pid.to_string(), "/F", "/T"]);
+        configure_windows_utility_command(&mut command);
+        return command
             .status()
             .map(|status| status.success())
             .unwrap_or(false);
@@ -397,8 +408,10 @@ fn migrate_legacy_services() -> LegacyServiceMigration {
             }
         }
         for task_name in ["NeuralClawAgent", "NeuralClawGateway"] {
-            let exists = Command::new("schtasks")
-                .args(["/Query", "/TN", task_name])
+            let mut query = Command::new("schtasks");
+            query.args(["/Query", "/TN", task_name]);
+            configure_windows_utility_command(&mut query);
+            let exists = query
                 .status()
                 .map(|status| status.success())
                 .unwrap_or(false);
@@ -407,9 +420,10 @@ fn migrate_legacy_services() -> LegacyServiceMigration {
             }
             report.attempted = true;
             report.found_entries.push(format!("ScheduledTask:{task_name}"));
-            let _ = Command::new("schtasks")
-                .args(["/Delete", "/TN", task_name, "/F"])
-                .status();
+            let mut delete = Command::new("schtasks");
+            delete.args(["/Delete", "/TN", task_name, "/F"]);
+            configure_windows_utility_command(&mut delete);
+            let _ = delete.status();
             report.disabled_entries.push(task_name.to_string());
         }
         if !report.attempted {
