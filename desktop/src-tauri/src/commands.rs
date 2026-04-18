@@ -58,6 +58,11 @@ pub async fn get_backend_status(
             start_in_progress: s.start_in_progress,
             startup_deadline: s.startup_deadline,
             last_error: s.last_error.clone(),
+            port_owner: s.port_owner.clone(),
+            auxiliary_port_owners: s.auxiliary_port_owners.clone(),
+            legacy_migration: s.legacy_migration.clone(),
+            provider_degraded: s.provider_degraded,
+            provider_detail: s.provider_detail.clone(),
         }
     };
     let runtime = sidecar::runtime_status(&app, &snapshot).await;

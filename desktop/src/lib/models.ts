@@ -8,8 +8,35 @@ export function filterChatCapableModels<T extends { name: string }>(models: T[])
   return models.filter((model) => !isEmbeddingModelName(model.name));
 }
 
-export type RuntimeProcessState = 'starting' | 'running' | 'degraded' | 'stopped' | 'offline';
-export type RuntimeReadinessPhase = 'spawning' | 'binding_dashboard' | 'warming_operator_surface' | 'ready' | 'offline';
+export type RuntimeProcessState = 'starting' | 'running' | 'degraded' | 'stopped' | 'offline' | 'conflict';
+export type RuntimeReadinessPhase =
+  | 'spawning'
+  | 'binding_dashboard'
+  | 'warming_operator_surface'
+  | 'ready'
+  | 'offline'
+  | 'recovering'
+  | 'degraded'
+  | 'conflict';
+
+export interface BackendPortOwnerInfo {
+  port: number;
+  pid?: number | null;
+  process_name?: string | null;
+  process_path?: string | null;
+  app_owned: boolean;
+  source: string;
+}
+
+export interface LegacyServiceMigration {
+  platform: string;
+  attempted: boolean;
+  found_entries: string[];
+  disabled_entries: string[];
+  removed_entries: string[];
+  notes: string[];
+  errors: string[];
+}
 
 export interface BackendRuntimeStatus {
   running: boolean;
@@ -25,6 +52,11 @@ export interface BackendRuntimeStatus {
   stale_process_cleanup: boolean;
   desktop_log_path?: string | null;
   last_error?: string | null;
+  port_owner?: BackendPortOwnerInfo | null;
+  auxiliary_port_owners?: BackendPortOwnerInfo[];
+  legacy_migration?: LegacyServiceMigration | null;
+  provider_degraded?: boolean;
+  provider_detail?: string | null;
 }
 
 export interface AdaptiveSuggestion {

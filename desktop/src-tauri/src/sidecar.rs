@@ -1,25 +1,38 @@
 // NeuralClaw Desktop - Sidecar Process Management
 //
-// Manages the Python backend sidecar lifecycle: spawn, watchdog, restart, kill.
-//
-// Key resilience properties:
-//   * Child process handle is kept so we can kill on app shutdown.
-//   * A watchdog task polls health; if the sidecar dies it is automatically
-//     respawned (with backoff and a max-restart cap to avoid crash loops).
-//   * Health checks have explicit timeouts so they cannot hang the runtime.
-//   * `stop_sidecar_process` actually terminates the child instead of just
-//     flipping a flag.
+// The desktop runtime owns backend startup through a supervised attach-or-recover
+// flow instead of blindly killing processes and respawning.
 
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
-#[cfg(not(debug_assertions))]
-use std::process::Command;
-use std::process::Child;
+use std::process::{Child, Command};
 #[cfg(not(debug_assertions))]
 use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::Manager;
+
+#[derive(Clone, Default, serde::Serialize)]
+pub struct PortOwnerInfo {
+    pub port: u16,
+    pub pid: Option<u32>,
+    pub process_name: Option<String>,
+    pub process_path: Option<String>,
+    pub app_owned: bool,
+    pub source: String,
+}
+
+#[derive(Clone, Default, serde::Serialize)]
+pub struct LegacyServiceMigration {
+    pub platform: String,
+    pub attempted: bool,
+    pub found_entries: Vec<String>,
+    pub disabled_entries: Vec<String>,
+    pub removed_entries: Vec<String>,
+    pub notes: Vec<String>,
+    pub errors: Vec<String>,
+}
 
 #[derive(Default)]
 pub struct SidecarState {
@@ -33,6 +46,11 @@ pub struct SidecarState {
     pub start_in_progress: bool,
     pub startup_deadline: Option<Instant>,
     pub last_error: Option<String>,
+    pub port_owner: Option<PortOwnerInfo>,
+    pub auxiliary_port_owners: Vec<PortOwnerInfo>,
+    pub legacy_migration: Option<LegacyServiceMigration>,
+    pub provider_degraded: bool,
+    pub provider_detail: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -50,14 +68,363 @@ pub struct SidecarRuntimeStatus {
     pub stale_process_cleanup: bool,
     pub desktop_log_path: Option<String>,
     pub last_error: Option<String>,
+    pub port_owner: Option<PortOwnerInfo>,
+    pub auxiliary_port_owners: Vec<PortOwnerInfo>,
+    pub legacy_migration: Option<LegacyServiceMigration>,
+    pub provider_degraded: bool,
+    pub provider_detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct HealthProbeStatus {
+    ok: bool,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct DashboardHealthRuntime {
+    readiness_phase: Option<String>,
+    dashboard_bound: Option<bool>,
+    operator_api_ready: Option<bool>,
+    adaptive_ready: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+struct DashboardHealthPayload {
+    status: Option<String>,
+    readiness: Option<String>,
+    runtime: Option<DashboardHealthRuntime>,
+    probes: Option<HashMap<String, HealthProbeStatus>>,
 }
 
 const DASHBOARD_PORT: u16 = 8080;
 const WEBCHAT_PORT: u16 = 8099;
+const FEDERATION_PORT: u16 = 8100;
 const HEALTH_TIMEOUT_MS: u64 = 2_500;
 const STARTUP_TIMEOUT_SECS: u64 = 60;
 const WATCHDOG_INTERVAL_SECS: u64 = 5;
 const MAX_RESTARTS_PER_WINDOW: u32 = 5;
+
+fn process_appears_app_owned(name: Option<&str>, path: Option<&str>) -> bool {
+    let combined = format!(
+        "{} {}",
+        name.unwrap_or_default().trim().to_lowercase(),
+        path.unwrap_or_default().trim().to_lowercase(),
+    );
+    combined.contains("neuralclaw-sidecar")
+        || combined.contains("neuralclaw")
+        || combined.contains("cardify.neuralclaw")
+}
+
+#[cfg(target_os = "macos")]
+fn current_unix_uid() -> Option<String> {
+    #[cfg(unix)]
+    {
+        let output = Command::new("id").arg("-u").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if uid.is_empty() { None } else { Some(uid) }
+    }
+
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn run_command_capture(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn inspect_port_owner(port: u16) -> Option<PortOwnerInfo> {
+    #[cfg(target_os = "windows")]
+    {
+        let script = format!(
+            "$conn = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; \
+             if ($conn) {{ \
+               $proc = Get-CimInstance Win32_Process -Filter \"ProcessId = $($conn.OwningProcess)\" -ErrorAction SilentlyContinue; \
+               Write-Output \"pid=$($conn.OwningProcess)\"; \
+               Write-Output \"name=$($proc.Name)\"; \
+               Write-Output \"path=$($proc.ExecutablePath)\"; \
+             }}"
+        );
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut pid = None;
+        let mut name = None;
+        let mut path = None;
+        for line in text.lines() {
+            if let Some(value) = line.strip_prefix("pid=") {
+                pid = value.trim().parse::<u32>().ok();
+            } else if let Some(value) = line.strip_prefix("name=") {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    name = Some(trimmed.to_string());
+                }
+            } else if let Some(value) = line.strip_prefix("path=") {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    path = Some(trimmed.to_string());
+                }
+            }
+        }
+        if pid.is_none() && name.is_none() && path.is_none() {
+            return None;
+        }
+        return Some(PortOwnerInfo {
+            port,
+            pid,
+            process_name: name.clone(),
+            process_path: path.clone(),
+            app_owned: process_appears_app_owned(name.as_deref(), path.as_deref()),
+            source: "windows-nettcpconnection".into(),
+        });
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let text = run_command_capture(
+            "lsof",
+            &[
+                "-nP",
+                &format!("-iTCP:{port}"),
+                "-sTCP:LISTEN",
+                "-Fpct",
+            ],
+        )?;
+        let mut pid = None;
+        let mut name = None;
+        for line in text.lines() {
+            if let Some(value) = line.strip_prefix('p') {
+                pid = value.trim().parse::<u32>().ok();
+            } else if let Some(value) = line.strip_prefix('c') {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    name = Some(trimmed.to_string());
+                }
+            }
+        }
+        let path = pid.and_then(|process_id| {
+            run_command_capture("ps", &["-p", &process_id.to_string(), "-o", "command="])
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        });
+        if pid.is_none() && name.is_none() && path.is_none() {
+            return None;
+        }
+        return Some(PortOwnerInfo {
+            port,
+            pid,
+            process_name: name.clone(),
+            process_path: path.clone(),
+            app_owned: process_appears_app_owned(name.as_deref(), path.as_deref()),
+            source: "lsof".into(),
+        });
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+fn inspect_auxiliary_ports() -> Vec<PortOwnerInfo> {
+    [DASHBOARD_PORT, WEBCHAT_PORT, FEDERATION_PORT]
+        .into_iter()
+        .filter_map(inspect_port_owner)
+        .collect()
+}
+
+fn terminate_port_owner(owner: &PortOwnerInfo) -> bool {
+    let Some(pid) = owner.pid else {
+        return false;
+    };
+    if !owner.app_owned {
+        return false;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return Command::new("taskkill.exe")
+            .args(["/PID", &pid.to_string(), "/F", "/T"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+        std::thread::sleep(Duration::from_millis(500));
+        if inspect_port_owner(owner.port)
+            .as_ref()
+            .and_then(|current| current.pid)
+            == Some(pid)
+        {
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+        return inspect_port_owner(owner.port)
+            .as_ref()
+            .and_then(|current| current.pid)
+            != Some(pid);
+    }
+
+    #[allow(unreachable_code)]
+    false
+}
+
+fn migrate_legacy_services() -> LegacyServiceMigration {
+    #[cfg(target_os = "macos")]
+    {
+        let mut report = LegacyServiceMigration {
+            platform: "macos".into(),
+            ..LegacyServiceMigration::default()
+        };
+        let Some(home_dir) = dirs::home_dir() else {
+            report.notes.push("Home directory unavailable; skipped launch-agent migration.".into());
+            return report;
+        };
+        let Some(uid) = current_unix_uid() else {
+            report.notes.push("User id unavailable; skipped launch-agent migration.".into());
+            return report;
+        };
+        let entries = [
+            ("com.neuralclaw.agent", home_dir.join("Library/LaunchAgents/com.neuralclaw.agent.plist")),
+            ("com.neuralclaw.gateway", home_dir.join("Library/LaunchAgents/com.neuralclaw.gateway.plist")),
+        ];
+        for (label, path) in entries {
+            if !path.exists() {
+                continue;
+            }
+            report.attempted = true;
+            report.found_entries.push(path.display().to_string());
+            let scoped_label = format!("gui/{uid}/{label}");
+            let _ = Command::new("launchctl")
+                .args(["bootout", &scoped_label])
+                .status();
+            let _ = Command::new("launchctl")
+                .args(["disable", &scoped_label])
+                .status();
+            report.disabled_entries.push(label.to_string());
+            match fs::remove_file(&path) {
+                Ok(_) => report.removed_entries.push(path.display().to_string()),
+                Err(error) => report.errors.push(format!("Failed to remove {}: {}", path.display(), error)),
+            }
+        }
+        return report;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut report = LegacyServiceMigration {
+            platform: "linux".into(),
+            ..LegacyServiceMigration::default()
+        };
+        let Some(home_dir) = dirs::home_dir() else {
+            report.notes.push("Home directory unavailable; skipped legacy startup inspection.".into());
+            return report;
+        };
+        let entries = [
+            ("neuralclaw-agent.service", home_dir.join(".config/systemd/user/neuralclaw-agent.service")),
+            ("neuralclaw-gateway.service", home_dir.join(".config/systemd/user/neuralclaw-gateway.service")),
+            ("neuralclaw-agent.desktop", home_dir.join(".config/autostart/neuralclaw-agent.desktop")),
+            ("neuralclaw-gateway.desktop", home_dir.join(".config/autostart/neuralclaw-gateway.desktop")),
+        ];
+        for (label, path) in entries {
+            if !path.exists() {
+                continue;
+            }
+            report.attempted = true;
+            report.found_entries.push(path.display().to_string());
+            if label.ends_with(".service") {
+                let _ = Command::new("systemctl")
+                    .args(["--user", "disable", "--now", label])
+                    .status();
+                report.disabled_entries.push(label.to_string());
+            }
+            match fs::remove_file(&path) {
+                Ok(_) => report.removed_entries.push(path.display().to_string()),
+                Err(error) => report.errors.push(format!("Failed to remove {}: {}", path.display(), error)),
+            }
+        }
+        if !report.attempted {
+            report.notes.push("No known legacy NeuralClaw startup entries found.".into());
+        }
+        return report;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut report = LegacyServiceMigration {
+            platform: "windows".into(),
+            ..LegacyServiceMigration::default()
+        };
+        if let Some(startup_dir) = std::env::var("APPDATA")
+            .ok()
+            .map(PathBuf::from)
+            .map(|base| base.join("Microsoft/Windows/Start Menu/Programs/Startup"))
+        {
+            for entry in [
+                "NeuralClaw Agent.lnk",
+                "NeuralClaw Gateway.lnk",
+                "NeuralClaw Agent.bat",
+                "NeuralClaw Gateway.bat",
+            ] {
+                let path = startup_dir.join(entry);
+                if !path.exists() {
+                    continue;
+                }
+                report.attempted = true;
+                report.found_entries.push(path.display().to_string());
+                match fs::remove_file(&path) {
+                    Ok(_) => report.removed_entries.push(path.display().to_string()),
+                    Err(error) => report.errors.push(format!("Failed to remove {}: {}", path.display(), error)),
+                }
+            }
+        }
+        for task_name in ["NeuralClawAgent", "NeuralClawGateway"] {
+            let exists = Command::new("schtasks")
+                .args(["/Query", "/TN", task_name])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            if !exists {
+                continue;
+            }
+            report.attempted = true;
+            report.found_entries.push(format!("ScheduledTask:{task_name}"));
+            let _ = Command::new("schtasks")
+                .args(["/Delete", "/TN", task_name, "/F"])
+                .status();
+            report.disabled_entries.push(task_name.to_string());
+        }
+        if !report.attempted {
+            report.notes.push("No known legacy NeuralClaw startup entries found.".into());
+        }
+        return report;
+    }
+
+    #[allow(unreachable_code)]
+    LegacyServiceMigration {
+        platform: std::env::consts::OS.to_string(),
+        notes: vec!["Legacy service migration is not implemented for this platform.".into()],
+        ..LegacyServiceMigration::default()
+    }
+}
 
 #[allow(dead_code)]
 fn sidecar_binary_names() -> Vec<String> {
@@ -120,7 +487,6 @@ fn spawn_sidecar(app: &tauri::AppHandle, port: u16) -> Result<Option<Child>, Str
     {
         let _ = app;
         let _ = port;
-        // In dev mode the gateway is started by the developer; do not spawn.
         Ok(None)
     }
 
@@ -184,42 +550,146 @@ pub fn append_desktop_log(app: &tauri::AppHandle, message: &str) {
     }
 }
 
-pub fn cleanup_stale_sidecars() -> bool {
-    #[cfg(debug_assertions)]
-    {
-        return false;
+async fn fetch_health_payload() -> Option<DashboardHealthPayload> {
+    let url = format!("http://127.0.0.1:{}/health", DASHBOARD_PORT);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(HEALTH_TIMEOUT_MS))
+        .build()
+        .ok()?;
+    let response = client.get(&url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
     }
-
-    #[cfg(all(not(debug_assertions), target_os = "windows"))]
-    {
-        let mut cleaned = false;
-        for binary_name in sidecar_binary_names() {
-            let status = Command::new("taskkill.exe")
-                .args(["/F", "/T", "/IM", &binary_name])
-                .status();
-            if let Ok(status) = status {
-                if status.success() {
-                    cleaned = true;
-                    eprintln!(
-                        "[NeuralClaw] Cleared stale sidecar processes before restart: {}",
-                        binary_name
-                    );
-                }
-            }
-        }
-        return cleaned;
-    }
-
-    #[allow(unreachable_code)]
-    false
+    response.json::<DashboardHealthPayload>().await.ok()
 }
 
-/// Start the NeuralClaw Python sidecar process and the watchdog.
+async fn classify_existing_backend() -> Option<(DashboardHealthPayload, Option<PortOwnerInfo>)> {
+    let payload = fetch_health_payload().await?;
+    let owner = inspect_port_owner(DASHBOARD_PORT);
+    Some((payload, owner))
+}
+
+enum StartOutcome {
+    Spawned(Option<Child>),
+    AttachedExisting,
+}
+
+async fn acquire_sidecar_runtime(app: &tauri::AppHandle) -> Result<StartOutcome, String> {
+    let migration = migrate_legacy_services();
+    if let Ok(mut state) = app.state::<Mutex<SidecarState>>().lock() {
+        state.legacy_migration = Some(migration.clone());
+        state.auxiliary_port_owners = inspect_auxiliary_ports();
+    }
+
+    if let Some((payload, owner)) = classify_existing_backend().await {
+        let status = payload.status.as_deref().unwrap_or_default();
+        let readiness = payload.readiness.as_deref().unwrap_or_default();
+        let provider_probe_ok = payload
+            .probes
+            .as_ref()
+            .and_then(|probes| probes.get("primary_provider"))
+            .map(|probe| probe.ok);
+        if status == "healthy" {
+            if let Ok(mut state) = app.state::<Mutex<SidecarState>>().lock() {
+                state.running = true;
+                state.attached_to_existing = true;
+                state.port_owner = owner;
+                state.provider_degraded = readiness == "degraded" || provider_probe_ok == Some(false);
+                state.provider_detail = if state.provider_degraded {
+                    Some("Primary provider readiness is degraded; backend stayed online.".into())
+                } else {
+                    None
+                };
+                state.last_error = if migration.attempted {
+                    Some(format!(
+                        "Migrated legacy {} startup entries before attaching to the running backend",
+                        migration.platform
+                    ))
+                } else {
+                    None
+                };
+            }
+            append_desktop_log(app, "Attached to existing healthy NeuralClaw backend");
+            return Ok(StartOutcome::AttachedExisting);
+        }
+    }
+
+    let dashboard_owner = inspect_port_owner(DASHBOARD_PORT);
+    if let Some(owner) = dashboard_owner.clone() {
+        if owner.app_owned {
+            append_desktop_log(
+                app,
+                &format!(
+                    "Recovering app-owned backend conflict on port {} (pid {:?})",
+                    owner.port, owner.pid
+                ),
+            );
+            let cleaned = terminate_port_owner(&owner);
+            std::thread::sleep(Duration::from_millis(1200));
+            let remaining_owner = inspect_port_owner(DASHBOARD_PORT);
+            if let Ok(mut state) = app.state::<Mutex<SidecarState>>().lock() {
+                state.port_owner = remaining_owner.clone();
+                state.auxiliary_port_owners = inspect_auxiliary_ports();
+                state.last_error = Some(if cleaned {
+                    "Recovered from a legacy NeuralClaw background service before startup".into()
+                } else {
+                    "Detected a legacy NeuralClaw background service but could not fully stop it".into()
+                });
+            }
+            if let Some(remaining) = remaining_owner {
+                return Err(format!(
+                    "Port {} is still owned by {}{}",
+                    remaining.port,
+                    remaining.process_name.unwrap_or_else(|| "a legacy NeuralClaw process".into()),
+                    remaining
+                        .process_path
+                        .as_ref()
+                        .map(|path| format!(" ({path})"))
+                        .unwrap_or_default(),
+                ));
+            }
+        } else {
+            if let Ok(mut state) = app.state::<Mutex<SidecarState>>().lock() {
+                state.port_owner = Some(owner.clone());
+                state.auxiliary_port_owners = inspect_auxiliary_ports();
+                state.last_error = Some(format!(
+                    "Port {} is already in use by {}{}",
+                    owner.port,
+                    owner.process_name.clone().unwrap_or_else(|| "another process".into()),
+                    owner
+                        .process_path
+                        .as_ref()
+                        .map(|path| format!(" ({path})"))
+                        .unwrap_or_default(),
+                ));
+            }
+            return Err(format!(
+                "Port {} is already in use by {}{}",
+                owner.port,
+                owner.process_name.unwrap_or_else(|| "another process".into()),
+                owner
+                    .process_path
+                    .as_ref()
+                    .map(|path| format!(" ({path})"))
+                    .unwrap_or_default(),
+            ));
+        }
+    }
+
+    let child = spawn_sidecar(app, WEBCHAT_PORT)?;
+    if let Ok(mut state) = app.state::<Mutex<SidecarState>>().lock() {
+        state.port_owner = None;
+        state.auxiliary_port_owners = inspect_auxiliary_ports();
+        state.provider_degraded = false;
+        state.provider_detail = None;
+    }
+    Ok(StartOutcome::Spawned(child))
+}
+
 pub async fn start_sidecar_process(app: &tauri::AppHandle) -> Result<(), String> {
     let port: u16 = WEBCHAT_PORT;
     append_desktop_log(app, &format!("start_sidecar_process requested on port {}", port));
 
-    // Reset user_stopped on explicit start.
     {
         let state = app.state::<Mutex<SidecarState>>();
         let mut s = state.lock().map_err(|e| e.to_string())?;
@@ -230,42 +700,20 @@ pub async fn start_sidecar_process(app: &tauri::AppHandle) -> Result<(), String>
         s.last_error = None;
         s.user_stopped = false;
         s.port = port;
-        // Reap any lingering child handle we may still be tracking so the
-        // name-based taskkill below doesn't race us.
         if let Some(mut child) = s.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
     }
 
-    // Release-build desktop owns the sidecar lifecycle. Always kill stale
-    // sidecars and spawn a fresh one so config changes are picked up.
-    let stale_cleanup = cleanup_stale_sidecars();
-    if stale_cleanup {
-        append_desktop_log(app, "Recovered from stale sidecar processes before startup");
-        if let Ok(mut s) = app.state::<Mutex<SidecarState>>().lock() {
-            s.last_error = Some("Recovered from stale sidecar processes before startup".into());
-        }
-    }
-    // Wait long enough for the old process to fully die and release the port.
-    // 500ms was too short — PyInstaller sidecars need time to clean up their
-    // temp extraction directory.
-    tokio::time::sleep(Duration::from_millis(2500)).await;
-
-    // If something is still on port 8080 after cleanup, kill harder and wait.
-    if check_health().await {
-        eprintln!("[NeuralClaw] Stale sidecar survived cleanup — retrying kill.");
-        cleanup_stale_sidecars();
-        tokio::time::sleep(Duration::from_millis(3000)).await;
-    }
-
-    let child = match spawn_sidecar(app, port) {
-        Ok(child) => child,
+    let start_outcome = match acquire_sidecar_runtime(app).await {
+        Ok(outcome) => outcome,
         Err(err) => {
-            append_desktop_log(app, &format!("Sidecar spawn failed: {}", err));
+            append_desktop_log(app, &format!("Sidecar supervised start failed: {}", err));
             if let Ok(mut s) = app.state::<Mutex<SidecarState>>().lock() {
                 s.start_in_progress = false;
                 s.last_error = Some(err.clone());
+                s.running = false;
             }
             return Err(err);
         }
@@ -274,39 +722,44 @@ pub async fn start_sidecar_process(app: &tauri::AppHandle) -> Result<(), String>
     {
         let state = app.state::<Mutex<SidecarState>>();
         let mut s = state.lock().map_err(|e| e.to_string())?;
-        s.child = child;
-        s.port = port;
-        s.running = true;
-        s.attached_to_existing = false;
-        s.startup_deadline = Some(Instant::now() + Duration::from_secs(STARTUP_TIMEOUT_SECS));
+        match start_outcome {
+            StartOutcome::Spawned(child) => {
+                s.child = child;
+                s.running = true;
+                s.attached_to_existing = false;
+                s.startup_deadline = Some(Instant::now() + Duration::from_secs(STARTUP_TIMEOUT_SECS));
+            }
+            StartOutcome::AttachedExisting => {
+                s.child = None;
+                s.running = true;
+                s.attached_to_existing = true;
+                s.startup_deadline = None;
+            }
+        }
         ensure_watchdog(app, &mut s);
     }
 
-    // Wait for health, but do not block app startup forever.
     if let Err(e) = wait_for_health(STARTUP_TIMEOUT_SECS).await {
         append_desktop_log(app, &format!("Sidecar health wait failed: {}", e));
-        eprintln!("[NeuralClaw] Sidecar startup health wait failed: {}", e);
-        // We still leave the child running; the watchdog will try to recover.
     }
 
     let healthy = check_health().await;
     if let Ok(mut s) = app.state::<Mutex<SidecarState>>().lock() {
         s.start_in_progress = false;
         if healthy {
-            append_desktop_log(app, "Sidecar reported healthy after startup");
             s.startup_deadline = None;
             s.running = true;
-            s.last_error = None;
-        } else if let Some(err) = s.last_error.clone() {
-            append_desktop_log(app, &format!("Sidecar startup left in degraded state: {}", err));
+            if !s.provider_degraded {
+                s.last_error = None;
+            }
+        } else if s.last_error.is_none() {
+            s.last_error = Some("Backend did not become healthy before the startup timeout.".into());
         }
     }
 
     Ok(())
 }
 
-/// Stop the sidecar process. Kills the child and signals the watchdog
-/// not to restart.
 pub async fn stop_sidecar_process(app: &tauri::AppHandle) -> Result<(), String> {
     append_desktop_log(app, "stop_sidecar_process requested");
     let state = app.state::<Mutex<SidecarState>>();
@@ -317,60 +770,72 @@ pub async fn stop_sidecar_process(app: &tauri::AppHandle) -> Result<(), String> 
     s.start_in_progress = false;
     s.startup_deadline = None;
     s.last_error = None;
+    s.port_owner = None;
+    s.auxiliary_port_owners.clear();
     if let Some(mut child) = s.child.take() {
         let _ = child.kill();
         let _ = child.wait();
     }
-    drop(s);
-    cleanup_stale_sidecars();
     Ok(())
 }
 
-/// Check if the sidecar dashboard is reachable. Always uses an explicit
-/// timeout so it can never hang the caller.
 pub async fn check_health() -> bool {
-    let url = format!("http://127.0.0.1:{}/health", DASHBOARD_PORT);
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_millis(HEALTH_TIMEOUT_MS))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    match client.get(&url).send().await {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
-    }
-}
-
-pub async fn check_operator_api() -> bool {
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_millis(HEALTH_TIMEOUT_MS))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    match client
-        .get(format!("http://127.0.0.1:{}/api/operator/brief", DASHBOARD_PORT))
-        .send()
+    fetch_health_payload()
         .await
-    {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
-    }
+        .and_then(|payload| payload.status)
+        .is_some_and(|status| status == "healthy")
 }
 
 pub async fn runtime_status(app: &tauri::AppHandle, snapshot: &SidecarState) -> SidecarRuntimeStatus {
-    let dashboard_bound = check_health().await;
-    let operator_api_ready = if dashboard_bound {
-        check_operator_api().await
+    let health_payload = fetch_health_payload().await;
+    let dashboard_bound = health_payload
+        .as_ref()
+        .and_then(|payload| payload.runtime.as_ref())
+        .and_then(|runtime| runtime.dashboard_bound)
+        .unwrap_or_else(|| health_payload.is_some());
+    let payload_status_healthy = health_payload
+        .as_ref()
+        .and_then(|payload| payload.status.as_deref())
+        .is_some_and(|status| status == "healthy");
+    let health_readiness = health_payload
+        .as_ref()
+        .and_then(|payload| payload.readiness.clone());
+    let runtime_readiness_phase = health_payload
+        .as_ref()
+        .and_then(|payload| payload.runtime.as_ref())
+        .and_then(|runtime| runtime.readiness_phase.clone());
+    let operator_api_ready = health_payload
+        .as_ref()
+        .and_then(|payload| payload.runtime.as_ref())
+        .and_then(|runtime| runtime.operator_api_ready)
+        .unwrap_or_else(|| dashboard_bound && snapshot.running);
+    let adaptive_ready = health_payload
+        .as_ref()
+        .and_then(|payload| payload.runtime.as_ref())
+        .and_then(|runtime| runtime.adaptive_ready)
+        .unwrap_or(operator_api_ready);
+    let provider_probe_ok = health_payload
+        .as_ref()
+        .and_then(|payload| payload.probes.as_ref())
+        .and_then(|probes| probes.get("primary_provider"))
+        .map(|probe| probe.ok);
+    let provider_degraded = snapshot.provider_degraded
+        || health_readiness.as_deref() == Some("degraded")
+        || provider_probe_ok == Some(false);
+    let start_in_progress = snapshot.start_in_progress && !payload_status_healthy;
+    let runtime_ready = snapshot.running && payload_status_healthy && operator_api_ready;
+    let port_owner = snapshot.port_owner.clone().or_else(|| inspect_port_owner(DASHBOARD_PORT));
+    let auxiliary_port_owners = if snapshot.auxiliary_port_owners.is_empty() {
+        inspect_auxiliary_ports()
     } else {
-        false
+        snapshot.auxiliary_port_owners.clone()
     };
-    let runtime_ready = snapshot.running && dashboard_bound && operator_api_ready;
-    let start_in_progress = snapshot.start_in_progress && !runtime_ready;
-    let process_state = if runtime_ready {
+
+    let process_state = if port_owner.as_ref().is_some_and(|owner| !owner.app_owned) {
+        "conflict"
+    } else if runtime_ready && provider_degraded {
+        "degraded"
+    } else if runtime_ready {
         "running"
     } else if start_in_progress {
         "starting"
@@ -384,42 +849,58 @@ pub async fn runtime_status(app: &tauri::AppHandle, snapshot: &SidecarState) -> 
         "offline"
     }
     .to_string();
-    let readiness_phase = if runtime_ready {
-        "ready"
+
+    let readiness_phase: String = if port_owner.as_ref().is_some_and(|owner| !owner.app_owned) {
+        "conflict".into()
+    } else if start_in_progress && snapshot.legacy_migration.as_ref().is_some_and(|migration| migration.attempted) {
+        "recovering".into()
+    } else if provider_degraded {
+        "degraded".into()
+    } else if runtime_ready {
+        "ready".into()
     } else if start_in_progress {
-        "spawning"
+        "spawning".into()
     } else if !snapshot.running {
-        "offline"
+        "offline".into()
     } else if !dashboard_bound {
-        "binding_dashboard"
+        "binding_dashboard".into()
     } else if !operator_api_ready {
-        "warming_operator_surface"
+        runtime_readiness_phase.unwrap_or_else(|| "warming_operator_surface".into())
     } else {
-        "ready"
-    }
-    .to_string();
+        "ready".into()
+    };
 
     SidecarRuntimeStatus {
         running: snapshot.running,
         port: snapshot.port,
-        healthy: dashboard_bound,
+        healthy: payload_status_healthy,
         attached_to_existing: snapshot.attached_to_existing,
         start_in_progress,
         process_state,
         readiness_phase,
         dashboard_bound,
         operator_api_ready,
-        adaptive_ready: operator_api_ready,
+        adaptive_ready,
         stale_process_cleanup: snapshot
-            .last_error
-            .as_deref()
-            .is_some_and(|msg| msg.contains("stale sidecar processes")),
+            .legacy_migration
+            .as_ref()
+            .is_some_and(|migration| migration.attempted),
         desktop_log_path: desktop_log_path(app).map(|p| p.display().to_string()),
         last_error: snapshot.last_error.clone(),
+        port_owner,
+        auxiliary_port_owners,
+        legacy_migration: snapshot.legacy_migration.clone(),
+        provider_degraded,
+        provider_detail: snapshot.provider_detail.clone().or_else(|| {
+            if provider_degraded {
+                Some("Primary provider readiness is degraded; backend stayed online.".into())
+            } else {
+                None
+            }
+        }),
     }
 }
 
-/// Wait for sidecar health endpoint to respond, with a hard timeout.
 async fn wait_for_health(timeout_secs: u64) -> Result<(), String> {
     let start = std::time::Instant::now();
     loop {
@@ -433,8 +914,6 @@ async fn wait_for_health(timeout_secs: u64) -> Result<(), String> {
     }
 }
 
-/// Spawn the watchdog task once. It polls health and respawns the sidecar
-/// if it dies (subject to a restart cap to avoid crash loops).
 fn ensure_watchdog(app: &tauri::AppHandle, s: &mut SidecarState) {
     if s.watchdog_started {
         return;
@@ -445,8 +924,7 @@ fn ensure_watchdog(app: &tauri::AppHandle, s: &mut SidecarState) {
         loop {
             tokio::time::sleep(Duration::from_secs(WATCHDOG_INTERVAL_SECS)).await;
 
-            // Snapshot state.
-            let (user_stopped, child_alive, start_in_progress) = {
+            let (user_stopped, child_alive, start_in_progress, attached_only) = {
                 let state = handle.state::<Mutex<SidecarState>>();
                 let mut s = match state.lock() {
                     Ok(g) => g,
@@ -454,43 +932,39 @@ fn ensure_watchdog(app: &tauri::AppHandle, s: &mut SidecarState) {
                 };
                 let alive = match s.child.as_mut() {
                     Some(child) => match child.try_wait() {
-                        Ok(Some(_status)) => false, // exited
-                        Ok(None) => true,           // still running
+                        Ok(Some(_)) => false,
+                        Ok(None) => true,
                         Err(_) => true,
                     },
                     None => false,
                 };
-                (s.user_stopped, alive, s.start_in_progress)
+                (
+                    s.user_stopped,
+                    alive,
+                    s.start_in_progress,
+                    s.attached_to_existing && s.child.is_none(),
+                )
             };
 
-            if user_stopped {
+            if user_stopped || start_in_progress {
                 continue;
             }
-
-            // Another task (start_sidecar_process or a previous watchdog
-            // iteration) is mid-spawn. Do not race with it — if we also
-            // spawn here, we will orphan one of the child handles and leak
-            // a sidecar process.
-            if start_in_progress {
-                continue;
-            }
-
-            let attached_only = handle
-                .state::<Mutex<SidecarState>>()
-                .lock()
-                .map(|s| s.attached_to_existing && s.child.is_none())
-                .unwrap_or(false);
 
             if attached_only {
                 let healthy = check_health().await;
                 if let Ok(mut s) = handle.state::<Mutex<SidecarState>>().lock() {
                     s.running = healthy;
+                    if !healthy {
+                        s.attached_to_existing = false;
+                        s.last_error = Some("Attached backend stopped responding; retrying supervised startup.".into());
+                    }
                 }
-                continue;
+                if healthy {
+                    continue;
+                }
             }
 
             let healthy = check_health().await;
-
             let startup_grace = handle
                 .state::<Mutex<SidecarState>>()
                 .lock()
@@ -502,7 +976,6 @@ fn ensure_watchdog(app: &tauri::AppHandle, s: &mut SidecarState) {
             }
 
             if healthy && child_alive {
-                // Healthy window — reset restart counter.
                 if let Ok(mut s) = handle.state::<Mutex<SidecarState>>().lock() {
                     s.restart_count = 0;
                     s.running = true;
@@ -512,7 +985,6 @@ fn ensure_watchdog(app: &tauri::AppHandle, s: &mut SidecarState) {
                 continue;
             }
 
-            // Either child died or health failed.
             let should_restart = {
                 let state = handle.state::<Mutex<SidecarState>>();
                 let mut s = match state.lock() {
@@ -524,10 +996,6 @@ fn ensure_watchdog(app: &tauri::AppHandle, s: &mut SidecarState) {
                     s.last_error = None;
                     false
                 } else if s.restart_count >= MAX_RESTARTS_PER_WINDOW {
-                    eprintln!(
-                        "[NeuralClaw] Sidecar restart cap reached ({}). Giving up until next user start.",
-                        MAX_RESTARTS_PER_WINDOW
-                    );
                     s.running = false;
                     s.start_in_progress = false;
                     s.last_error = Some(format!(
@@ -536,7 +1004,6 @@ fn ensure_watchdog(app: &tauri::AppHandle, s: &mut SidecarState) {
                     ));
                     false
                 } else {
-                    // Reap any dead child handle.
                     if let Some(mut child) = s.child.take() {
                         let _ = child.kill();
                         let _ = child.wait();
@@ -554,14 +1021,7 @@ fn ensure_watchdog(app: &tauri::AppHandle, s: &mut SidecarState) {
                 continue;
             }
 
-            eprintln!("[NeuralClaw] Sidecar unhealthy — restarting (attempt {}).",
-                handle.state::<Mutex<SidecarState>>()
-                    .lock()
-                    .map(|s| s.restart_count)
-                    .unwrap_or(0));
             append_desktop_log(&handle, "watchdog detected unhealthy sidecar and is restarting it");
-
-            // Backoff before respawn (exponential, capped).
             let attempt = handle
                 .state::<Mutex<SidecarState>>()
                 .lock()
@@ -570,16 +1030,8 @@ fn ensure_watchdog(app: &tauri::AppHandle, s: &mut SidecarState) {
             let backoff = Duration::from_secs((1u64 << attempt.min(5)).min(30));
             tokio::time::sleep(backoff).await;
 
-            // Sweep any orphaned PyInstaller children by name. When the
-            // bootstrap parent dies its extracted-Python child can survive
-            // and hold port 8080, which would prevent our respawn from
-            // binding and cascade into another restart.
-            cleanup_stale_sidecars();
-            tokio::time::sleep(Duration::from_millis(1500)).await;
-
-            match spawn_sidecar(&handle, WEBCHAT_PORT) {
-                Ok(child) => {
-                    append_desktop_log(&handle, "watchdog respawned sidecar process");
+            match acquire_sidecar_runtime(&handle).await {
+                Ok(StartOutcome::Spawned(child)) => {
                     if let Ok(mut s) = handle.state::<Mutex<SidecarState>>().lock() {
                         s.child = child;
                         s.running = true;
@@ -594,17 +1046,27 @@ fn ensure_watchdog(app: &tauri::AppHandle, s: &mut SidecarState) {
                         if healthy {
                             s.running = true;
                             s.startup_deadline = None;
-                            s.last_error = None;
+                            if !s.provider_degraded {
+                                s.last_error = None;
+                            }
                         }
                     }
                 }
-                Err(e) => {
-                    append_desktop_log(&handle, &format!("watchdog respawn failed: {}", e));
+                Ok(StartOutcome::AttachedExisting) => {
+                    if let Ok(mut s) = handle.state::<Mutex<SidecarState>>().lock() {
+                        s.child = None;
+                        s.running = true;
+                        s.attached_to_existing = true;
+                        s.start_in_progress = false;
+                        s.startup_deadline = None;
+                    }
+                }
+                Err(error) => {
+                    append_desktop_log(&handle, &format!("watchdog supervised restart failed: {}", error));
                     if let Ok(mut s) = handle.state::<Mutex<SidecarState>>().lock() {
                         s.start_in_progress = false;
-                        s.last_error = Some(e.clone());
+                        s.last_error = Some(error);
                     }
-                    eprintln!("[NeuralClaw] Watchdog respawn failed: {}", e);
                 }
             }
         }

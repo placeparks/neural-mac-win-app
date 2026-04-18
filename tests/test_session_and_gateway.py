@@ -900,6 +900,29 @@ async def test_gateway_readiness_failure_raises_provider_error():
 
 
 @pytest.mark.asyncio
+async def test_gateway_primary_provider_failure_only_degrades_startup():
+    config = NeuralClawConfig(
+        primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),
+    )
+    gateway = NeuralClawGateway(config)
+
+    async def memory_ok() -> bool:
+        return True
+
+    async def provider_bad() -> bool:
+        return False
+
+    gateway._health._probes = [
+        ReadinessProbe(name="memory_db", required=True, check=memory_ok),
+        ReadinessProbe(name="primary_provider", required=False, check=provider_bad),
+    ]
+
+    await gateway._run_startup_readiness()
+
+    assert gateway._startup_readiness == ReadinessState.DEGRADED
+
+
+@pytest.mark.asyncio
 async def test_gateway_health_payload_exposes_runtime_contract():
     config = NeuralClawConfig(
         primary_provider=ProviderConfig(name="local", model="qwen3.5:2b", base_url="http://localhost:11434/v1"),

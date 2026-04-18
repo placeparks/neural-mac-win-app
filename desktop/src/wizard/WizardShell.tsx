@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import { useWizardStore } from '../store/wizardStore';
 import Step1Welcome from './Step1Welcome';
 import Step2Providers from './Step2Providers';
@@ -19,10 +20,15 @@ const STEP_META = [
 ];
 
 export default function WizardShell() {
-  const { currentStep, totalSteps } = useWizardStore();
+  const { currentStep, totalSteps, goToStep } = useWizardStore();
   const StepComponent = STEPS[currentStep - 1];
   const stepMeta = STEP_META[currentStep - 1];
   const progress = Math.round((currentStep / totalSteps) * 100);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    contentRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [currentStep]);
 
   return (
     <div className="wizard-container">
@@ -49,19 +55,27 @@ export default function WizardShell() {
           </div>
           <div className="wizard-steps">
             {STEP_META.map((step, index) => (
-              <div key={step.label} className="wizard-step-item">
+              <button
+                key={step.label}
+                type="button"
+                className={`wizard-step-item ${index + 1 <= currentStep ? 'is-available' : ''} ${index + 1 === currentStep ? 'is-current' : ''}`}
+                onClick={() => {
+                  if (index + 1 <= currentStep) goToStep(index + 1);
+                }}
+                disabled={index + 1 > currentStep}
+              >
                 <div
                   className={`wizard-step-dot ${
                     index + 1 < currentStep ? 'completed' : index + 1 === currentStep ? 'active' : ''
                   }`}
                 />
                 <span>{step.label}</span>
-              </div>
+              </button>
             ))}
           </div>
         </div>
 
-        <div className="wizard-content" key={currentStep}>
+        <div ref={contentRef} className="wizard-content" key={currentStep}>
           {StepComponent && <StepComponent />}
         </div>
       </div>

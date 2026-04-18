@@ -2345,7 +2345,7 @@ dependencies = [
 
 [[package]]
 name = "neuralclaw-desktop"
-version = "1.5.7"
+version = "1.5.12"
 dependencies = [
  "dirs",
  "reqwest 0.12.28",

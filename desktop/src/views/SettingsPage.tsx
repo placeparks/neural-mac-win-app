@@ -4,7 +4,7 @@ import Header from '../components/layout/Header';
 import { ALL_PROVIDERS, DEFAULT_MODELS, PROVIDER_COLORS, type ProviderId } from '../lib/theme';
 import { APP_VERSION } from '../lib/constants';
 import { AUTONOMY_PROFILES, getAutonomyProfileById } from '../lib/autonomy';
-import { filterChatCapableModels } from '../lib/models';
+import { filterChatCapableModels, type BackendRuntimeStatus } from '../lib/models';
 import { clearPersistedStore, deletePersistedValue } from '../lib/persistence';
 import { invalidateVoiceAssistantCache } from '../lib/voiceAssistant';
 import { useAvatarState } from '../avatar/useAvatarState';
@@ -14,6 +14,7 @@ import {
   exportMemoryBackup,
   getDesktopIntegrations,
   getChannels,
+  getBackendRuntimeStatus,
   getConfig,
   getFeatures,
   getSkills,
@@ -577,7 +578,7 @@ export default function SettingsPage() {
   const [runtimeSkills, setRuntimeSkills] = useState<RuntimeSkillInfo[]>([]);
   const [integrations, setIntegrations] = useState<DesktopIntegration[]>([]);
   const [memoryStats, setMemoryStats] = useState<MemoryStats | null>(null);
-  const [backend, setBackend] = useState<{ running: boolean; port: number; healthy: boolean } | null>(null);
+  const [backend, setBackend] = useState<BackendRuntimeStatus | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const [restartRequired, setRestartRequired] = useState(false);
@@ -787,7 +788,7 @@ export default function SettingsPage() {
 
   const refreshBackendStatus = async () => {
     try {
-      const status = await invoke<{ running: boolean; port: number; healthy: boolean }>('get_backend_status');
+      const status = await getBackendRuntimeStatus();
       setBackend(status);
     } catch {
       setBackend(null);
@@ -2817,9 +2818,13 @@ export default function SettingsPage() {
                   <div>
                     <div className="settings-row-label">Backend Sidecar</div>
                     <div className="settings-row-desc">
-                      {backend?.running
-                        ? `Running on port ${backend.port}${backend.healthy ? ' and healthy.' : ', health check pending.'}`
-                        : 'Stopped'}
+                      {backend?.process_state === 'conflict'
+                        ? `Startup blocked: port ${backend.port_owner?.port || backend.port} is owned by ${backend.port_owner?.process_name || 'another process'}.`
+                        : backend?.attached_to_existing
+                          ? `Attached to an existing backend on port ${backend.port}${backend.provider_degraded ? ' with degraded provider readiness.' : '.'}`
+                          : backend?.running
+                            ? `Running on port ${backend.port}${backend.healthy ? '.' : ', health check pending.'}`
+                            : 'Stopped'}
                     </div>
                   </div>
                   <div style={{ display: 'flex', gap: 8 }}>
@@ -2832,8 +2837,54 @@ export default function SettingsPage() {
                     <button className="btn btn-danger btn-sm" onClick={() => { void invoke('stop_backend').then(refreshBackendStatus); }}>
                       Stop
                     </button>
+                    {backend?.provider_degraded ? (
+                      <button className="btn btn-secondary btn-sm" onClick={() => { setSection('Provider'); }}>
+                        Open Provider Settings
+                      </button>
+                    ) : null}
                   </div>
                 </div>
+                {backend ? (
+                  <div style={{ display: 'grid', gap: 10, marginTop: 12, fontSize: 12, color: 'var(--text-secondary)' }}>
+                    <div>
+                      State: <strong>{backend.process_state}</strong>
+                      {' '}| Readiness: <strong>{backend.readiness_phase}</strong>
+                      {' '}| Dashboard: <strong>{backend.dashboard_bound ? 'bound' : 'not bound'}</strong>
+                      {' '}| Operator API: <strong>{backend.operator_api_ready ? 'ready' : 'warming'}</strong>
+                    </div>
+                    {backend.port_owner ? (
+                      <div>
+                        Port owner: <strong>{backend.port_owner.process_name || 'unknown'}</strong>
+                        {backend.port_owner.process_path ? ` (${backend.port_owner.process_path})` : ''}
+                        {backend.port_owner.pid ? ` pid ${backend.port_owner.pid}` : ''}
+                        {' '}| App-owned: <strong>{backend.port_owner.app_owned ? 'yes' : 'no'}</strong>
+                      </div>
+                    ) : null}
+                    {backend.auxiliary_port_owners?.length ? (
+                      <div>
+                        Active backend-related ports:{' '}
+                        {backend.auxiliary_port_owners.map((owner) => `${owner.port}:${owner.process_name || 'unknown'}`).join(', ')}
+                      </div>
+                    ) : null}
+                    {backend.legacy_migration?.attempted ? (
+                      <div>
+                        Legacy startup migration ({backend.legacy_migration.platform}): removed {backend.legacy_migration.removed_entries.length}
+                        {backend.legacy_migration.disabled_entries.length ? `, disabled ${backend.legacy_migration.disabled_entries.length}` : ''}
+                        {backend.legacy_migration.errors.length ? `, errors ${backend.legacy_migration.errors.length}` : ''}
+                      </div>
+                    ) : null}
+                    {backend.provider_degraded ? (
+                      <div style={{ color: '#f59e0b' }}>
+                        Provider readiness degraded: {backend.provider_detail || 'Primary provider probe failed, but the backend stayed online.'}
+                      </div>
+                    ) : null}
+                    {backend.last_error ? (
+                      <div style={{ color: backend.process_state === 'conflict' ? '#f87171' : 'var(--text-secondary)' }}>
+                        Runtime note: {backend.last_error}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
 
               <div className="card" style={{ marginBottom: 16 }}>

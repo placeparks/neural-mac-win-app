@@ -1,6 +1,6 @@
 [package]
 name = "neuralclaw-desktop"
-version = "1.5.7"
+version = "1.5.12"
 description = "NeuralClaw Desktop — The Self-Evolving AI Assistant"
 authors = ["Mirac <mirac@cardify.dev>"]
 edition = "2021"

@@ -517,7 +517,7 @@ class NeuralClawGateway:
         self._health.register_probe(
             ReadinessProbe(
                 name="primary_provider",
-                required=True,
+                required=False,
                 check=self._ping_primary_provider,
             )
         )
