@@ -91,7 +91,7 @@ jobs:
       - name: Smoke-check Linux AppImage artifact
         if: runner.os == 'Linux'
         run: |
-          APPIMAGE=$(find desktop/src-tauri/target/release/bundle -name '*.AppImage' -print -quit)
+          APPIMAGE=$(find "desktop/src-tauri/target/${{ matrix.target }}/release/bundle" -name '*.AppImage' -print -quit)
           test -n "$APPIMAGE"
           chmod +x "$APPIMAGE"
           "$APPIMAGE" --appimage-extract >/dev/null
