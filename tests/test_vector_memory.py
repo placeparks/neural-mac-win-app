@@ -35,9 +35,8 @@ class TestVectorMemory:
 
         results = await self.mem.similarity_search("python sqlite retrieval", top_k=2)
 
-        assert len(results) == 2
+        assert len(results) >= 1
         assert results[0].ref_id == "ep1"
-        assert results[0].score >= results[1].score
 
     @pytest.mark.asyncio
     async def test_delete_by_ref(self):
@@ -49,6 +48,18 @@ class TestVectorMemory:
             ("ep1",),
         )
         assert rows[0][0] == 0
+
+    @pytest.mark.asyncio
+    async def test_similarity_search_filters_weak_tail_results(self):
+        await self.mem.embed_and_store("python async sqlite memory retrieval", "ep1")
+        await self.mem.embed_and_store("garden soil compost tomatoes", "ep2")
+        await self.mem.embed_and_store("javascript browser rendering", "ep3")
+
+        results = await self.mem.similarity_search("python sqlite retrieval", top_k=5)
+
+        assert results
+        assert results[0].ref_id == "ep1"
+        assert all(result.score >= self.mem._min_similarity_score for result in results)
 
 
 class TestVectorMemoryIntegration:

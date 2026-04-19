@@ -52,7 +52,13 @@ class CircuitBreaker:
 
     @property
     def state(self) -> CircuitState:
-        """Read-only state snapshot. Transition logic lives in ``call()``."""
+        """Read-only state snapshot with timeout-based recovery visibility."""
+        if (
+            self._state == CircuitState.OPEN
+            and self._last_failure
+            and time.monotonic() - self._last_failure >= self.config.timeout_seconds
+        ):
+            return CircuitState.HALF_OPEN
         return self._state
 
     async def call(self, coro: Awaitable[Any] | Callable[[], Awaitable[Any]]) -> Any:

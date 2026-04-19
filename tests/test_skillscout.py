@@ -124,6 +124,24 @@ async def test_rank_single_candidate_returns_it():
     assert result is c
 
 
+@pytest.mark.asyncio
+async def test_llm_rank_allows_short_rationale_after_number():
+    class StubProvider:
+        async def complete(self, **kwargs):
+            class Response:
+                content = "2\nBest maintained and most relevant."
+
+            return Response()
+
+    scout = SkillScout(forge=None, provider=StubProvider())
+    candidates = [
+        ScoutCandidate(name="one", source="pkg1", registry=SourceRegistry.PYPI),
+        ScoutCandidate(name="two", source="pkg2", registry=SourceRegistry.GITHUB),
+    ]
+    result = await scout._llm_rank(candidates, "best package")
+    assert result.name == "two"
+
+
 # ---------------------------------------------------------------------------
 # SCOUT_PATTERNS count
 # ---------------------------------------------------------------------------

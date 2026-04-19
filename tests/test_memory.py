@@ -306,3 +306,22 @@ class TestMemoryRetriever:
         await self.sem.upsert_entity("Python", "programming_language")
         ctx = await self.ret.retrieve("Tell me about Python")
         assert ctx is not None
+
+    def test_memory_prompt_budget_truncates_on_line_boundaries(self):
+        from neuralclaw.cortex.memory.retrieval import MemoryContext
+
+        ctx = MemoryContext(
+            facts=[
+                type("Fact", (), {"subject": "Python", "predicate": "is", "obj": "useful", "confidence": 0.9})(),
+                type("Fact", (), {"subject": "SQLite", "predicate": "stores", "obj": "state", "confidence": 0.8})(),
+            ],
+            episodes=[
+                type("Episode", (), {"timestamp": time.time(), "author": "user", "content": "A" * 200})(),
+                type("Episode", (), {"timestamp": time.time(), "author": "assistant", "content": "B" * 200})(),
+            ],
+        )
+
+        section = ctx.to_prompt_section(max_chars=180)
+        assert ctx.budget_hit is True
+        assert section.endswith("[Memory truncated due to budget limit]")
+        assert "\n\n[Memory truncated due to budget limit]" in section

@@ -114,6 +114,8 @@ class DeliberativeReasoner:
     """
 
     MAX_ITERATIONS = 10
+    TOOL_RECOVERY_RETRY_THRESHOLD = 2
+    TOOL_FALLBACK_THRESHOLD = 4
 
     def __init__(
         self,
@@ -147,7 +149,7 @@ class DeliberativeReasoner:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: int = 2048,
     ) -> Any:
         """Route completion through role router if available, else use default provider.
 
@@ -211,6 +213,7 @@ class DeliberativeReasoner:
         captured_media: list[dict[str, Any]] = []
         consecutive_errors = 0
         corrective_retry_used = False
+        recovery_strategy_prompted = False
         signal_context = getattr(signal, "context", {}) or {}
         request_ctx = RequestContext(
             request_id=signal.id,
@@ -334,8 +337,24 @@ class DeliberativeReasoner:
                 else:
                     consecutive_errors = 0
 
-                # If 3+ rounds of nothing but errors, force a text-only response
-                if consecutive_errors >= 3:
+                if (
+                    consecutive_errors >= self.TOOL_RECOVERY_RETRY_THRESHOLD
+                    and not recovery_strategy_prompted
+                ):
+                    recovery_strategy_prompted = True
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "The recent tool attempts mostly failed. Change strategy now: "
+                            "use fewer tool calls, prefer a different tool if one exists, "
+                            "narrow the task, or answer directly from the evidence already gathered. "
+                            "Do not repeat the same failing action."
+                        ),
+                    })
+                    continue
+
+                # If repeated rounds of nothing but errors continue, force a text-only response
+                if consecutive_errors >= self.TOOL_FALLBACK_THRESHOLD:
                     try:
                         fallback = await self._complete(
                             role="primary",  # Final user-facing answer
@@ -583,10 +602,12 @@ class DeliberativeReasoner:
         if "## Guidelines" not in system_prompt and "## Your Capabilities" not in system_prompt:
             system_prompt += (
                 "\n\n## Guidelines\n"
-                "- Be concise and helpful\n"
-                "- If you're uncertain, say so explicitly\n"
-                "- Use tools when available instead of guessing\n"
-                "- Reference memory context when relevant\n"
+                "- Answer the user's actual request directly before adding extra commentary\n"
+                "- Use tools when they materially improve accuracy or let you execute the task\n"
+                "- If a tool fails, adapt your plan instead of repeating the same failing action\n"
+                "- Reference memory context only when it is genuinely relevant\n"
+                "- State uncertainty explicitly and separate facts from inference\n"
+                "- Keep the response specific, grounded, and actionable\n"
             )
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]

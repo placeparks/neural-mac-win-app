@@ -129,6 +129,21 @@ def test_find_python_interpreter_skips_windowsapps_alias(monkeypatch):
 
     assert sandbox_mod._find_python_interpreter() == r"C:\Python313\python.exe"
 
+
+def test_find_python_interpreter_prefers_unix_locations(monkeypatch):
+    monkeypatch.setattr(sandbox_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(sandbox_mod.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sandbox_mod.sys, "executable", "/Applications/NeuralClaw.app/Contents/MacOS/neuralclaw")
+    monkeypatch.setattr(sandbox_mod.os.environ, "get", lambda key, default=None: None)
+    monkeypatch.setattr(
+        sandbox_mod.os.path,
+        "isfile",
+        lambda path: path == "/opt/homebrew/bin/python3",
+    )
+    monkeypatch.setattr(sandbox_mod.shutil, "which", lambda name: None)
+
+    assert sandbox_mod._find_python_interpreter() == "/opt/homebrew/bin/python3"
+
 def test_policy_engine_shell_execution():
     config = PolicyConfig(deny_shell_execution=True)
     engine = PolicyEngine(config)

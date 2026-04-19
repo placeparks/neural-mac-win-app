@@ -37,12 +37,16 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd desktop && chmod +x scripts/build-sidecar.sh && ./scripts/build-sidecar.sh
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
 
       - name: Build sidecar (Windows)
         if: runner.os == 'Windows'
         run: |
           cd desktop
           pwsh scripts/build-sidecar-win.ps1
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -55,6 +59,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -76,10 +82,19 @@ jobs:
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: false
+          args: --target ${{ matrix.target }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Smoke-check Linux AppImage artifact
+        if: runner.os == 'Linux'
+        run: |
+          APPIMAGE=$(find desktop/src-tauri/target/release/bundle -name '*.AppImage' -print -quit)
+          test -n "$APPIMAGE"
+          chmod +x "$APPIMAGE"
+          "$APPIMAGE" --appimage-extract >/dev/null
 
   # After all platform builds complete, ensure latest.json exists
   updater-json:
@@ -173,6 +188,22 @@ jobs:
             exit 1
           fi
 
+          MAC_PLATFORM_KEY=""
+          if [ -n "$MAC_TAR" ]; then
+            case "$MAC_TAR" in
+              *aarch64*|*arm64*)
+                MAC_PLATFORM_KEY="darwin-aarch64"
+                ;;
+              *x86_64*|*amd64*)
+                MAC_PLATFORM_KEY="darwin-x86_64"
+                ;;
+              *)
+                echo "Could not infer macOS updater architecture from asset: $MAC_TAR" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
           # Build latest.json
           cat > /tmp/latest.json << ENDJSON
           {
@@ -180,7 +211,7 @@ jobs:
             "notes": "NeuralClaw Desktop $TAG - task inbox, agent telemetry, local model failover, avatar controls, and polished desktop orchestration",
             "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "platforms": {
-              "darwin-aarch64": {
+              "$MAC_PLATFORM_KEY": {
                 "signature": "$MAC_SIG_CONTENT",
                 "url": "$BASE_URL/$MAC_TAR"
               },

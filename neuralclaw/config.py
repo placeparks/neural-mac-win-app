@@ -378,7 +378,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "rag": {
         "enabled": True,
         "db_path": str(DATA_DIR / "knowledge.db"),
-        "chunk_size": 1024,
+        "chunk_size": 1536,
         "overlap": 128,
         "retrieval_top_k": 5,
         "max_doc_size_mb": 50,
@@ -895,7 +895,7 @@ class RAGConfig:
     """RAG / Knowledge Base configuration."""
     enabled: bool = True
     db_path: str = str(DATA_DIR / "knowledge.db")
-    chunk_size: int = 1024
+    chunk_size: int = 1536
     overlap: int = 128
     retrieval_top_k: int = 5
     max_doc_size_mb: int = 50

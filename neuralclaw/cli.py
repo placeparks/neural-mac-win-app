@@ -247,7 +247,7 @@ def init() -> None:
         "  [cyan]neuralclaw chat[/cyan]             Start interactive chat\n"
         "  [cyan]neuralclaw run[/cyan]              Start gateway in foreground (auto-restarts)\n"
         "  [cyan]neuralclaw daemon[/cyan]           Run gateway detached in background\n"
-        "  [cyan]neuralclaw startup install[/cyan]  Auto-start on login (Windows)\n"
+        "  [cyan]neuralclaw startup install[/cyan]  Auto-start on login for this user\n"
         "  [cyan]neuralclaw doctor[/cyan]           Check system health",
         title="What's Next",
         style="bold",
@@ -2785,7 +2785,7 @@ def run_tests(feature: str | None, verbose: bool, coverage: bool) -> None:
     no_args_is_help=True,
 )
 def service() -> None:
-    """Manage NeuralClaw Windows service (requires admin)."""
+    """Manage the platform-native NeuralClaw background service."""
     pass
 
 
@@ -2874,13 +2874,13 @@ def service_pm2_cmd() -> None:
     no_args_is_help=True,
 )
 def startup() -> None:
-    """Auto-start NeuralClaw on login (no admin needed)."""
+    """Auto-start NeuralClaw on login using the native per-user mechanism."""
     pass
 
 
 @startup.command(name="install")
 def startup_install() -> None:
-    """Add NeuralClaw to Windows startup (runs on every login)."""
+    """Add NeuralClaw to login startup for the current user."""
     console.print(BANNER)
     from neuralclaw.service import install_startup
     install_startup()

@@ -341,12 +341,12 @@ class SkillScout:
             f"Here are the candidates:\n{candidate_descriptions}\n\n"
             f"Pick the ONE best candidate for the user's use case. "
             f"Consider: relevance, maintenance, stars, license compatibility. "
-            f"Reply with ONLY the number (e.g. '2')."
+            f"Reply with the number on the first line. You may add one short rationale on a second line."
         )
 
         response = await self._provider.complete(
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=10,
+            max_tokens=40,
             temperature=0.0,
         )
         text = response.content or ""

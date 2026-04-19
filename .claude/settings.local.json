@@ -309,7 +309,14 @@
       "Bash(cmd //c \"curl -s -o nul -w \"port8080=%%{http_code}\\\\n\" http://127.0.0.1:8080/health & curl -s -o nul -w \"port8099=%%{http_code}\\\\n\" http://127.0.0.1:8099/health & netstat -ano | findstr LISTENING | findstr \"8080 8099\"\")",
       "Bash(curl -s -o NUL -w \"8080=%{http_code}\\\\n\" http://127.0.0.1:8080/health)",
       "Bash(curl -s -o NUL -w \"8099=%{http_code}\\\\n\" http://127.0.0.1:8099/health)",
-      "Bash(cmd //c \"taskkill /F /T /IM neuralclaw-desktop.exe 2>&1 & taskkill /F /T /IM neuralclaw-sidecar.exe 2>&1\")"
+      "Bash(cmd //c \"taskkill /F /T /IM neuralclaw-desktop.exe 2>&1 & taskkill /F /T /IM neuralclaw-sidecar.exe 2>&1\")",
+      "Bash(find neuralclaw *)",
+      "Bash(grep -rn \"pass$\" neuralclaw --include=\"*.py\")",
+      "Bash(xargs wc *)",
+      "Bash(grep -rn \"except.*:\\\\s*pass$\" neuralclaw --include=\"*.py\")",
+      "Bash(xargs -I {} sh -c 'echo \"=== {} ===\"; grep -c \"print\\(\" \"{}\"')",
+      "Bash(find \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(2\\)\\\\clawnick-main\\\\desktop\\\\src-tauri\\\\src\" -name \"*.rs\" -exec grep -l \"windows\\\\|cfg\\\\|target_os\" {} \\\\;)",
+      "Bash(grep -n \"os.name == \\\\\"nt\\\\\"\\\\|os.path.join.*\\\\\\\\\\\\\\\\\\\\|expandvars.*%APPDATA%\\\\|expandvars.*%USERPROFILE%\" \"C:\\\\Users\\\\Lenovo\\\\Downloads\\\\clawnick-main \\(2\\)\\\\clawnick-main\\\\neuralclaw\\\\service.py\")"
     ]
   }
 }

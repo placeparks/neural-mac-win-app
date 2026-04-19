@@ -105,10 +105,12 @@ class KnowledgeBase:
         db_path: str,
         vector_memory: Any | None = None,
         bus: NeuralBus | None = None,
-        chunk_size: int = 1024,
+        chunk_size: int = 1536,
         overlap: int = 128,
         retrieval_top_k: int = 5,
         max_doc_size_mb: int = 50,
+        min_similarity_score: float = 0.18,
+        relative_score_floor: float = 0.7,
     ) -> None:
         self._db_path = db_path
         self._vector_memory = vector_memory
@@ -117,6 +119,8 @@ class KnowledgeBase:
         self._overlap = max(0, min(overlap, chunk_size // 2))
         self._retrieval_top_k = retrieval_top_k
         self._max_doc_bytes = max_doc_size_mb * 1024 * 1024
+        self._min_similarity_score = max(0.0, min(1.0, min_similarity_score))
+        self._relative_score_floor = max(0.0, min(1.0, relative_score_floor))
         self._db: aiosqlite.Connection | None = None
 
     # ------------------------------------------------------------------
@@ -292,7 +296,12 @@ class KnowledgeBase:
     # Search
     # ------------------------------------------------------------------
 
-    async def search(self, query: str, top_k: int = 0) -> list[KBSearchResult]:
+    async def search(
+        self,
+        query: str,
+        top_k: int = 0,
+        min_score: float | None = None,
+    ) -> list[KBSearchResult]:
         """Semantic search across all KB chunks."""
         if not self._db:
             return []
@@ -305,13 +314,14 @@ class KnowledgeBase:
         )
 
         results: list[KBSearchResult] = []
+        threshold = self._min_similarity_score if min_score is None else max(0.0, min(1.0, min_score))
         for row in rows:
             chunk_id, doc_id, chunk_index, content, emb_json, created_at = row
             stored_embedding = json.loads(emb_json)
             if not stored_embedding:
                 continue
             score = self._cosine_similarity(query_embedding, stored_embedding)
-            if score > 0:
+            if score >= threshold:
                 results.append(KBSearchResult(
                     chunk=KBChunk(
                         id=chunk_id,
@@ -324,6 +334,9 @@ class KnowledgeBase:
                 ))
 
         results.sort(key=lambda r: r.score, reverse=True)
+        if results:
+            floor = max(threshold, results[0].score * self._relative_score_floor)
+            results = [result for result in results if result.score >= floor]
         results = results[:top_k]
 
         # Attach document metadata to results

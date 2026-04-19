@@ -4,6 +4,7 @@ from neuralclaw.bus.neural_bus import NeuralBus
 from neuralclaw.cortex.perception.intake import PerceptionIntake, Signal, ChannelType
 from neuralclaw.cortex.perception.classifier import IntentClassifier, Intent
 from neuralclaw.cortex.perception.threat_screen import ThreatScreener
+from neuralclaw.cortex.reasoning.fast_path import FastPathReasoner
 
 
 class TestPerceptionIntake:
@@ -56,6 +57,46 @@ class TestIntentClassifier:
         signal = Signal(content="ok", channel_type=ChannelType.CLI, author_id="u1")
         result = await self.classifier.classify(signal)
         assert result.intent is not None
+
+    @pytest.mark.asyncio
+    async def test_llm_classify_uses_fast_role_and_returns_sub_intent(self):
+        calls = []
+
+        class StubRouter:
+            async def complete(self, **kwargs):
+                calls.append(kwargs)
+
+                class Response:
+                    content = "COMMAND"
+
+                return Response()
+
+        self.classifier.set_role_router(StubRouter())
+        signal = Signal(content="Need my schedule for tomorrow", channel_type=ChannelType.CLI, author_id="u1")
+        result = await self.classifier.classify(signal)
+        assert result.intent == Intent.COMMAND
+        assert result.sub_intent == "calendar"
+        assert calls[0]["role"] == "fast"
+        assert calls[0]["max_tokens"] == 32
+
+
+class TestFastPathReasoner:
+    def setup_method(self):
+        self.bus = NeuralBus()
+        self.reasoner = FastPathReasoner(self.bus, "NeuralClaw")
+
+    @pytest.mark.asyncio
+    async def test_social_messages_fall_through_to_llm(self):
+        signal = Signal(content="hey there", channel_type=ChannelType.CLI, author_id="u1")
+        result = await self.reasoner.try_fast_path(signal)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_time_queries_still_use_fast_path(self):
+        signal = Signal(content="what time is it", channel_type=ChannelType.CLI, author_id="u1")
+        result = await self.reasoner.try_fast_path(signal)
+        assert result is not None
+        assert result.source == "system_clock"
 
 
 class TestThreatScreener:

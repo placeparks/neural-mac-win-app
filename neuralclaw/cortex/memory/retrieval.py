@@ -27,6 +27,7 @@ except ImportError:
     KnowledgeBase = None  # type: ignore[misc,assignment]
 
 logger = logging.getLogger(__name__)
+_TRUNCATION_NOTICE = "[Memory truncated due to budget limit]"
 
 
 @dataclass
@@ -97,48 +98,71 @@ class MemoryContext:
         if self.is_empty():
             return ""
 
-        parts: list[str] = []
+        sections: list[tuple[str, list[str]]] = []
 
         if self.facts:
-            facts_str = "\n".join(
-                f"  - {f.subject} {f.predicate} {f.obj} (confidence: {f.confidence:.0%})"
-                for f in self.facts[:15]
-            )
-            parts.append(f"### Known Facts\n{facts_str}")
+            sections.append((
+                "### Known Facts",
+                [
+                    f"  - {f.subject} {f.predicate} {f.obj} (confidence: {f.confidence:.0%})"
+                    for f in self.facts[:15]
+                ],
+            ))
 
         if self.kb_results:
-            kb_str = "\n".join(
+            kb_lines = [
                 f"  - [KB:{getattr(r, 'score', 0):.2f}] {r.chunk.content[:300]}"
                 for r in self.kb_results[:5]
                 if hasattr(r, "chunk")
-            )
-            if kb_str:
-                parts.append(f"### Knowledge Base\n{kb_str}")
+            ]
+            if kb_lines:
+                sections.append(("### Knowledge Base", kb_lines))
 
         if self.episodes:
-            eps_str = "\n".join(
-                f"  - [{_ts(e.timestamp)}] {e.author}: {e.content[:200]}"
-                for e in self.episodes[:10]
-            )
-            parts.append(f"### Recent Relevant Interactions\n{eps_str}")
+            sections.append((
+                "### Recent Relevant Interactions",
+                [
+                    f"  - [{_ts(e.timestamp)}] {e.author}: {e.content[:200]}"
+                    for e in self.episodes[:10]
+                ],
+            ))
 
-        if not parts:
+        if not sections:
             return ""
 
-        result = "## Memory Context\n" + "\n\n".join(parts)
+        full_parts = [f"{title}\n" + "\n".join(lines) for title, lines in sections if lines]
+        result = "## Memory Context\n" + "\n\n".join(full_parts)
 
-        # Apply budget truncation
-        if max_chars > 0 and len(result) > max_chars:
-            self.budget_hit = True
-            self.budget_chars = len(result)
-            result = result[:max_chars]
-            # Try to truncate at a clean line boundary
-            last_newline = result.rfind("\n")
-            if last_newline > max_chars * 0.8:
-                result = result[:last_newline]
-            result += "\n\n[Memory truncated due to budget limit]"
+        if max_chars <= 0 or len(result) <= max_chars:
+            return result
 
-        return result
+        self.budget_hit = True
+        self.budget_chars = len(result)
+
+        header = "## Memory Context"
+        reserved = len(header) + len("\n\n") + len(_TRUNCATION_NOTICE)
+        built_parts: list[str] = []
+
+        for title, lines in sections:
+            if not lines:
+                continue
+            candidate_lines: list[str] = []
+            for line in lines:
+                next_block = f"{title}\n" + "\n".join(candidate_lines + [line])
+                candidate_parts = built_parts + [next_block]
+                candidate_result = header + "\n\n" + "\n\n".join(candidate_parts)
+                if len(candidate_result) + len("\n\n" + _TRUNCATION_NOTICE) > max_chars:
+                    break
+                candidate_lines.append(line)
+            if candidate_lines:
+                built_parts.append(f"{title}\n" + "\n".join(candidate_lines))
+
+        if not built_parts:
+            budget = max(0, max_chars - reserved)
+            compact = result[:budget].rstrip()
+            return f"{header}\n\n{compact}\n\n{_TRUNCATION_NOTICE}" if compact else f"{header}\n\n{_TRUNCATION_NOTICE}"
+
+        return header + "\n\n" + "\n\n".join(built_parts) + "\n\n" + _TRUNCATION_NOTICE
 
     def provenance_summary(self, limit: int = 6) -> list[dict[str, Any]]:
         return self.provenance[:limit]
@@ -180,7 +204,7 @@ class MemoryRetriever:
         knowledge_base: Any | None = None,
         max_episodes: int = 10,
         max_facts: int = 10,
-        max_memory_chars: int = 4000,
+        max_memory_chars: int = 8000,
         vector_top_k: int = 10,
         kb_top_k: int = 5,
     ) -> None:

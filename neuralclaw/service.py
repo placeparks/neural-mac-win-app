@@ -22,7 +22,9 @@ from collections import deque
 import json
 import logging
 import os
+import plistlib
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -50,6 +52,11 @@ LOG_FILE = DATA_DIR / "gateway.log"
 STATUS_FILE = DATA_DIR / "gateway.status"
 SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
 SYSTEMD_UNIT_FILE = SYSTEMD_USER_DIR / "neuralclaw.service"
+LAUNCH_AGENT_LABEL = "dev.cardify.neuralclaw"
+LAUNCH_AGENTS_DIR = Path.home() / "Library" / "LaunchAgents"
+LAUNCH_AGENT_FILE = LAUNCH_AGENTS_DIR / f"{LAUNCH_AGENT_LABEL}.plist"
+XDG_AUTOSTART_DIR = Path.home() / ".config" / "autostart"
+XDG_AUTOSTART_FILE = XDG_AUTOSTART_DIR / "neuralclaw.desktop"
 PM2_ECOSYSTEM_FILE = DATA_DIR / "ecosystem.config.js"
 
 
@@ -70,6 +77,23 @@ def _systemctl_available() -> bool:
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
+
+
+def _launchctl_available() -> bool:
+    return sys.platform == "darwin" and bool(shutil.which("launchctl"))
+
+
+def _launchctl_domain() -> str:
+    uid = getattr(os, "getuid", lambda: None)()
+    return f"gui/{uid}" if uid is not None else "gui/0"
+
+
+def _run_launchctl(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["launchctl", *args],
+        capture_output=True,
+        text=True,
+    )
 
 
 class SupervisedGateway:
@@ -452,6 +476,38 @@ WantedBy=default.target
 """
 
 
+def render_launch_agent_plist() -> str:
+    payload = {
+        "Label": LAUNCH_AGENT_LABEL,
+        "ProgramArguments": [sys.executable, "-m", "neuralclaw.service", "--supervised"],
+        "WorkingDirectory": str(DATA_DIR),
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "StandardOutPath": str(LOG_FILE),
+        "StandardErrorPath": str(LOG_FILE),
+        "EnvironmentVariables": {
+            "NEURALCLAW_HOME": str(DATA_DIR),
+        },
+    }
+    return plistlib.dumps(payload, fmt=plistlib.FMT_XML).decode("utf-8")
+
+
+def render_xdg_autostart_entry() -> str:
+    python = sys.executable.replace("\\", "\\\\").replace(" ", "\\ ")
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Version=1.0\n"
+        "Name=NeuralClaw\n"
+        "Comment=NeuralClaw Agent Gateway\n"
+        f"Exec={python} -m neuralclaw.service --daemon\n"
+        f"Path={DATA_DIR}\n"
+        "Terminal=false\n"
+        "X-GNOME-Autostart-enabled=true\n"
+        "Categories=Utility;\n"
+    )
+
+
 def render_pm2_ecosystem() -> str:
     python = sys.executable.replace("\\", "\\\\")
     home = str(Path.home()).replace("\\", "\\\\")
@@ -478,6 +534,19 @@ def install_service() -> tuple[bool, str]:
     if sys.platform == "win32":
         ok = install_windows_service()
         return ok, "Windows service installed." if ok else "Windows service install failed."
+    if sys.platform == "darwin":
+        _ensure_data_dir()
+        LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+        LAUNCH_AGENT_FILE.write_text(render_launch_agent_plist(), encoding="utf-8")
+        if _launchctl_available():
+            _run_launchctl(["bootout", _launchctl_domain(), str(LAUNCH_AGENT_FILE)])
+            result = _run_launchctl(["bootstrap", _launchctl_domain(), str(LAUNCH_AGENT_FILE)])
+            if result.returncode == 0:
+                _run_launchctl(["enable", f"{_launchctl_domain()}/{LAUNCH_AGENT_LABEL}"])
+                return True, f"Installed LaunchAgent at {LAUNCH_AGENT_FILE}."
+            details = result.stderr.strip() or result.stdout.strip()
+            return False, details or f"Failed to load LaunchAgent {LAUNCH_AGENT_FILE}."
+        return True, f"Wrote LaunchAgent to {LAUNCH_AGENT_FILE}. Load it with launchctl bootstrap {_launchctl_domain()} {LAUNCH_AGENT_FILE}."
 
     SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
     SYSTEMD_UNIT_FILE.write_text(render_systemd_unit(), encoding="utf-8")
@@ -492,6 +561,12 @@ def uninstall_service() -> tuple[bool, str]:
     if sys.platform == "win32":
         ok = uninstall_windows_service()
         return ok, "Windows service removed." if ok else "Windows service uninstall failed."
+    if sys.platform == "darwin":
+        if _launchctl_available():
+            _run_launchctl(["bootout", _launchctl_domain(), str(LAUNCH_AGENT_FILE)])
+            _run_launchctl(["disable", f"{_launchctl_domain()}/{LAUNCH_AGENT_LABEL}"])
+        LAUNCH_AGENT_FILE.unlink(missing_ok=True)
+        return True, f"Removed {LAUNCH_AGENT_FILE}."
 
     if _systemctl_available():
         subprocess.run(["systemctl", "--user", "disable", "--now", "neuralclaw"], capture_output=True, text=True)
@@ -504,6 +579,24 @@ def start_service() -> tuple[bool, str]:
     if sys.platform == "win32":
         ok = start_windows_service()
         return ok, "Service started." if ok else "Service start failed."
+    if sys.platform == "darwin":
+        if not LAUNCH_AGENT_FILE.exists():
+            ok, message = install_service()
+            if not ok:
+                return ok, message
+        if _launchctl_available():
+            result = _run_launchctl(["bootstrap", _launchctl_domain(), str(LAUNCH_AGENT_FILE)])
+            if result.returncode == 0:
+                _run_launchctl(["enable", f"{_launchctl_domain()}/{LAUNCH_AGENT_LABEL}"])
+                return True, "Started LaunchAgent."
+            details = result.stderr.strip() or result.stdout.strip()
+            if "already bootstrapped" in details.lower():
+                return True, "LaunchAgent already running."
+            print_result = _run_launchctl(["kickstart", "-k", f"{_launchctl_domain()}/{LAUNCH_AGENT_LABEL}"])
+            details = print_result.stderr.strip() or print_result.stdout.strip()
+            return print_result.returncode == 0, details or "Started LaunchAgent."
+        pid = start_daemon()
+        return True, f"Started daemon (PID {pid})."
     if _systemctl_available():
         result = subprocess.run(["systemctl", "--user", "start", "neuralclaw"], capture_output=True, text=True)
         return result.returncode == 0, result.stderr.strip() or result.stdout.strip() or "Started user service."
@@ -515,6 +608,14 @@ def stop_service() -> tuple[bool, str]:
     if sys.platform == "win32":
         ok = stop_windows_service()
         return ok, "Service stopped." if ok else "Service stop failed."
+    if sys.platform == "darwin":
+        if _launchctl_available() and LAUNCH_AGENT_FILE.exists():
+            result = _run_launchctl(["bootout", _launchctl_domain(), str(LAUNCH_AGENT_FILE)])
+            details = result.stderr.strip() or result.stdout.strip()
+            if result.returncode == 0 or "no such process" in details.lower():
+                return True, details or "Stopped LaunchAgent."
+            return False, details or "LaunchAgent stop failed."
+        return stop_daemon(), "Stopped daemon."
     if _systemctl_available():
         result = subprocess.run(["systemctl", "--user", "stop", "neuralclaw"], capture_output=True, text=True)
         return result.returncode == 0, result.stderr.strip() or result.stdout.strip() or "Stopped user service."
@@ -526,6 +627,20 @@ def restart_service() -> tuple[bool, str]:
         stopped = stop_windows_service()
         started = start_windows_service()
         return stopped and started, "Service restarted." if stopped and started else "Service restart failed."
+    if sys.platform == "darwin":
+        if not LAUNCH_AGENT_FILE.exists():
+            return start_service()
+        if _launchctl_available():
+            _run_launchctl(["bootout", _launchctl_domain(), str(LAUNCH_AGENT_FILE)])
+            result = _run_launchctl(["bootstrap", _launchctl_domain(), str(LAUNCH_AGENT_FILE)])
+            if result.returncode == 0:
+                _run_launchctl(["kickstart", "-k", f"{_launchctl_domain()}/{LAUNCH_AGENT_LABEL}"])
+                return True, "Restarted LaunchAgent."
+            details = result.stderr.strip() or result.stdout.strip()
+            return False, details or "LaunchAgent restart failed."
+        stop_daemon()
+        pid = start_daemon()
+        return True, f"Restarted daemon (PID {pid})."
     if _systemctl_available():
         result = subprocess.run(["systemctl", "--user", "restart", "neuralclaw"], capture_output=True, text=True)
         return result.returncode == 0, result.stderr.strip() or result.stdout.strip() or "Restarted user service."
@@ -545,6 +660,11 @@ def service_logs(lines: int = 100, follow: bool = False) -> subprocess.Completed
         cmd = ["journalctl", "--user", "-u", "neuralclaw", "-n", str(lines)]
         if follow:
             cmd.append("-f")
+        return subprocess.run(cmd, text=True)
+    if sys.platform == "darwin" and LOG_FILE.exists():
+        cmd = ["tail", "-n", str(lines), str(LOG_FILE)]
+        if follow:
+            cmd.insert(1, "-f")
         return subprocess.run(cmd, text=True)
     return None
 
@@ -787,6 +907,24 @@ def service_status() -> str:
         if SYSTEMD_UNIT_FILE.exists():
             return "installed"
         return "not_installed"
+    if sys.platform == "darwin":
+        if _launchctl_available():
+            result = _run_launchctl(["print", f"{_launchctl_domain()}/{LAUNCH_AGENT_LABEL}"])
+            details = (result.stdout or "") + (result.stderr or "")
+            if result.returncode == 0:
+                return "running"
+            if LAUNCH_AGENT_FILE.exists():
+                return "stopped" if "could not find service" in details.lower() else "installed"
+            return "not_installed"
+        if LAUNCH_AGENT_FILE.exists():
+            pid = _read_pid()
+            if pid and _is_running(pid):
+                return "running"
+            return "installed"
+        pid = _read_pid()
+        if pid and _is_running(pid):
+            return "running"
+        return "not_installed"
 
     pid = _read_pid()
     if pid and _is_running(pid):
@@ -810,10 +948,21 @@ def _find_nssm() -> str | None:
 # ---------------------------------------------------------------------------
 
 def install_startup() -> bool:
-    """Add NeuralClaw to Windows startup via Task Scheduler (no admin needed)."""
+    """Add NeuralClaw to session startup using the native per-user mechanism."""
+    if sys.platform == "darwin":
+        ok, message = install_service()
+        print(message)
+        return ok
     if sys.platform != "win32":
-        print("Startup install is Windows-only.")
-        return False
+        if _systemctl_available():
+            ok, message = install_service()
+            print(message)
+            return ok
+        XDG_AUTOSTART_DIR.mkdir(parents=True, exist_ok=True)
+        XDG_AUTOSTART_FILE.write_text(render_xdg_autostart_entry(), encoding="utf-8")
+        print(f"Wrote desktop autostart entry to {XDG_AUTOSTART_FILE}.")
+        print("NeuralClaw will now start automatically on login.")
+        return True
 
     python = sys.executable
     script = Path(__file__).resolve()
@@ -893,6 +1042,24 @@ def _install_startup_shortcut() -> bool:
 
 def uninstall_startup() -> bool:
     """Remove NeuralClaw from startup."""
+    if sys.platform == "darwin":
+        ok, message = uninstall_service()
+        print(message)
+        return ok
+    if sys.platform != "win32":
+        removed = False
+        if SYSTEMD_UNIT_FILE.exists() or _systemctl_available():
+            ok, message = uninstall_service()
+            print(message)
+            removed = ok or removed
+        if XDG_AUTOSTART_FILE.exists():
+            XDG_AUTOSTART_FILE.unlink()
+            print(f"Removed {XDG_AUTOSTART_FILE}.")
+            removed = True
+        if not removed:
+            print("NeuralClaw was not in startup.")
+        return removed
+
     removed = False
 
     # Remove Task Scheduler task

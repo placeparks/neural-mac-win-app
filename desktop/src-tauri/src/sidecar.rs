@@ -466,26 +466,40 @@ fn sidecar_binary_names() -> Vec<String> {
     names
 }
 
-#[allow(dead_code)]
-fn resolve_sidecar_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let binary_names = sidecar_binary_names();
+fn sidecar_candidate_paths_for_names(
+    binary_names: &[String],
+    current_exe: Option<PathBuf>,
+    resource_dir: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
-    if let Ok(current_exe) = std::env::current_exe() {
+    if let Some(current_exe) = current_exe {
         if let Some(parent) = current_exe.parent() {
-            for binary_name in &binary_names {
+            for binary_name in binary_names {
                 candidates.push(parent.join(binary_name));
                 candidates.push(parent.join("sidecar").join(binary_name));
             }
         }
     }
 
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        for binary_name in &binary_names {
+    if let Some(resource_dir) = resource_dir {
+        for binary_name in binary_names {
             candidates.push(resource_dir.join(binary_name));
             candidates.push(resource_dir.join("sidecar").join(binary_name));
         }
     }
+
+    candidates
+}
+
+#[allow(dead_code)]
+fn resolve_sidecar_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let binary_names = sidecar_binary_names();
+    let candidates = sidecar_candidate_paths_for_names(
+        &binary_names,
+        std::env::current_exe().ok(),
+        app.path().resource_dir().ok(),
+    );
 
     candidates
         .into_iter()
@@ -537,6 +551,33 @@ fn spawn_sidecar(app: &tauri::AppHandle, port: u16) -> Result<Option<Child>, Str
             )
         })?;
         Ok(Some(child))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sidecar_candidate_paths_for_names;
+    use std::path::PathBuf;
+
+    #[test]
+    fn macos_bundle_candidates_include_resources_sidecar_path() {
+        let binary_names = vec!["neuralclaw-sidecar-aarch64-apple-darwin".to_string()];
+        let current_exe = Some(PathBuf::from(
+            "/Applications/NeuralClaw.app/Contents/MacOS/NeuralClaw",
+        ));
+        let resource_dir = Some(PathBuf::from(
+            "/Applications/NeuralClaw.app/Contents/Resources",
+        ));
+
+        let candidates =
+            sidecar_candidate_paths_for_names(&binary_names, current_exe, resource_dir);
+
+        assert!(candidates.contains(&PathBuf::from(
+            "/Applications/NeuralClaw.app/Contents/MacOS/neuralclaw-sidecar-aarch64-apple-darwin",
+        )));
+        assert!(candidates.contains(&PathBuf::from(
+            "/Applications/NeuralClaw.app/Contents/Resources/sidecar/neuralclaw-sidecar-aarch64-apple-darwin",
+        )));
     }
 }
 

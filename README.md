@@ -1,6 +1,6 @@
 # NeuralClaw
 
-Version target: `1.5.7`
+Version target: `1.5.15`
 
 NeuralClaw is a desktop-first agent platform built around a Python cognitive gateway and a native Tauri desktop client. It combines local and hosted model routing, durable task delegation, integrations, channels, web research, knowledge retrieval, and a floating assistant/avatar experience.
 

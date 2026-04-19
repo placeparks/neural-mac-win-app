@@ -120,6 +120,24 @@ class TestSearch:
             await kb.close()
         _run(go())
 
+    def test_search_filters_weak_matches(self, db_path):
+        async def go():
+            kb = KnowledgeBase(db_path=db_path, chunk_size=200, overlap=20)
+            await kb.initialize()
+            await kb.ingest_text(
+                "Python async workflows, sqlite storage, and retrieval pipelines.",
+                title="python_doc",
+            )
+            await kb.ingest_text(
+                "Tomatoes grow best in warm soil with compost and regular watering.",
+                title="gardening_doc",
+            )
+            results = await kb.search("python retrieval", top_k=5)
+            assert results
+            assert all(result.score >= kb._min_similarity_score for result in results)
+            await kb.close()
+        _run(go())
+
 
 class TestDocumentManagement:
     def test_list_documents(self, db_path):

@@ -45,21 +45,42 @@ def _find_python_interpreter() -> str:
     if not getattr(sys, "frozen", False):
         return sys.executable
 
-    # Frozen: look for a real Python on PATH
-    for candidate in (
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python313\python.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python312\python.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python311\python.exe"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python310\python.exe"),
-        r"C:\Python313\python.exe",
-        r"C:\Python312\python.exe",
-        r"C:\Python311\python.exe",
-        r"C:\Python310\python.exe",
-    ):
+    # Frozen: look for a real Python before falling back to PATH lookup.
+    candidates: list[str] = []
+    if sys.platform == "win32":
+        candidates.extend(
+            (
+                os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python313\python.exe"),
+                os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python312\python.exe"),
+                os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python311\python.exe"),
+                os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python310\python.exe"),
+                r"C:\Python313\python.exe",
+                r"C:\Python312\python.exe",
+                r"C:\Python311\python.exe",
+                r"C:\Python310\python.exe",
+            )
+        )
+    else:
+        pyenv_root = os.environ.get("PYENV_ROOT")
+        if pyenv_root:
+            candidates.append(str(Path(pyenv_root).expanduser() / "shims" / "python3"))
+            candidates.append(str(Path(pyenv_root).expanduser() / "shims" / "python"))
+        candidates.extend(
+            (
+                str(Path.home() / ".pyenv" / "shims" / "python3"),
+                str(Path.home() / ".pyenv" / "shims" / "python"),
+                "/opt/homebrew/bin/python3",
+                "/usr/local/bin/python3",
+                "/usr/bin/python3",
+                "/opt/local/bin/python3",
+            )
+        )
+
+    for candidate in candidates:
         if os.path.isfile(candidate):
             return candidate
 
-    # Last resort — try the standard Windows install location
+    # Last resort — try PATH lookup.
     for name in ("python3", "python"):
         found = shutil.which(name)
         if found and not _is_windows_store_alias(found):

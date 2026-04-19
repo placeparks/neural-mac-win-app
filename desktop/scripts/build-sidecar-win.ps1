@@ -2,7 +2,15 @@
 # Run from: desktop/ directory
 
 $ErrorActionPreference = "Stop"
-$suffix = "x86_64-pc-windows-msvc"
+$suffix = if ($env:TARGET_TRIPLE) {
+  $env:TARGET_TRIPLE
+} elseif ($env:TAURI_TARGET_TRIPLE) {
+  $env:TAURI_TARGET_TRIPLE
+} elseif ($env:CARGO_BUILD_TARGET) {
+  $env:CARGO_BUILD_TARGET
+} else {
+  "x86_64-pc-windows-msvc"
+}
 $specPath = "neuralclaw-sidecar-$suffix.spec"
 $sidecarDir = "desktop/src-tauri/sidecar"
 $builtSidecar = "dist/neuralclaw-sidecar-$suffix.exe"

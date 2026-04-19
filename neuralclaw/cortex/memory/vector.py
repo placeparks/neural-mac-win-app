@@ -64,6 +64,8 @@ class VectorMemory:
         dimension: int = 768,
         bus: NeuralBus | None = None,
         ollama_base_url: str = "",
+        min_similarity_score: float = 0.18,
+        relative_score_floor: float = 0.7,
     ) -> None:
         self._db_path = db_path
         self._embedding_provider = embedding_provider
@@ -72,6 +74,8 @@ class VectorMemory:
         self._bus = bus
         self._db: aiosqlite.Connection | None = None
         self._ollama_base_url = ollama_base_url
+        self._min_similarity_score = max(0.0, min(1.0, min_similarity_score))
+        self._relative_score_floor = max(0.0, min(1.0, relative_score_floor))
 
     async def initialize(self) -> None:
         """Initialize the vector store schema."""
@@ -155,6 +159,7 @@ class VectorMemory:
         top_k: int = 10,
         source_filter: str | None = None,
         scan_limit: int = 5000,
+        min_score: float | None = None,
     ) -> list[VectorResult]:
         """Search for similar vectors using cosine similarity.
 
@@ -181,10 +186,11 @@ class VectorMemory:
             rows = await self._db.execute_fetchall(sql, tuple(params))
 
             results: list[VectorResult] = []
+            threshold = self._min_similarity_score if min_score is None else max(0.0, min(1.0, min_score))
             for ref_id, source, embedding_json, preview in rows:
                 stored_embedding = self._coerce_dimension(json.loads(embedding_json))
                 score = self._cosine_similarity(query_embedding, stored_embedding)
-                if score > 0:
+                if score >= threshold:
                     results.append(
                         VectorResult(
                             ref_id=ref_id,
@@ -195,6 +201,9 @@ class VectorMemory:
                     )
 
             results.sort(key=lambda item: item.score, reverse=True)
+            if results:
+                floor = max(threshold, results[0].score * self._relative_score_floor)
+                results = [item for item in results if item.score >= floor]
 
             if self._bus:
                 await self._bus.publish(

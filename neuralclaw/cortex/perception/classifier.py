@@ -81,6 +81,8 @@ _NOISE_PATTERNS = [
 _LLM_CLASSIFY_PROMPT = (
     "Classify the user message into exactly ONE intent: "
     "COMMAND, QUESTION, CONTINUATION, EMOTIONAL, or NOISE.\n"
+    "A request to do something, inspect something, open something, schedule something, "
+    "or change something is COMMAND even if phrased politely or indirectly.\n"
     "Respond with ONLY the intent word, nothing else.\n\n"
     "User message: {text}"
 )
@@ -177,30 +179,30 @@ class IntentClassifier:
             return "web_search"
         if any(w in lower for w in ("remind", "reminder", "alarm")):
             return "reminder"
-        if any(w in lower for w in ("calendar", "schedule", "event", "meeting")):
+        if any(w in lower for w in ("calendar", "schedule", "event", "meeting", "agenda", "appointment")):
             return "calendar"
-        if any(w in lower for w in ("file", "read", "write", "save", "open")):
+        if any(w in lower for w in ("file", "read", "write", "save", "open", "folder", "document")):
             return "file_ops"
-        if any(w in lower for w in ("run", "execute", "code", "script")):
+        if any(w in lower for w in ("run", "execute", "code", "script", "program", "terminal", "command")):
             return "code_exec"
         return None
 
     async def _llm_classify(self, text: str) -> IntentResult | None:
-        """Use micro model for intent classification on ambiguous messages."""
+        """Use a fast model for intent classification on ambiguous messages."""
         try:
             response = await self._role_router.complete(
-                role="micro",
+                role="fast",
                 messages=[{
                     "role": "user",
                     "content": _LLM_CLASSIFY_PROMPT.format(text=text[:500]),
                 }],
                 temperature=0.0,
-                max_tokens=16,
+                max_tokens=32,
             )
-            label = (response.content or "").strip().upper()
+            label = (response.content or "").strip().splitlines()[0].strip().upper()
             intent = _INTENT_MAP.get(label)
             if intent:
-                return IntentResult(intent, confidence=0.70)
+                return IntentResult(intent, confidence=0.78, sub_intent=self._extract_sub_intent(text))
         except Exception:
             pass
         return None
